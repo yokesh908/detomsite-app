@@ -305,10 +305,11 @@ function Layout({ children }: { children: React.ReactNode }) {
 
   /* A nav item is active on its own page and every page below it, so
      /shop/:id lights up "Shops" and /order/:id lights up "Orders". */
-  const isActive = (p: string) => path === p || (p !== '/dashboard' && path.startsWith(p)) || (p === '/orders' && path.startsWith('/order')) || (p === '/shops' && path.startsWith('/shop'))
+  const onShops = path === '/' || path.startsWith('/shop')
+  const isActive = (p: string) => (p === '/shops' && onShops) || (p !== '/dashboard' && path.startsWith(p)) || (p === '/orders' && path.startsWith('/order'))
   const nav = [
-    { p: '/dashboard', l: 'Dashboard', i: IconH.home },
     { p: '/shops', l: 'Shops', i: IconH.store },
+    { p: '/dashboard', l: 'Dashboard', i: IconH.home },
     { p: '/orders', l: 'Orders', i: IconH.package },
     { p: '/cart', l: `Cart${cartCount ? ` (${cartCount})` : ''}`, i: IconH.cart },
     { p: '/reviews', l: 'Reviews', i: IconH.star },
@@ -320,7 +321,7 @@ function Layout({ children }: { children: React.ReactNode }) {
     <div className="min-h-screen bg-gray-50">
       <nav className="sticky top-0 z-50 border-b border-gray-200 bg-white/90 backdrop-blur-lg">
         <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-3">
-          <Link to="/dashboard" className="flex items-center gap-2">
+          <Link to="/shops" className="flex items-center gap-2">
             <span className="flex h-9 w-9 items-center justify-center rounded-btn bg-primary text-sm font-black text-gold">D</span>
             <span className="text-lg font-black text-primary-dark max-sm:hidden">Student Portal</span>
           </Link>
@@ -338,7 +339,7 @@ function Layout({ children }: { children: React.ReactNode }) {
                 <h3 className="mb-2 px-1 text-sm font-bold text-primary">Notifications</h3>
                 <div className="max-h-72 space-y-1 overflow-y-auto">
                   {notifs.map(n => (
-                    <Link key={n.id} to={n.order_id ? `/order/${n.order_id}` : '/dashboard'} onClick={() => setNotifOpen(false)} className="block rounded-btn bg-primary-light/30 px-3 py-2.5 text-sm hover:bg-primary-light">
+                    <Link key={n.id} to={n.order_id ? `/order/${n.order_id}` : '/shops'} onClick={() => setNotifOpen(false)} className="block rounded-btn bg-primary-light/30 px-3 py-2.5 text-sm hover:bg-primary-light">
                       <p className="font-semibold text-primary">{n.title}</p>
                       <p className="text-xs text-gray-500">{n.message}</p>
                     </Link>
@@ -452,7 +453,7 @@ function Login() {
       const res = await api.post('/users/login', { username, password })
       localStorage.setItem('access_token', res.data.access_token)
       localStorage.setItem('user_data', JSON.stringify(res.data.user))
-      navigate('/dashboard')
+      navigate('/shops')
     } catch (err: any) { setErr(err?.response?.data?.detail || 'Login failed') }
     finally { setLoading(false) }
   }
@@ -717,24 +718,26 @@ function ShopsPage() {
     return false
   })
   if (loading) return <div className="flex items-center justify-center py-20 text-gray-400">Loading...</div>
+  const user = JSON.parse(localStorage.getItem('user_data') || '{}')
   return (
-    <div className="mx-auto max-w-7xl px-4 py-6">
-      <div className="mb-6">
-        <h1 className="text-2xl font-bold text-primary-dark">Restaurants & Cafes</h1>
-        <div className="relative mt-3 w-full max-w-md">
+    <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 sm:py-8">
+      <div className="mb-8">
+        <h1 className="text-2xl font-bold text-primary-dark">Shops on Campus</h1>
+        <p className="mt-1 text-sm text-gray-500">{user.name ? `Hi ${user.name.split(' ')[0]}, ` : ''}order from a campus shop — live menu, fast delivery.</p>
+        <div className="relative mt-4 w-full max-w-md">
           <span className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400">{IconH.search({ className: 'h-4 w-4' })}</span>
-          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search shops..." className="w-full rounded-btn border-2 border-gray-200 py-3 pl-10 pr-4 text-sm outline-none transition-all focus:border-primary-light/200 focus:shadow-card" />
+          <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search shops, or food like 'dosa'..." className="w-full rounded-btn border-2 border-gray-200 py-3 pl-10 pr-4 text-sm outline-none transition-all focus:border-primary-light/200 focus:shadow-card" />
         </div>
       </div>
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+      <div className="grid gap-4 sm:grid-cols-2 sm:gap-5 lg:grid-cols-3">
         {filtered.map(s => (
-          <Link key={s.id} to={`/shop/${s.id}`} className="group rounded-card border bg-white p-5 shadow-sm transition-all hover:-translate-y-1 hover:shadow-lg">
+          <Link key={s.id} to={`/shop/${s.id}`} className="group rounded-card border bg-white p-5 shadow-sm transition-all hover:-translate-y-1 hover:shadow-lg sm:p-6">
             {/* min-w-0 + truncate keep long shop names from overflowing the card */}
             <div className="flex items-start justify-between gap-2">
               <div className="min-w-0"><h3 className="truncate font-bold text-primary-dark text-lg" title={s.name}>{s.name}</h3><p className="truncate text-sm text-gray-500">{s.category}</p></div>
               <span className="flex shrink-0 items-center gap-1 rounded-pill bg-primary-light/30 px-2.5 py-1 text-xs font-bold text-primary">{IconH.star({ className: 'h-3.5 w-3.5 text-gold-dark' })}{s.rating.toFixed(1)}</span>
             </div>
-            <p className="mt-2 text-sm text-gray-500 line-clamp-2">{s.description}</p>
+            <p className="mt-2.5 line-clamp-2 text-sm text-gray-500">{s.description}</p>
             <div className="mt-4 flex items-center justify-between text-sm">
               <span className="font-semibold text-primary">{s.opening_time} - {s.closing_time}</span>
               <div className="flex items-center gap-2">
@@ -746,6 +749,11 @@ function ShopsPage() {
             </div>
           </Link>
         ))}
+        {filtered.length === 0 && (
+          <div className="sm:col-span-2 lg:col-span-3 rounded-btn border border-dashed border-gray-300 bg-white p-10 text-center">
+            <p className="text-sm text-gray-500">No shops match "{search}". Try a different name — or check back later.</p>
+          </div>
+        )}
       </div>
     </div>
   )
@@ -1534,6 +1542,6 @@ export default function App() {
 
 function NavigateToLogin() {
   const navigate = useNavigate(); const user = localStorage.getItem('access_token')
-  useEffect(() => { navigate(user ? '/dashboard' : '/login') }, [])
+  useEffect(() => { navigate(user ? '/shops' : '/login') }, [])
   return null
 }
