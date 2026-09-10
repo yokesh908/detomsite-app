@@ -8,6 +8,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 from contextlib import asynccontextmanager
 from app.core.config import settings
+from app.core.uploads import get_uploads_dir
 import asyncio
 import logging
 import os
@@ -171,7 +172,10 @@ app = FastAPI(
 
 # ─── Uploaded files (payment screenshots) ───
 # Served under /uploads so the student portal can show the screenshot back.
-UPLOADS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "uploads", "payments")
+# Payment screenshots are served at /uploads/payments/<name>. The backing
+# directory lives in the platform's writable temp dir (never the app tree —
+# serverless filesystems are read-only there).
+UPLOADS_DIR = get_uploads_dir()
 os.makedirs(UPLOADS_DIR, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=UPLOADS_DIR), name="uploads")
 

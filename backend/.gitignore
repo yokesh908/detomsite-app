@@ -38,3 +38,4 @@ htmlcov/
 .vagrant/
 Vagrantfile
 .vercel
+.env*

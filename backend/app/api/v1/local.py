@@ -11,6 +11,7 @@ import shutil
 
 from app.core.config import settings
 from app.core import local_mongo_db
+from app.core.uploads import ensure_uploads_dir
 from app.core.store import store as db
 from app.core.user_store import persist_user_profile
 from app.core.order_slots import (
@@ -794,27 +795,54 @@ def _extract_utr(text: str) -> str:
     return ""
 
 
-async def _confirm_order_via_utr(utr: str, phone: str = "", raw_text: str = "") -> dict | None:
+async def _get_payment_by_utr(utr: str):
+    if _use_mongo():
+        return await local_mongo_db.get_payment_by_utr(utr)
+    return await _db(db.get_payment_by_utr, utr)
+
+
+async def _get_order(order_id: str):
+    if _use_mongo():
+        return await local_mongo_db.get_order(order_id)
+    return await _db(db.get_order, order_id)
+
+
+async def _bank_sms_seen(utr: str) -> bool:
+    """Did a bank credit SMS containing this UTR already arrive? """
+    if _use_mongo():
+        return bool(await local_mongo_db.bank_sms_seen(utr))
+    return bool(await _db(db.bank_sms_seen, utr))
+
+
+async def _confirm_order_via_utr(utr: str, phone: str = "", raw_text: str = "", bank_sms_arrived: bool = False) -> dict | None:
     """Auto-confirm an order when a bank SMS UTR matches the student's UTR.
 
     The student pays via UPI and pastes their UTR on the order page. The shop's
     bank sends a credit SMS containing the same UTR. When both are present the
     payment is provably received → order becomes **Confirmed**. Returns the
     updated order, or ``None`` when there is no pending match yet.
+
+    ``bank_sms_arrived`` must be True when the caller IS the bank SMS handler
+    (``/sms/incoming``). Every other caller (student UTR entry via
+    ``/payments/utr`` or screenshot upload) triggers a confirmation only if the
+    bank SMS with this UTR was already logged — otherwise a student could type a
+    made-up UTR and confirm their order without paying.
     """
     try:
-        if _use_mongo():
-            payment = await local_mongo_db.get_payment_by_utr(utr)
-        else:
-            payment = await _db(db.get_payment_by_utr, utr)
+        payment = await _get_payment_by_utr(utr)
         if not payment:
             return None
-        order = await local_mongo_db.get_order(payment["order_id"]) if _use_mongo() else await _db(db.get_order, payment["order_id"])
+        order = await _get_order(payment["order_id"])
         if not order:
             return None
         terminated = order.get("status") in ("Completed", "Cancelled", "Failed", "Refunded")
         already_confirmed = order.get("status") == "Confirmed"
         if terminated or already_confirmed:
+            return None
+
+        # Security anchor — no bank SMS seen ⇒ the money hasn't provably
+        # arrived, so never confirm (unless the caller is the bank SMS handler).
+        if not bank_sms_arrived and not await _bank_sms_seen(utr):
             return None
 
         # Payment proven → mark it Success and pin the order to Confirmed.
@@ -928,7 +956,7 @@ async def sms_incoming(data: LocalIncomingSms):
     utr = _extract_utr(text)
     if utr:
         await _log_sms_inbound("", phone, text, "UTR Received")
-        matched = await _confirm_order_via_utr(utr, phone=phone, raw_text=text)
+        matched = await _confirm_order_via_utr(utr, phone=phone, raw_text=text, bank_sms_arrived=True)
         if matched:
             report["order"] = matched
             report["matched"] = {"utr": utr}
@@ -1103,7 +1131,7 @@ async def upload_payment_screenshot(
     safe_base = re.sub(r"[^a-zA-Z0-9_-]", "", os.path.splitext(filename)[0]) or "screenshot"
     safe_base = safe_base[:40]
     stored_name = f"{order_id}_{int(datetime.now().timestamp())}_{safe_base}{ext}"
-    uploads_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "uploads", "payments")
+    uploads_dir = ensure_uploads_dir()
     os.makedirs(uploads_dir, exist_ok=True)
     dest_path = os.path.join(uploads_dir, stored_name)
 
@@ -1130,13 +1158,13 @@ async def upload_payment_screenshot(
             payment = await _db(db.create_payment, order_id, int(order.get("total", 0)), "Manual UTR", utr, stored_name)
 
     # If the UTR was attached with the screenshot, try the UTR auto-match too —
-    # the bank SMS may already have arrived.
+    # the bank SMS may already have arrived (this only confirms when it did).
     matched = None
-    if utr:
+    if payment and utr:
         matched = await _confirm_order_via_utr(utr)
         if matched:
             return {
-                "message": "Payment matched — your order is confirmed!",
+                "message": "Payment matched the bank's credit SMS — your order is confirmed!",
                 "payment": payment,
                 "order": matched,
                 "screenshot_url": f"/uploads/payments/{stored_name}",

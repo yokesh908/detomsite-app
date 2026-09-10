@@ -2807,3 +2807,23 @@ def list_sms_logs(limit: int = 100) -> list[dict[str, Any]]:
             return _rows_to_dicts(cur.fetchall())
     finally:
         _release(connection)
+
+
+def bank_sms_seen(utr: str) -> bool:
+    """True when a bank credit SMS containing this UTR was already logged inbound.
+
+    This is the security anchor for the double-confirm flow: an order only
+    auto-confirms via a student-entered UTR if the bank's SMS (proving the
+    money actually arrived) was received too.
+    """
+    connection = _connect()
+    try:
+        with connection.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM sms_logs WHERE direction = 'in' AND status = 'UTR Received' "
+                "AND UPPER(message) LIKE %s LIMIT 1",
+                (f"%{utr}%",),
+            )
+            return cur.fetchone() is not None
+    finally:
+        _release(connection)

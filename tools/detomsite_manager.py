@@ -18,7 +18,7 @@ Usage
 
 It can also be driven from the terminal for quick data calls:
 
-    python tools/detomsite_manager.py --base https://detomsite.onrender.com/api/v1 \
+    python tools/detomsite_manager.py --base https://detomsite-backend.vercel.app/api/v1 \
         --login admin you@example.com 'yourpassword'
     python tools/detomsite_manager.py --call "GET /local/shops"
     python tools/detomsite_manager.py --call "PATCH /local/payment-settings" '{"upi_id":"detomsite@ybl"}'
@@ -36,7 +36,7 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-DEFAULT_BASE = "https://detomsite.onrender.com/api/v1"
+DEFAULT_BASE = "https://detomsite-backend.vercel.app/api/v1"
 TOKEN_FILE = os.path.expanduser("~/.detomsite-manager-token.json")
 
 MANAGER_HTML = r"""<!DOCTYPE html>

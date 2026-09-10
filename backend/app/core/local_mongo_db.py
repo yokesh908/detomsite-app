@@ -8,6 +8,7 @@ this module mirrors the local_demo_db contract using MongoDB collections.
 from __future__ import annotations
 
 from datetime import datetime
+import re
 from typing import Any
 
 
@@ -320,6 +321,22 @@ async def list_sms_logs(limit: int = 100) -> list[dict[str, Any]]:
     database = _database()
     rows = await database.local_sms_logs.find({}, {"_id": 0}).sort("sequence", -1).limit(limit).to_list(length=limit)
     return rows
+
+
+async def bank_sms_seen(utr: str) -> bool:
+    """True when a bank credit SMS containing this UTR was already logged inbound.
+
+    This is the security anchor for the double-confirm flow: an order only
+    auto-confirms via a student-entered UTR if the bank's SMS (proving the
+    money actually arrived) was received too.
+    """
+    database = _database()
+    expr = re.compile(re.escape(utr), re.IGNORECASE)
+    doc = await database.local_sms_logs.find_one(
+        {"direction": "in", "status": "UTR Received", "message": expr},
+        {"_id": 0},
+    )
+    return doc is not None
 
 
 async def update_order_status(order_id: str, status: str) -> dict[str, Any] | None:
