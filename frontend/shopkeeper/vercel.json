@@ -1,0 +1,12 @@
+{
+  "rewrites": [
+    {
+      "source": "/((?!.*\\.).*)",
+      "destination": "/index.html"
+    },
+    {
+      "source": "/mobile/((?!.*\\.).*)",
+      "destination": "/index.html"
+    }
+  ]
+}

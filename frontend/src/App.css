@@ -1,0 +1,38 @@
+/* DETOMSITE - Design System */
+
+.app-container {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.gold-accent {
+  position: relative;
+}
+
+.gold-accent::after {
+  content: '';
+  position: absolute;
+  bottom: -2px;
+  left: 0;
+  right: 0;
+  height: 3px;
+  background: linear-gradient(90deg, transparent, #D4A017, transparent);
+  border-radius: 2px;
+}
+
+.status-verified { background: #DCFCE7; color: #166534; }
+.status-pending { background: #FEF3C7; color: #A16207; }
+.status-preparing { background: #FEF3C7; color: #D97706; }
+.status-ready { background: #DCFCE7; color: #15803D; }
+.status-completed { background: #DCFCE7; color: #166534; }
+.status-cancelled { background: #FEE2E2; color: #DC2626; }
+
+@keyframes pageIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.page-enter {
+  animation: pageIn 0.2s ease-out forwards;
+}

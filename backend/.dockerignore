@@ -1,0 +1,27 @@
+# Secrets — never bake local .env files into the image
+.env
+.env.*
+*.env
+!.env.example
+
+# Local databases / test artifacts
+*.db
+*.sqlite*
+coverage.xml
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Python caches & environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# Tests & CI
+tests/
+scripts/smoke_vendor_flow.py
+
+# Vercel metadata
+.vercel/

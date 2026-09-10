@@ -1,0 +1,85 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+jobs:
+  backend-tests:
+    runs-on: ubuntu-latest
+    services:
+      mongodb:
+        image: mongo:7.0
+        options: >-
+          --health-cmd mongosh
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 27017:27017
+
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.12'
+    
+    - name: Install dependencies
+      working-directory: ./backend
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt pytest pytest-cov pytest-asyncio
+    
+    - name: Run tests
+      working-directory: ./backend
+      run: pytest tests/ --cov=app --cov-report=xml
+    
+    - name: Upload coverage
+      uses: codecov/codecov-action@v3
+      with:
+        files: ./backend/coverage.xml
+
+  portal-builds:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        portal: [student, admin, shopkeeper]
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+
+    - name: Install dependencies
+      working-directory: ./frontend/${{ matrix.portal }}
+      run: npm install
+
+    - name: Type check
+      working-directory: ./frontend/${{ matrix.portal }}
+      run: npx tsc --noEmit
+
+    - name: Build
+      working-directory: ./frontend/${{ matrix.portal }}
+      run: npm run build
+
+  build-docker:
+    needs: [backend-tests, portal-builds]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+    - uses: actions/checkout@v3
+    
+    # GitHub-hosted runners ship Docker + the Compose v2 plugin (`docker
+    # compose`) but NOT the legacy standalone `docker-compose` binary — that
+    # was the "docker-compose: command not found" failure.
+    - name: Build Docker images
+      run: |
+        docker compose build

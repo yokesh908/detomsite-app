@@ -1,0 +1,46 @@
+services:
+  - type: web
+    name: detomsite-backend
+    env: python
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "uvicorn app.main:app --host 0.0.0.0 --port $PORT"
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: USE_SUPABASE_DB
+        value: "True"
+      - key: USE_LOCAL_DB
+        value: "False"
+      - key: SUPABASE_DATABASE_URL
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: FRONTEND_URL
+        sync: false
+      - key: BACKEND_URL
+        sync: false
+      - key: ALLOWED_ORIGINS
+        sync: false
+      - key: DEFAULT_SUPER_ADMIN_EMAIL
+        sync: false
+      - key: DEFAULT_SUPER_ADMIN_PASSWORD
+        sync: false
+
+  # ─── Keep-alive: Render free web services sleep after 15 min without
+  # traffic. This cron pings the /health endpoint every 5 minutes so the
+  # backend never hits the 15-min idle cutoff and stays awake (no cold-start
+  # wait for students). If your service name differs on Render, update
+  # HEALTH_URL in the Render dashboard to https://<your-app>.onrender.com/health
+  - type: cron
+    name: detomsite-keep-alive
+    env: python
+    plan: free
+    schedule: "*/5 * * * *"
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python scripts/keep_alive.py"
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: HEALTH_URL
+        value: https://detomsite-backend.onrender.com/health
