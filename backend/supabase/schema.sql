@@ -230,6 +230,18 @@ create index if not exists idx_shops_shopkeeper_email_lower on public.shops (low
 -- The vendor dashboard/history reads orders for a single shop ordered by
 -- token; the composite index serves both the WHERE and the ORDER BY.
 create index if not exists idx_orders_shop_id_token on public.orders (shop_id, token desc);
+
+-- ─── Share payments (5% commission paid by shops to the admin) ───
+-- The vendor dashboard and admin reports read these on every load.
+create table if not exists public.share_payments (
+  id text primary key,
+  shop_id text not null,
+  shop_name text not null default '',
+  amount integer not null default 0,
+  status text not null default 'Pending',
+  created_at timestamptz not null default now(),
+  paid_at timestamptz
+);
 -- share_payments are looked up by shop_id on every dashboard load.
 create index if not exists idx_share_payments_shop_id on public.share_payments (shop_id);
 create index if not exists idx_share_payments_status on public.share_payments (status);
