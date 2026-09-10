@@ -12,14 +12,18 @@
 #  ══════════════════════════════════════════════════════════════════════
 set -euo pipefail
 
+# NON_INTERACTIVE=1 + env vars let this script run fully unattended
+# (used when the deploy is driven by a script or another process).
+NON_INTERACTIVE="${NON_INTERACTIVE:-0}"
+
 GREEN=$'\033[0;32m'; YELLOW=$'\033[1;33m'; RED=$'\033[0;31m'; BOLD=$'\033[1m'; NC=$'\033[0m'
 
 step()        { echo -e "\n${BOLD}── Step: $1 ──${NC}"; }
 say()         { echo -e "  ${GREEN}✓${NC} $1"; }
 warn()        { echo -e "  ${YELLOW}→${NC} $1"; }
 fail()        { echo -e "\n  ${RED}✖${NC} $1"; exit 1; }
-ask()         { read -r -p "  $1 " "$2"; }
-confirm()     { read -r -p "  $1 [Enter to continue / n to abort] " _r; [[ -z "${_r:-}" || "$_r" == "y" || "$_r" == "Y" ]] || return 1; }
+ask()         { [[ "$NON_INTERACTIVE" == "1" ]] && { eval "$2="; return 0; }; read -r -p "  $1 " "$2"; }
+confirm()     { [[ "$NON_INTERACTIVE" == "1" ]] && return 0; read -r -p "  $1 [Enter to continue / n to abort] " _r; [[ -z "${_r:-}" || "$_r" == "y" || "$_r" == "Y" ]] || return 1; }
 
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$REPO_DIR"
@@ -111,8 +115,12 @@ fi
 LAST_STEP="Collecting admin email"
 step "Admin login for the app"
 echo "  The ADMIN portal needs one account (email + password)."
-ask "  Admin email (Enter to keep ${ADMIN_EMAIL}):" _email_in
-[[ -z "${_email_in:-}" ]] || ADMIN_EMAIL="$_email_in"
+if [[ -n "${DETOMSITE_ADMIN_EMAIL:-}" ]]; then
+  ADMIN_EMAIL="$DETOMSITE_ADMIN_EMAIL"
+else
+  ask "  Admin email (Enter to keep ${ADMIN_EMAIL}):" _email_in
+  [[ -z "${_email_in:-}" ]] || ADMIN_EMAIL="$_email_in"
+fi
 echo "  Auto-generated admin password: ${ADMIN_PASSWORD}"
 confirm "  Continue?" || fail "Aborted."
 
@@ -121,26 +129,28 @@ LAST_STEP="Creating Supabase database"
 step "Creating your free Supabase database"
 if ! supabase projects list 2>/dev/null | grep -q "detomsite-prod"; then
   if [[ -z "$SUPABASE_ORG" ]]; then
-    ORG_LINES="$(supabase orgs list 2>/dev/null | tail -n +2)"
-    if [[ -z "$ORG_LINES" ]]; then
-      fail "No Supabase account found. Create one at https://supabase.com first, then re-run."
-    fi
+    # `supabase orgs list` prints:  <org-id> | <display name>  (org-id may be
+    # padded with leading spaces, so we slice out the text before the pipe).
+    ORG_ROWS="$(supabase orgs list 2>/dev/null \
+        | awk -F'|' '{gsub(/[[:space:]]/,"",$1); if ($1 ~ /^[a-z0-9][A-Za-z0-9_-]{7,}$/) print $0}')"
+    [[ -n "$ORG_ROWS" ]] || fail "No Supabase account found. Create one at https://supabase.com first, then re-run."
+    ORG_IDS=( $(echo "$ORG_ROWS" | awk -F'|' '{gsub(/[[:space:]]/,"",$1); print $1}') )
     echo "  Which Supabase account should own the database?"
     i=0
     while IFS= read -r line; do
       i=$((i+1))
-      echo "    [$i] $line"
-    done <<< "$ORG_LINES"
+      name="$(echo "$line" | sed -E 's/^[^|]*\|[[:space:]]*//')"
+      echo "    [$i] $name (${ORG_IDS[$((i-1))]})"
+    done <<< "$ORG_ROWS"
     ask "  Enter a number:" _org_num
-    _org_num="$(echo "$_org_num" | tr -dc '0-9')"
-    [[ -n "$_org_num" ]] || fail "No number entered."
-    SUPABASE_ORG="$(echo "$ORG_LINES" | sed -n "${_org_num}p" | awk '{print $2}')"
-    [[ -n "$SUPABASE_ORG" ]] || SUPABASE_ORG="$(echo "$ORG_LINES" | sed -n "${_org_num}p" | awk '{print $NF}')"
+    _org_num="$(echo "${_org_num:-}" | tr -dc '0-9')"
+    [[ -n "$_org_num" && "$_org_num" -ge 1 && "$_org_num" -le "${#ORG_IDS[@]}" ]] || fail "No valid number entered."
+    SUPABASE_ORG="${ORG_IDS[$((_org_num-1))]}"
   fi
-  [[ -n "$SUPABASE_ORG" ]] || fail "Could not read the Supabase organization ID."
+  [[ "$SUPABASE_ORG" =~ ^[A-Za-z0-9_-]+$ ]] || fail "Could not read the Supabase organization ID."
   say "Using Supabase organization: $SUPABASE_ORG"
 
-  DB_PASSWORD="$(openssl rand -hex 16 2>/dev/null || date +%s%N | sha256sum | cut -c1-24)"
+  DB_PASSWORD="$(openssl rand -base64 18 2>/dev/null | tr -dc 'A-Za-z0-9' | cut -c1-16)Pb1"
   warn "Creating project \"detomsite-prod\" (free tier, region $SUPABASE_REGION) — takes ~1 min..."
   supabase projects create detomsite-prod \
       --org-id "$SUPABASE_ORG" \
@@ -155,7 +165,8 @@ else
   [[ -n "$DB_PASSWORD" ]] || fail "A password is required to reuse the project."
 fi
 
-PROJECT_REF="$(supabase projects list 2>/dev/null | grep "detomsite-prod" | awk '{print $2}' | head -1 | tr -d ' *')"
+# projects list row:  LINKED | ORG ID | REFERENCE ID | NAME | REGION | ...
+PROJECT_REF="$(supabase projects list 2>/dev/null | grep "detomsite-prod" | awk '{print $3}' | head -1 | tr -cd 'a-z0-9')"
 [[ -n "$PROJECT_REF" ]] || fail "Could not read the database project ID. Look it up at https://supabase.com/dashboard"
 say "Database project ID: $PROJECT_REF"
 
