@@ -161,12 +161,18 @@ if ! supabase projects list 2>/dev/null | grep -q "detomsite-prod"; then
          warn "Open https://supabase.com/dashboard and create a project, then re-run this script."; fail "Supabase project was not created."; }
 else
   warn "Found an existing project 'detomsite-prod' — reusing it."
-  ask "  Paste its database password (from your earlier .deploy-credentials.txt):" DB_PASSWORD
+  if [[ -n "${DETOMSITE_DB_PASSWORD:-}" ]]; then
+    DB_PASSWORD="$DETOMSITE_DB_PASSWORD"
+  else
+    ask "  Paste its database password (from your earlier .deploy-credentials.txt):" DB_PASSWORD
+  fi
   [[ -n "$DB_PASSWORD" ]] || fail "A password is required to reuse the project."
 fi
 
-# projects list row:  LINKED | ORG ID | REFERENCE ID | NAME | REGION | ...
-PROJECT_REF="$(supabase projects list 2>/dev/null | grep "detomsite-prod" | awk '{print $3}' | head -1 | tr -cd 'a-z0-9')"
+# Ref IDs are always 20 lowercase chars (e.g. wrzshtpxzbtxcreumnxr).
+# Supabase's table columns vary between CLI versions, so we locate the ref
+# by shape, not position: it's the 2nd 20-char token on the project's row.
+PROJECT_REF="$(supabase projects list 2>/dev/null | grep "detomsite-prod" | grep -oE '[a-z0-9]{20}' | sed -n '2p' || true)"
 [[ -n "$PROJECT_REF" ]] || fail "Could not read the database project ID. Look it up at https://supabase.com/dashboard"
 say "Database project ID: $PROJECT_REF"
 
@@ -201,6 +207,15 @@ if [[ "$SUPABASE_REGION" == "ap-south-1" ]]; then
 else
   DB_URL="postgresql://postgres.${PROJECT_REF}:${DB_PASSWORD}@db.${PROJECT_REF}.supabase.co:5432/postgres"
 fi
+
+# Persist the DB credentials IMMEDIATELY so a later step can never lose them.
+{
+  echo "DETOMSITE DEPLOYMENT — DATABASE (saved early so it can always be recovered)"
+  echo "ref : $PROJECT_REF"
+  echo "pass: $DB_PASSWORD"
+  echo "url : $DB_URL"
+} > "$CRED_FILE"
+chmod 600 "$CRED_FILE"
 
 # ─── 8. Create the backend project (first deploy), then set env ──────
 LAST_STEP="Creating the backend project on Vercel"
