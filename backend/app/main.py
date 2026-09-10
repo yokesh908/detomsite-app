@@ -4,6 +4,7 @@ Main FastAPI application
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 from contextlib import asynccontextmanager
 from app.core.config import settings
 import asyncio
@@ -184,7 +185,7 @@ from app.middleware.error_handler import ErrorHandlingMiddleware, LoggingMiddlew
 # Add middleware (order matters — last added = first executed)
 app.add_middleware(ErrorHandlingMiddleware)
 app.add_middleware(LoggingMiddleware)
-app.add_middleware(rate_limit_middleware)
+app.add_middleware(BaseHTTPMiddleware, dispatch=rate_limit_middleware)
 
 app.include_router(
     local.router,
