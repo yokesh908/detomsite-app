@@ -15,9 +15,16 @@ api.interceptors.response.use(
   (res) => res,
   (err) => {
     if (err.response?.status === 401) {
-      localStorage.removeItem('admin_token')
-      localStorage.removeItem('admin_user')
-      window.location.href = '/login'
+      /* Don't redirect on failed login attempts — the login form needs to show the
+         error message to the user. Only redirect on 401s from authenticated requests
+         (i.e. when we already have a token that turned out to be invalid). */
+      const isLoginRequest = err.config?.url?.includes('/admin/login')
+      const hasToken = !!localStorage.getItem('admin_token')
+      if (!isLoginRequest && hasToken) {
+        localStorage.removeItem('admin_token')
+        localStorage.removeItem('admin_user')
+        window.location.href = '/login'
+      }
     }
     return Promise.reject(err)
   }

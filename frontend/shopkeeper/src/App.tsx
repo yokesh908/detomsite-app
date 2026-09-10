@@ -751,6 +751,12 @@ function OrderScanner({ onDone }: { onDone: () => void }) {
               <button disabled={acting} onClick={() => action(() => confirmPaid(order!.id))} className={`${btn} bg-blue-600 hover:bg-blue-500`}>Payment Received ✓</button>
             )}
             {order.status === 'Accepted' && (
+              <button disabled={acting} onClick={() => action(() => setStatus(order!.id, 'Preparing'))} className={`${btn} bg-yellow-500 hover:bg-yellow-600`}>Start Preparing</button>
+            )}
+            {order.status === 'Preparing' && (
+              <button disabled={acting} onClick={() => action(() => setStatus(order!.id, 'Ready'))} className={`${btn} bg-primary hover:bg-primary`}>Mark Ready ✓</button>
+            )}
+            {order.status === 'Ready' && (
               <button disabled={acting} onClick={() => action(() => setStatus(order!.id, 'Completed'))} className={`${btn} bg-primary hover:bg-primary`}>Complete Order</button>
             )}
             <button disabled={acting} onClick={() => { setOrder(null); setLookupErr(''); if (mode === 'camera') startCamera() }} className="rounded-sm border px-4 py-2.5 text-sm font-bold text-gray-600">Scan Next</button>
@@ -769,7 +775,7 @@ function VendorMobileApp() {
   const [products, setProducts] = useState<Product[]>([])
   const [stats, setStats] = useState<any>({})
   const [msg, setMsg] = useState(''); const [err, setErr] = useState('')
-  const [productForm, setProductForm] = useState({ name: '', price: '', category: 'Food', description: '', inventory: '0' })
+  const [productForm, setProductForm] = useState({ name: '', price: '', category: 'Food', description: '', inventory: '10', prep_time: '10' })
   const [upiId, setUpiId] = useState('')
   const [upiEnabled, setUpiEnabled] = useState(true)
   const [codEnabled, setCodEnabled] = useState(true)
@@ -1048,8 +1054,11 @@ function VendorMobileApp() {
   const logout = () => { localStorage.removeItem('vendor_token'); localStorage.removeItem('vendor_user'); navigate('/') }
 
   const statusMsg = (s: string) => ({
-    Accepted: 'Order accepted — collect cash on delivery',
-    Completed: 'Order completed — cash collected',
+    Confirmed: 'Order confirmed via SMS — preparing now',
+    Accepted: 'Order accepted — preparing now',
+    Preparing: 'Order is being prepared',
+    Ready: 'Order ready for pickup/delivery',
+    Completed: 'Order completed',
     Cancelled: 'Order rejected',
   } as Record<string, string>)[s] || `Order ${s}`
 
@@ -1102,9 +1111,10 @@ function VendorMobileApp() {
     try {
       await api.post('/vendor/products', {
         name: productForm.name, price: parseInt(productForm.price), category: productForm.category,
-        description: productForm.description, inventory: parseInt(productForm.inventory),
+        description: productForm.description, inventory: parseInt(productForm.inventory) || 10,
+        prep_time: parseInt(productForm.prep_time) || 10,
       })
-      setMsg('Product added!'); setProductForm({ name: '', price: '', category: 'Food', description: '', inventory: '0' })
+      setMsg('Product added!'); setProductForm({ name: '', price: '', category: 'Food', description: '', inventory: '10', prep_time: '10' })
       loadProducts()
     } catch (err: any) { setErr(err?.response?.data?.detail || 'Failed to add product') }
   }
@@ -1157,10 +1167,10 @@ function VendorMobileApp() {
   let slotOrders = slotFilter === 'All' ? orders : orders.filter(o => slotBucket(o.created_at) === slotFilter)
   if (todayOnly) slotOrders = slotOrders.filter(o => String(o.created_at || '').slice(0, 10) === todayStr)
   if (statusFilter === 'pending') slotOrders = slotOrders.filter(o => o.status === 'Pending Acceptance' || o.status === 'Pending Payment')
-  else if (statusFilter === 'accepted') slotOrders = slotOrders.filter(o => o.status === 'Accepted')
+  else if (statusFilter === 'accepted') slotOrders = slotOrders.filter(o => ['Confirmed', 'Accepted', 'Preparing', 'Ready'].includes(o.status))
   else if (statusFilter === 'completed') slotOrders = slotOrders.filter(o => o.status === 'Completed' || o.status === 'Cancelled')
   const pendingOrders = slotOrders.filter(o => o.status === 'Pending Acceptance' || o.status === 'Pending Payment')
-  const acceptedOrders = slotOrders.filter(o => o.status === 'Accepted')
+  const acceptedOrders = slotOrders.filter(o => ['Confirmed', 'Accepted', 'Preparing', 'Ready'].includes(o.status))
   /* Cook summary — totals every live (not yet completed/cancelled/failed)
      order's items so the vendor knows how much of each dish to prepare. It
      respects the today/slot/status filters above. */
@@ -1364,11 +1374,20 @@ function VendorMobileApp() {
                       ) : o.status === 'Pending Payment' ? (
                         <div className="mt-3 rounded-sm border border-blue-200 bg-blue-50 p-3">
                           <p className="text-xs font-semibold text-blue-700">Awaiting UPI payment (₹{o.total}) — confirm once it arrives in your UPI app</p>
+                          {o.payment?.screenshot_name && (
+                            <div className="mt-2 rounded-sm bg-white border border-blue-200 p-2">
+                              <p className="mb-1 text-[10px] font-bold uppercase tracking-wide text-blue-600">Payment screenshot</p>
+                              {o.payment.utr_number && <p className="text-[11px] text-gray-600">UTR: <b>{o.payment.utr_number}</b></p>}
+                              <a href={`/uploads/payments/${o.payment.screenshot_name}`} target="_blank" rel="noopener noreferrer" className="mt-1 block">
+                                <img src={`/uploads/payments/${o.payment.screenshot_name}`} alt="Payment screenshot" className="max-h-36 w-full rounded-sm object-contain border border-blue-100" />
+                              </a>
+                            </div>
+                          )}
                           <button onClick={() => confirmPayment(o.id)} className="mt-2 w-full rounded-sm bg-primary px-3 py-2 text-sm font-bold text-white hover:bg-primary">Payment Received</button>
                         </div>
                       ) : (
                         <div className="mt-3 grid grid-cols-2 gap-2">
-                          <button onClick={() => updateOrderStatus(o.id, 'Completed')} className="rounded-sm bg-primary px-3 py-2 text-sm font-bold text-white">Accept & Complete</button>
+                          <button onClick={() => updateOrderStatus(o.id, 'Accepted')} className="rounded-sm bg-primary px-3 py-2 text-sm font-bold text-white">Accept Order</button>
                           <button onClick={() => updateOrderStatus(o.id, 'Cancelled')} className="rounded-sm border border-red-200 px-3 py-2 text-sm font-bold text-red-600">Reject</button>
                         </div>
                       )}
@@ -1378,38 +1397,61 @@ function VendorMobileApp() {
               </section>
             )}
 
-            {/* Accepted Orders (COD — awaiting cash collection) */}
+            {/* Active Orders — Accept → Preparing → Ready → Complete flow */}
             {acceptedOrders.length > 0 && (
               <section className="mb-6">
-                <h2 className="text-lg font-bold text-primary mb-3">Accepted — Collect Cash ({acceptedOrders.length})</h2>
+                <h2 className="text-lg font-bold text-primary mb-3">Active ({acceptedOrders.length})</h2>
                 <div className="space-y-3">
-                  {acceptedOrders.map(o => (
-                    <div key={o.id} className="rounded-btn bg-white p-4 shadow-sm border border-primary-light/50">
+                  {acceptedOrders.map(o => {
+                    const isConfirmed = o.status === 'Confirmed'
+                    const isActive = o.status === 'Accepted' || isConfirmed
+                    const isPreparing = o.status === 'Preparing'
+                    const isReady = o.status === 'Ready'
+                    return (
+                    <div key={o.id} className={`rounded-btn bg-white p-4 shadow-sm border ${isReady ? 'border-primary' : isPreparing ? 'border-yellow-300' : isConfirmed ? 'border-emerald-400' : 'border-primary-light/50'}`}>
                       <div className="flex justify-between items-start mb-2">
                         <div className="flex items-center gap-2">
                           <span className="text-xl font-bold text-primary-dark">#{o.token}</span>
                           <span className={`rounded-pill px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wide ${o.payment_method === 'COD' ? 'bg-gold-light text-gold-dark' : 'bg-blue-100 text-blue-700'}`}>
                             {o.payment_method === 'COD' ? 'Cash on Delivery' : 'UPI'}
                           </span>
-                          <span className="text-xs bg-primary-light text-primary px-2 py-0.5 rounded-pill">Accepted</span>
+                          <span className={`text-xs px-2 py-0.5 rounded-pill font-bold ${isReady ? 'bg-primary text-white' : isPreparing ? 'bg-yellow-100 text-yellow-700' : isConfirmed ? 'bg-emerald-100 text-emerald-700' : 'bg-primary-light text-primary'}`}>{o.status}</span>
                         </div>
                         <span className="text-xs bg-gray-100 text-gray-600 px-2 py-0.5 rounded-pill">{o.delivery_slot}</span>
                       </div>
                       <p className="text-sm text-gray-600">{o.items}</p>
                       <p className="text-xs text-gray-400 mt-1">🕒 {fmtTime(o.created_at) || '—'} · 👤 {o.student_name} · 📞 {o.student_phone || 'no phone'} · 📍 {o.delivery_location}</p>
                       <div className="mt-2"><CallBtn phone={o.student_phone} name={o.student_name} /></div>
-                      {o.payment_method === 'COD' ? (
-                        <div className="mt-3 rounded-sm border border-gold-light/60 bg-amber-50 p-3">
-                          <p className="text-xs font-semibold text-gold-dark">Collect ₹{o.total} in cash when delivering</p>
-                          <button onClick={() => updateOrderStatus(o.id, 'Completed')} className="mt-2 w-full rounded-sm bg-primary px-3 py-2.5 text-sm font-bold text-white hover:bg-primary transition-all active:scale-[0.98]">
-                            Cash Collected — Complete Order
-                          </button>
-                        </div>
-                      ) : (
-                        <button onClick={() => updateOrderStatus(o.id, 'Completed')} className="mt-2 w-full rounded-sm bg-primary px-3 py-2 text-sm font-bold text-white">Complete Order</button>
-                      )}
+                      {/* Status flow: Accept → Preparing → Ready → Complete */}
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        {isActive && (
+                          <>
+                            <button onClick={() => updateOrderStatus(o.id, 'Preparing')} className="rounded-sm bg-yellow-500 px-3 py-2 text-sm font-bold text-white hover:bg-yellow-600">Start Preparing</button>
+                            <button onClick={() => updateOrderStatus(o.id, 'Cancelled')} className="rounded-sm border border-red-200 px-3 py-2 text-sm font-bold text-red-600">Reject</button>
+                          </>
+                        )}
+                        {isPreparing && (
+                          <>
+                            <button onClick={() => updateOrderStatus(o.id, 'Ready')} className="rounded-sm bg-primary px-3 py-2 text-sm font-bold text-white hover:bg-primary">Mark Ready ✓</button>
+                            <button onClick={() => updateOrderStatus(o.id, 'Cancelled')} className="rounded-sm border border-red-200 px-3 py-2 text-sm font-bold text-red-600">Cancel</button>
+                          </>
+                        )}
+                        {isReady && (
+                          <>
+                            {o.payment_method === 'COD' ? (
+                              <button onClick={() => updateOrderStatus(o.id, 'Completed')} className="w-full rounded-sm bg-primary px-3 py-2.5 text-sm font-bold text-white hover:bg-primary transition-all active:scale-[0.98]">Cash Collected — Complete Order</button>
+                            ) : (
+                              <button onClick={() => updateOrderStatus(o.id, 'Completed')} className="w-full rounded-sm bg-primary px-3 py-2.5 text-sm font-bold text-white hover:bg-primary transition-all active:scale-[0.98]">Complete Order</button>
+                            )}
+                          </>
+                        )}
+                      </div>
+                      {isPreparing && <p className="mt-2 text-[11px] text-yellow-600">Preparing... Mark as "Ready" once food is packed.</p>}
+                      {isConfirmed && <p className="mt-2 text-[11px] text-emerald-700">Confirmed by SMS reply — start preparing this order.</p>}
+                      {isReady && <p className="mt-2 text-[11px] text-primary">Ready for pickup! Mark complete once the student collects it.{o.payment_method === 'COD' ? ' Collect ₹' + o.total + ' in cash.' : ''}</p>}
                     </div>
-                  ))}
+                    )
+                  })}
                 </div>
               </section>
             )}
@@ -1461,6 +1503,16 @@ function VendorMobileApp() {
                     <select value={productForm.category} onChange={e => setProductForm({...productForm, category: e.target.value})} className="w-full rounded-sm border px-3 py-2 text-sm outline-none">
                       <option value="Food">Food</option><option value="Beverages">Beverages</option><option value="Starters">Starters</option><option value="Desserts">Desserts</option>
                     </select>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="mb-1 block text-xs font-bold text-gray-500">Stock (per batch)</label>
+                      <input type="number" value={productForm.inventory} onChange={e => setProductForm({...productForm, inventory: e.target.value})} className="w-full rounded-sm border px-3 py-2 text-sm outline-none" placeholder="Default stock" min="0" />
+                    </div>
+                    <div>
+                      <label className="mb-1 block text-xs font-bold text-gray-500">Prep Time (min)</label>
+                      <input type="number" value={productForm.prep_time} onChange={e => setProductForm({...productForm, prep_time: e.target.value})} className="w-full rounded-sm border px-3 py-2 text-sm outline-none" placeholder="Minutes" min="1" />
+                    </div>
                   </div>
                   <input type="text" value={productForm.description} onChange={e => setProductForm({...productForm, description: e.target.value})} className="w-full rounded-sm border px-3 py-2 text-sm outline-none" placeholder="Description" />
                   <button type="submit" className="w-full rounded-sm bg-primary px-3 py-2 text-sm font-bold text-white">Add Product +</button>

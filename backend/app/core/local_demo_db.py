@@ -675,6 +675,17 @@ def init_local_demo_db() -> None:
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             );
 
+            -- ─── SMS logs (order confirm/reject via phone text) ───
+            CREATE TABLE IF NOT EXISTS sms_logs (
+                id TEXT PRIMARY KEY,
+                sub_order_id TEXT NOT NULL DEFAULT '',
+                phone TEXT NOT NULL DEFAULT '',
+                message TEXT NOT NULL DEFAULT '',
+                direction TEXT NOT NULL DEFAULT 'out',
+                status TEXT NOT NULL DEFAULT 'Sent',
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            );
+
             -- ─── Shop ordering position (admin-controlled) ───
             -- Added to shops table via ALTER below.
 
@@ -1233,6 +1244,16 @@ def get_order(order_id: str) -> dict[str, Any] | None:
     with _connect() as connection:
         row = connection.execute("SELECT * FROM orders WHERE id = ?", (order_id,)).fetchone()
         return dict(row) if row else None
+
+
+def find_order_by_token(token: str) -> dict[str, Any] | None:
+    """Find the most recent order for a token number (tokens restart daily)."""
+    with _connect() as connection:
+        rows = connection.execute(
+            "SELECT * FROM orders WHERE token = ? ORDER BY created_at DESC LIMIT 1",
+            (token,),
+        ).fetchall()
+        return dict(rows[0]) if rows else None
 
 
 def update_order_status(order_id: str, status: str) -> dict[str, Any] | None:
@@ -2030,6 +2051,35 @@ def list_whatsapp_logs(limit: int = 100) -> list[dict[str, Any]]:
         return _rows_to_dicts(rows)
 
 
+def log_sms(
+    sub_order_id: str = "",
+    phone: str = "",
+    message: str = "",
+    status: str = "Sent",
+    direction: str = "out",
+) -> dict[str, Any] | None:
+    """Persist one SMS (out = sent to a phone, in = received from a phone)."""
+    with _connect() as connection:
+        next_id = connection.execute(
+            "SELECT COALESCE(MAX(CAST(substr(id, 2) AS INTEGER)), 0) + 1 FROM sms_logs"
+        ).fetchone()[0]
+        sms_id = f"s{next_id}"
+        connection.execute(
+            "INSERT INTO sms_logs (id, sub_order_id, phone, message, direction, status) VALUES (?, ?, ?, ?, ?, ?)",
+            (sms_id, sub_order_id, phone or "", message or "", direction, status),
+        )
+        row = connection.execute("SELECT * FROM sms_logs WHERE id = ?", (sms_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def list_sms_logs(limit: int = 100) -> list[dict[str, Any]]:
+    with _connect() as connection:
+        rows = connection.execute(
+            "SELECT * FROM sms_logs ORDER BY rowid DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return _rows_to_dicts(rows)
+
+
 def create_payment(
     order_id: str,
     amount: int,
@@ -2069,6 +2119,57 @@ def get_payment_by_order_id(order_id: str) -> dict[str, Any] | None:
             (order_id,),
         ).fetchone()
         return dict(row) if row else None
+
+
+def set_payment_utr(order_id: str, utr_number: str) -> dict[str, Any] | None:
+    """Stamp the student-provided UTR on the latest payment for an order."""
+    with _connect() as connection:
+        row = connection.execute(
+            "SELECT * FROM payments WHERE order_id = ? ORDER BY rowid DESC LIMIT 1",
+            (order_id,),
+        ).fetchone()
+        if not row:
+            return None
+        connection.execute(
+            "UPDATE payments SET utr_number = ? WHERE id = ?",
+            (utr_number, row["id"]),
+        )
+        updated = connection.execute("SELECT * FROM payments WHERE id = ?", (row["id"],)).fetchone()
+        return dict(updated) if updated else None
+
+
+def get_payment_by_utr(utr_number: str) -> dict[str, Any] | None:
+    """Find the most recent payment record carrying this UTR (student-entered).
+
+    UTRs are unique per transaction, but SQLite has no per-row uniqueness on a
+    nullable column — so the newest match wins (a student re-entering the same
+    UTR on a second order would otherwise match twice).
+    """
+    if not utr_number:
+        return None
+    with _connect() as connection:
+        row = connection.execute(
+            "SELECT * FROM payments WHERE utr_number = ? ORDER BY rowid DESC LIMIT 1",
+            (utr_number,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def update_payment_record(order_id: str, screenshot_name: str, utr_number: str | None = None) -> dict[str, Any] | None:
+    """Attach a payment screenshot (and optional UTR) to the latest payment for an order."""
+    with _connect() as connection:
+        row = connection.execute(
+            "SELECT * FROM payments WHERE order_id = ? ORDER BY rowid DESC LIMIT 1",
+            (order_id,),
+        ).fetchone()
+        if not row:
+            return None
+        connection.execute(
+            "UPDATE payments SET screenshot_name = ?, utr_number = COALESCE(?, utr_number) WHERE id = ?",
+            (screenshot_name, utr_number, row["id"]),
+        )
+        updated = connection.execute("SELECT * FROM payments WHERE id = ?", (row["id"],)).fetchone()
+        return dict(updated) if updated else None
 
 
 def update_payment_status(payment_id: str, status: str) -> dict[str, Any] | None:

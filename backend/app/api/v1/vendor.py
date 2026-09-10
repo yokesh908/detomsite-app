@@ -347,7 +347,21 @@ def get_orders(current_vendor: dict = Depends(get_current_vendor)):
     my_shop = db.get_shop_by_shopkeeper_email(f"{current_vendor['username']}@campus.local")
     if not my_shop:
         return []
-    return db.list_orders_by_shop(my_shop["id"])
+    orders = db.list_orders_by_shop(my_shop["id"])
+    # Enrich each order with its payment record (UTR + uploaded screenshot)
+    # so the shop can verify payment screenshots right from the order card.
+    for o in orders:
+        payment = db.get_payment_by_order_id(o["id"])
+        if payment:
+            o["payment"] = {
+                "id": payment.get("id"),
+                "method": payment.get("method"),
+                "status": payment.get("status"),
+                "utr_number": payment.get("utr_number"),
+                "screenshot_name": payment.get("screenshot_name"),
+                "amount": payment.get("amount"),
+            }
+    return orders
 
 
 @router.get("/orders/lookup")

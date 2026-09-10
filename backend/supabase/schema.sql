@@ -470,6 +470,17 @@ create table if not exists public.whatsapp_logs (
   created_at timestamptz not null default now()
 );
 
+-- ─── SMS logs (order confirm/reject via phone text) ───
+create table if not exists public.sms_logs (
+  id bigserial primary key,
+  sub_order_id text not null default '',
+  phone text not null default '',
+  message text not null default '',
+  direction text not null default 'out',
+  status text not null default 'Sent',
+  created_at timestamptz not null default now()
+);
+
 -- ─── Audit logs ───
 create table if not exists public.audit_logs (
   id bigserial primary key,

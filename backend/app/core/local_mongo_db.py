@@ -152,6 +152,8 @@ async def ensure_indexes(database) -> None:
     await database.local_tickets.create_index("email")
     await database.local_notifications.create_index("order_id")
     await database.local_notifications.create_index("sequence")
+    await database.local_sms_logs.create_index("id", unique=True)
+    await database.local_sms_logs.create_index([("created_at", -1)])
 
 
 async def save_session(email: str, name: str, role: str) -> dict[str, Any]:
@@ -261,6 +263,13 @@ async def get_order(order_id: str) -> dict[str, Any] | None:
     return await _database().local_orders.find_one({"id": order_id}, {"_id": 0})
 
 
+async def find_order_by_token(token: str) -> dict[str, Any] | None:
+    """Find the most recent order for a token number (tokens restart daily)."""
+    database = _database()
+    rows = await database.local_orders.find({"token": token}, {"_id": 0}).sort("created_at", -1).to_list(length=1)
+    return rows[0] if rows else None
+
+
 async def create_notification(
     title: str,
     message: str,
@@ -281,6 +290,36 @@ async def create_notification(
     }
     await database.local_notifications.insert_one(notification)
     return _without_id(notification) or notification
+
+
+async def log_sms(
+    sub_order_id: str = "",
+    phone: str = "",
+    message: str = "",
+    status: str = "Sent",
+    direction: str = "out",
+) -> dict[str, Any] | None:
+    """Persist one SMS (out = sent to a phone, in = received from a phone)."""
+    database = _database()
+    next_id = await database.local_sms_logs.count_documents({}) + 1
+    sms = {
+        "id": f"s{next_id}",
+        "sub_order_id": sub_order_id,
+        "phone": phone or "",
+        "message": message or "",
+        "direction": direction,
+        "status": status,
+        "created_at": datetime.utcnow().isoformat(),
+        "sequence": next_id,
+    }
+    await database.local_sms_logs.insert_one(sms)
+    return _without_id(sms) or sms
+
+
+async def list_sms_logs(limit: int = 100) -> list[dict[str, Any]]:
+    database = _database()
+    rows = await database.local_sms_logs.find({}, {"_id": 0}).sort("sequence", -1).limit(limit).to_list(length=limit)
+    return rows
 
 
 async def update_order_status(order_id: str, status: str) -> dict[str, Any] | None:
@@ -403,6 +442,45 @@ async def update_payment_status(payment_id: str, status: str) -> dict[str, Any] 
     database = _database()
     await database.local_payments.update_one({"id": payment_id}, {"$set": {"status": status}})
     return await database.local_payments.find_one({"id": payment_id}, {"_id": 0})
+
+
+async def get_payment_by_order_id(order_id: str) -> dict[str, Any] | None:
+    """Get the most recent payment record for an order."""
+    database = _database()
+    return await database.local_payments.find_one(
+        {"order_id": order_id}, {"_id": 0}, sort=[("sequence", -1)]
+    )
+
+
+async def set_payment_utr(order_id: str, utr_number: str) -> dict[str, Any] | None:
+    """Stamp the student-provided UTR on the latest payment for an order."""
+    database = _database()
+    payment = await get_payment_by_order_id(order_id)
+    if not payment:
+        return None
+    await database.local_payments.update_one({"id": payment["id"]}, {"$set": {"utr_number": utr_number}})
+    return await database.local_payments.find_one({"id": payment["id"]}, {"_id": 0})
+
+
+async def get_payment_by_utr(utr_number: str) -> dict[str, Any] | None:
+    """Find the most recent payment record carrying this UTR (student-entered)."""
+    if not utr_number:
+        return None
+    database = _database()
+    rows = await database.local_payments.find(
+        {"utr_number": utr_number}, {"_id": 0}
+    ).sort("sequence", -1).to_list(length=1)
+    return rows[0] if rows else None
+
+
+async def update_payment_doc(order_id: str, fields: dict[str, Any]) -> dict[str, Any] | None:
+    """Attach screenshot/UTR fields to the latest payment for an order."""
+    database = _database()
+    payment = await get_payment_by_order_id(order_id)
+    if not payment:
+        return None
+    await database.local_payments.update_one({"id": payment["id"]}, {"$set": fields})
+    return await database.local_payments.find_one({"id": payment["id"]}, {"_id": 0})
 
 
 async def create_ticket(values: dict[str, Any]) -> dict[str, Any]:

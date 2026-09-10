@@ -258,8 +258,12 @@ fi
 LAST_STEP="Deploying frontend"
 step "Deploying the student/shop marketplace site..."
 (cd frontend && vercel link --yes --project "$FRONTEND_PROJECT" >/dev/null 2>&1) || true
-FRONTEND_OUT="$(cd frontend && vercel --prod --yes \
-    -e VITE_API_URL="$BACKEND_URL/api/v1" 2>&1 || true)"
+# VITE_API_URL must be a PROJECT env var, not a per-deploy "-e" flag: Vite's
+# build on Vercel only sees project-scoped vars, so "-e" silently produces a
+# bundle with the localhost default. This is proven in production.
+printf '%s\n' "$BACKEND_URL/api/v1" | (cd frontend && vercel env add VITE_API_URL production) >/dev/null 2>&1 \
+  || warn "Could not set VITE_API_URL (may already exist — fine)."
+FRONTEND_OUT="$(cd frontend && vercel --prod --yes 2>&1 || true)"
 echo "$FRONTEND_OUT" | tail -n 6
 
 # ─── 11. Save credentials + summary ──────────────────────────────────

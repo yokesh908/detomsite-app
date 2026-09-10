@@ -1,4 +1,4 @@
-import { useState, useEffect, FormEvent, useMemo, useCallback } from 'react'
+import { useState, useEffect, FormEvent, useMemo, useCallback, useRef } from 'react'
 import { BrowserRouter as Router, Routes, Route, Link, Navigate, useNavigate, useSearchParams, useParams, useLocation } from 'react-router-dom'
 import api from './services/api'
 import { QRCodeSVG } from 'qrcode.react'
@@ -275,8 +275,18 @@ function Layout({ children }: { children: React.ReactNode }) {
   const [cartCount, setCartCount] = useState(getCart().reduce((s, i) => s + i.quantity, 0))
   const [notifs, setNotifs] = useState<Notification[]>([])
   const [notifOpen, setNotifOpen] = useState(false)
+  const notifRef = useRef<HTMLDivElement>(null)
   const user = JSON.parse(localStorage.getItem('user_data') || '{}')
   const path = useLocation().pathname
+
+  /* Close the notification dropdown when clicking outside it */
+  useEffect(() => {
+    const onOutside = (e: MouseEvent) => {
+      if (notifRef.current && !notifRef.current.contains(e.target as Node)) setNotifOpen(false)
+    }
+    document.addEventListener('mousedown', onOutside)
+    return () => document.removeEventListener('mousedown', onOutside)
+  }, [])
 
   useEffect(() => {
     const sync = () => setCartCount(getCart().reduce((s, i) => s + i.quantity, 0))
@@ -318,12 +328,13 @@ function Layout({ children }: { children: React.ReactNode }) {
             {nav.map(item => (
               <Link key={item.p} to={item.p} className={`flex items-center gap-1.5 rounded-pill px-3 py-2 text-sm font-semibold transition-all ${isActive(item.p) ? 'bg-primary text-white shadow-sm' : 'text-gray-600 hover:bg-primary-light/30 hover:text-primary'}`}>{item.i({ className: 'h-4 w-4' })}{item.l}</Link>
             ))}
+            <div ref={notifRef} className="relative">
             <button onClick={() => setNotifOpen(!notifOpen)} className="relative rounded-pill px-2 py-2 text-sm text-gray-600 hover:bg-primary-light/30">
               {IconH.bell({ className: 'h-5 w-5' })}
               {notifs.length > 0 && <span className="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-pill bg-gold px-1 text-[10px] font-black text-white">{notifs.length}</span>}
             </button>
             {notifOpen && (
-              <div className="absolute right-4 top-14 z-50 w-80 rounded-card border bg-white p-3 shadow-2xl">
+              <div className="absolute right-0 top-14 z-50 w-80 rounded-card border bg-white p-3 shadow-2xl">
                 <h3 className="mb-2 px-1 text-sm font-bold text-primary">Notifications</h3>
                 <div className="max-h-72 space-y-1 overflow-y-auto">
                   {notifs.map(n => (
@@ -336,6 +347,7 @@ function Layout({ children }: { children: React.ReactNode }) {
                 </div>
               </div>
             )}
+            </div>
             {user?.name && (
               <button onClick={logout} className="ml-2 rounded-pill bg-red-50 px-3 py-2 text-sm font-semibold text-red-600 hover:bg-red-100">
                 Logout
@@ -680,11 +692,30 @@ function Dashboard() {
   )
 }
 
-/* Shops listing */
+/* Shops listing — search covers shop names, categories, AND food items */
 function ShopsPage() {
   const [shops, setShops] = useState<Shop[]>([]); const [search, setSearch] = useState(''); const [loading, setLoading] = useState(true)
-  useEffect(() => { fetchShopsCached().then(s => setShops(s)).finally(() => setLoading(false)) }, [])
-  const filtered = shops.filter(s => `${s.name} ${s.category}`.toLowerCase().includes(search.toLowerCase()))
+  const [allProducts, setAllProducts] = useState<Product[]>([])
+  useEffect(() => {
+    fetchShopsCached().then(s => setShops(s)).finally(() => setLoading(false))
+    /* Pre-fetch products from all shops so item search works instantly */
+    api.get<Product[]>('/local/products').then(r => setAllProducts(r.data || [])).catch(() => {})
+  }, [])
+  /* If the search query matches any product name/description/category, include
+     the parent shop in the results — students can search "biryani" and see every
+     shop that sells it. */
+  const q = search.toLowerCase().trim()
+  const shopIdsWithMatchingProduct = q ? [...new Set(allProducts.filter(p =>
+    `${p.name} ${p.description || ''} ${p.category || ''}`.toLowerCase().includes(q)
+  ).map(p => p.shop_id))] : []
+  const filtered = shops.filter(s => {
+    if (!q) return true
+    /* Match on shop name or category first */
+    if (`${s.name} ${s.category}`.toLowerCase().includes(q)) return true
+    /* Match on any food item belonging to this shop */
+    if (shopIdsWithMatchingProduct.includes(s.id)) return true
+    return false
+  })
   if (loading) return <div className="flex items-center justify-center py-20 text-gray-400">Loading...</div>
   return (
     <div className="mx-auto max-w-7xl px-4 py-6">
@@ -787,16 +818,37 @@ function CartPage() {
         </div>
       ) : (
         <div className="grid gap-6 lg:grid-cols-[1fr_340px]">
-          <div className="space-y-3">
-            {items.map(item => (
-              <div key={item.product_id} className="rounded-btn bg-white p-4 shadow-sm border flex items-center justify-between">
-                <div><h3 className="font-bold text-primary-dark">{item.name}</h3><p className="text-sm text-gray-500">₹{item.price} each</p></div>
-                <div className="flex items-center gap-3">
-                  <div className="flex items-center rounded-btn border"><button onClick={() => { updateQty(item.product_id, item.quantity - 1); setItems(getCart()) }} className="px-3 py-1.5 text-sm font-bold">−</button><span className="min-w-[2rem] text-center text-sm font-bold">{item.quantity}</span><button onClick={() => { updateQty(item.product_id, item.quantity + 1); setItems(getCart()) }} className="px-3 py-1.5 text-sm font-bold">+</button></div>
-                  <span className="font-bold text-primary">₹{item.price * item.quantity}</span>
-                </div>
-              </div>
-            ))}
+          <div className="space-y-4">
+            {/* Group cart items by shop */}
+            {(() => {
+              const grouped: Record<string, CartItem[]> = {}
+              for (const item of items) {
+                if (!grouped[item.shop_name]) grouped[item.shop_name] = []
+                grouped[item.shop_name].push(item)
+              }
+              return Object.entries(grouped).map(([shopName, shopItems]) => {
+                const shopSubtotal = shopItems.reduce((a, i) => a + i.price * i.quantity, 0)
+                return (
+                  <div key={shopName} className="rounded-btn bg-white p-4 shadow-sm border">
+                    <div className="mb-3 flex items-center justify-between border-b border-gray-100 pb-2">
+                      <h3 className="flex items-center gap-2 font-bold text-primary-dark">{IconH.store({ className: 'h-4 w-4 text-primary' })}{shopName}</h3>
+                      <span className="text-xs font-semibold text-primary">Subtotal ₹{shopSubtotal}</span>
+                    </div>
+                    <div className="space-y-2">
+                      {shopItems.map(item => (
+                        <div key={item.product_id} className="flex items-center justify-between rounded-sm bg-gray-50 px-3 py-2.5">
+                          <div className="min-w-0"><h4 className="truncate font-semibold text-primary-dark">{item.name}</h4><p className="text-xs text-gray-500">₹{item.price} each</p></div>
+                          <div className="flex items-center gap-3">
+                            <div className="flex items-center rounded-btn border"><button onClick={() => { updateQty(item.product_id, item.quantity - 1); setItems(getCart()) }} className="px-3 py-1.5 text-sm font-bold">−</button><span className="min-w-[2rem] text-center text-sm font-bold">{item.quantity}</span><button onClick={() => { updateQty(item.product_id, item.quantity + 1); setItems(getCart()) }} className="px-3 py-1.5 text-sm font-bold">+</button></div>
+                            <span className="min-w-[4rem] text-right font-bold text-primary">₹{item.price * item.quantity}</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )
+              })
+            })()}
           </div>
           <div className="h-fit rounded-btn bg-white p-5 shadow-sm border">
             <h2 className="mb-4 text-lg font-bold text-primary-dark">Bill Details</h2>
@@ -941,30 +993,41 @@ function PaymentPage() {
     if (method === 'cod' && !codAvailable) { setErr('This shop has turned off Cash on Delivery — please pay via UPI instead'); return }
     setLoading(true)
     try {
-      const order = await api.post<Order>('/local/orders', {
-        shop_id: items[0].shop_id,
-        items: items.map(i => ({ product_id: i.product_id, quantity: i.quantity })),
-        student_name: user.name || 'Student',
-        student_phone: toE164(phone),
-        delivery_location: loc,
-        delivery_slot: slot,
-        payment_method: method === 'cod' ? 'COD' : 'UPI',
-      })
+      /* Group items by shop so each shop gets its own sub-order */
+      const shopGroups: Record<string, CartItem[]> = {}
+      for (const item of items) {
+        if (!shopGroups[item.shop_id]) shopGroups[item.shop_id] = []
+        shopGroups[item.shop_id].push(item)
+      }
+      const shopIds = Object.keys(shopGroups)
+      let lastOrder: Order | null = null
+      for (const shopId of shopIds) {
+        const shopItems = shopGroups[shopId]
+        const shopTotal = shopItems.reduce((a, i) => a + i.price * i.quantity, 0)
+        const order = await api.post<Order>('/local/orders', {
+          shop_id: shopId,
+          items: shopItems.map(i => ({ product_id: i.product_id, quantity: i.quantity })),
+          student_name: user.name || 'Student',
+          student_phone: toE164(phone),
+          delivery_location: loc,
+          delivery_slot: slot,
+          payment_method: method === 'cod' ? 'COD' : 'UPI',
+          total: shopTotal,
+        })
+        lastOrder = order.data
+        /* Record payment for each sub-order */
+        await api.post('/local/payments', { order_id: order.data.id, amount: shopTotal, method: method === 'cod' ? 'COD' : 'Manual UTR', utr_number: '', screenshot_name: '' })
+      }
 
       if (method === 'cod') {
-        // Cash on Delivery — nothing to pay now. The shop confirms the order.
         clearCart()
-        navigate(`/order/${order.data.id}`)
+        /* Navigate to last order's result page */
+        if (lastOrder) navigate(`/order/${lastOrder.id}`)
         return
       }
 
-      // UPI QR flow — record the payment intent and land on the order page,
-      // which shows the shop's QR with the amount pre-filled. The student
-      // scans it with their UPI app (the exact QR flow that already works
-      // perfectly) — no deep-link button, no bank-limit rejections.
-      await api.post('/local/payments', { order_id: order.data.id, amount: bill.total, method: 'Manual UTR', utr_number: '', screenshot_name: '' })
       clearCart()
-      navigate(`/order/${order.data.id}`)
+      if (lastOrder) navigate(`/order/${lastOrder.id}`)
     } catch (err: any) { setErr(err?.response?.data?.detail || 'Failed') }
     finally { setLoading(false) }
   }
@@ -1118,6 +1181,35 @@ function OrderResultPage() {
   const { orderId } = useParams()
   const [order, setOrder] = useState<Order | null>(null); const [shop, setShop] = useState<Shop | null>(null); const [ps, setPs] = useState<PaymentSettings | null>(null)
   const [cancelling, setCancelling] = useState(false); const [cancelErr, setCancelErr] = useState('')
+  const [screenshot, setScreenshot] = useState<File | null>(null); const [uploading, setUploading] = useState(false); const [uploadMsg, setUploadMsg] = useState(''); const [uploadErr, setUploadErr] = useState(''); const [screenshotUrl, setScreenshotUrl] = useState('')
+  const [utr, setUtr] = useState(''); const [utrSaving, setUtrSaving] = useState(false); const [utrMsg, setUtrMsg] = useState(''); const [utrErr, setUtrErr] = useState('')
+  const saveUtr = async () => {
+    if (!orderId || !utr.trim()) return
+    setUtrSaving(true); setUtrMsg(''); setUtrErr('')
+    try {
+      const res = await api.post('/local/payments/utr', { order_id: orderId, utr_number: utr.trim().toUpperCase() })
+      setUtrMsg(res.data?.message || 'UTR saved — your order will auto-confirm once the bank SMS matches it.')
+      if (res.data?.order?.status === 'Confirmed') {
+        const s = await api.get<Order>(`/local/orders/${orderId}`).catch(() => null); if (s?.data) setOrder(s.data)
+      }
+    } catch (err: any) { setUtrErr(err?.response?.data?.detail || 'Could not save the UTR — please try again') }
+    finally { setUtrSaving(false) }
+  }
+  const uploadScreenshot = async () => {
+    if (!screenshot || !orderId) return
+    setUploading(true); setUploadMsg(''); setUploadErr('')
+    try {
+      const fd = new FormData(); fd.append('file', screenshot); fd.append('order_id', orderId)
+      if (utr.trim()) fd.append('utr_number', utr.trim().toUpperCase())
+      const res = await api.post('/local/payments/upload', fd)
+      setUploadMsg(res.data?.message || 'Screenshot uploaded — the shop will verify your payment.')
+      setScreenshotUrl(res.data?.screenshot_url || '')
+      setScreenshot(null)
+      if (res.data?.matched) setUtrMsg('UTR matched the bank SMS — your order is confirmed!')
+      const s = await api.get<Order>(`/local/orders/${orderId}`).catch(() => null); if (s?.data) setOrder(s.data)
+    } catch (err: any) { setUploadErr(err?.response?.data?.detail || 'Upload failed — please try again') }
+    finally { setUploading(false) }
+  }
   /* Cancellation follows the delivery window: orders placed inside a window
      (morning → 12:30 PM, afternoon → 6:00 PM) are auto-accepted, and the
      student can cancel until that window closes. */
@@ -1197,6 +1289,39 @@ function OrderResultPage() {
                   <p className="max-w-xs text-center text-[11px] leading-relaxed text-gold-dark">If the UPI app shows <b>"exceeded bank limit"</b>, that's <b>your bank</b> refusing — no money is debited. It means your UPI daily limit is used up or the account was newly linked. Try again later or use Cash on Delivery.</p>
                 </div>
               )}
+              <div className="mt-4 rounded-card border-2 border-dashed border-gold/40 bg-white p-4">
+                <p className="text-sm font-bold text-gold-dark">Confirm your payment (UTR)</p>
+                <p className="mt-0.5 text-[11px] leading-relaxed text-gold-dark">After paying via UPI, you'll see a <b>UTR number</b> in your payment success screen — paste it here. When the shop's bank sends the credit SMS with the <b>same UTR</b>, the two match and your order is <b>auto-confirmed</b>.</p>
+                <input
+                  value={utr} onChange={e => { setUtr(e.target.value); setUtrMsg(''); setUtrErr('') }}
+                  placeholder="Enter UTR here (e.g. THQ42010724961)" autoCapitalize="characters"
+                  className="mt-2 w-full rounded-btn border-2 border-gold-light px-3 py-2 text-xs font-semibold tracking-wide text-gold-dark outline-none focus:border-gold"
+                />
+                <button onClick={() => void saveUtr()} disabled={!utr.trim() || utrSaving}
+                  className="mt-2 w-full rounded-btn bg-gold-dark px-4 py-2 text-xs font-bold text-white transition-colors hover:bg-gold disabled:cursor-not-allowed disabled:opacity-40">
+                  {utrSaving ? 'Saving…' : (utrMsg.includes('confirmed') ? 'UTR Matched ✓' : 'Submit UTR')}
+                </button>
+                {utrMsg && <p className="mt-1.5 text-[11px] font-semibold text-emerald-700">{utrMsg}</p>}
+                {utrErr && <p className="mt-1.5 text-[11px] font-semibold text-red-600">{utrErr}</p>}
+                <div className="my-3 h-px border-t border-dashed border-gold/30" />
+                <p className="text-xs font-bold text-gold-dark">Or upload the payment screenshot</p>
+                <p className="mt-0.5 text-[11px] leading-relaxed text-gold-dark">Attach the UPI screenshot so the shop can verify it manually.</p>
+                <input
+                  type="file" accept="image/*,.pdf"
+                  onChange={e => { setScreenshot(e.target.files?.[0] || null); setUploadMsg(''); setUploadErr('') }}
+                  className="mt-2 w-full text-xs"
+                />
+                {screenshot && (
+                  <p className="mt-1.5 text-[11px] font-semibold text-emerald-700">Selected: {screenshot.name} ({(screenshot.size / 1024).toFixed(0)} KB)</p>
+                )}
+                <button onClick={() => void uploadScreenshot()} disabled={!screenshot || uploading}
+                  className="mt-2 w-full rounded-btn bg-gold-dark px-4 py-2 text-xs font-bold text-white transition-colors hover:bg-gold disabled:cursor-not-allowed disabled:opacity-40">
+                  {uploading ? 'Uploading…' : (uploadMsg ? 'Screenshot uploaded ✓' : 'Upload Screenshot')}
+                </button>
+                {screenshotUrl && <img src={screenshotUrl} alt="Uploaded payment screenshot" className="mt-2 max-h-40 w-full rounded-card object-contain" />}
+                {uploadMsg && <p className="mt-1.5 text-[11px] font-semibold text-emerald-700">{uploadMsg}</p>}
+                {uploadErr && <p className="mt-1.5 text-[11px] font-semibold text-red-600">{uploadErr}</p>}
+              </div>
             </div>
           )
         })()}
@@ -1386,7 +1511,7 @@ export default function App() {
           <RequireAuth>
             <Layout>
               <Routes>
-                <Route path="/" element={<Dashboard />} />
+                <Route path="/" element={<ShopsPage />} />
                 <Route path="/dashboard" element={<Dashboard />} />
                 <Route path="/shops" element={<ShopsPage />} />
                 <Route path="/shop/:shopId" element={<ShopDetailPage />} />

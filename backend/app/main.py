@@ -4,6 +4,7 @@ Main FastAPI application
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 from contextlib import asynccontextmanager
 from app.core.config import settings
@@ -167,6 +168,12 @@ app = FastAPI(
     description="Enterprise Campus Food Ordering Platform",
     lifespan=lifespan,
 )
+
+# ─── Uploaded files (payment screenshots) ───
+# Served under /uploads so the student portal can show the screenshot back.
+UPLOADS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "uploads", "payments")
+os.makedirs(UPLOADS_DIR, exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=UPLOADS_DIR), name="uploads")
 
 # Configure CORS — restrict methods and headers in production
 app.add_middleware(

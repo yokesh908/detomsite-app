@@ -1137,6 +1137,40 @@ def get_payment_by_order_id(order_id: str) -> dict[str, Any] | None:
             return dict(row) if row else None
 
 
+def set_payment_utr(order_id: str, utr_number: str) -> dict[str, Any] | None:
+    """Stamp the student-provided UTR on the latest payment for an order."""
+    with _DBContext(_connect()) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT * FROM payments WHERE order_id = %s ORDER BY created_at DESC, id DESC LIMIT 1",
+                (order_id,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+            cursor.execute(
+                "UPDATE payments SET utr_number = %s WHERE id = %s",
+                (utr_number, row["id"]),
+            )
+            cursor.execute("SELECT * FROM payments WHERE id = %s", (row["id"],))
+            updated = cursor.fetchone()
+            return dict(updated) if updated else None
+
+
+def get_payment_by_utr(utr_number: str) -> dict[str, Any] | None:
+    """Find the most recent payment record carrying this UTR (student-entered)."""
+    if not utr_number:
+        return None
+    with _DBContext(_connect()) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT * FROM payments WHERE utr_number = %s ORDER BY created_at DESC, id DESC LIMIT 1",
+                (utr_number,),
+            )
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+
 def get_payment_settings() -> dict[str, Any]:
     defaults = {
         "manual_enabled": False,
@@ -2739,6 +2773,37 @@ def list_whatsapp_logs(limit: int = 100) -> list[dict[str, Any]]:
     try:
         with connection.cursor() as cur:
             cur.execute("SELECT * FROM whatsapp_logs ORDER BY created_at DESC LIMIT %s", (limit,))
+            return _rows_to_dicts(cur.fetchall())
+    finally:
+        _release(connection)
+
+
+def log_sms(
+    sub_order_id: str = "",
+    phone: str = "",
+    message: str = "",
+    status: str = "Sent",
+    direction: str = "out",
+) -> dict[str, Any] | None:
+    """Persist one SMS (out = sent to a phone, in = received from a phone)."""
+    connection = _connect()
+    try:
+        with connection.cursor() as cur:
+            cur.execute(
+                """INSERT INTO sms_logs (sub_order_id, phone, message, direction, status)
+                   VALUES (%s, %s, %s, %s, %s) RETURNING *""",
+                (sub_order_id, phone or "", message or "", direction, status),
+            )
+            return _rows_to_dicts(cur.fetchall())[0]
+    finally:
+        _release(connection)
+
+
+def list_sms_logs(limit: int = 100) -> list[dict[str, Any]]:
+    connection = _connect()
+    try:
+        with connection.cursor() as cur:
+            cur.execute("SELECT * FROM sms_logs ORDER BY created_at DESC LIMIT %s", (limit,))
             return _rows_to_dicts(cur.fetchall())
     finally:
         _release(connection)

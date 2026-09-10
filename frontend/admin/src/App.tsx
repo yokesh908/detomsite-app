@@ -1,4 +1,4 @@
-import { useState, useEffect, FormEvent } from 'react'
+import { useState, useEffect, FormEvent, useRef } from 'react'
 import { BrowserRouter as Router, Routes, Route, Link, useNavigate, useLocation } from 'react-router-dom'
 import api from './services/api'
 
@@ -42,16 +42,16 @@ function ThemeButton({ className = '' }: { className?: string }) {
   )
 }
 
-/* Password input with a show/hide toggle — every login/signup form uses it. */
+/* Password input with a show/hide toggle — respects light/dark theme. */
 function PasswordField({ value, onChange, placeholder = '••••••', autoComplete, required = true, className = '' }: { value: string; onChange: (v: string) => void; placeholder?: string; autoComplete?: string; required?: boolean; className?: string }) {
   const [show, setShow] = useState(false)
   return (
     <div className="relative">
       <input type={show ? 'text' : 'password'} value={value} onChange={e => onChange(e.target.value)}
         placeholder={placeholder} autoComplete={autoComplete} required={required}
-        className={`w-full rounded-btn border border-gray-800 bg-gray-900 px-4 py-3 pr-11 text-sm text-white placeholder-gray-500 outline-none transition-all focus:border-amber-500 ${className}`} />
+        className={`w-full rounded-btn border border-gray-800 light:border-gray-200 bg-gray-900 light:bg-white px-4 py-3 pr-11 text-sm text-white light:text-gray-900 placeholder-gray-500 light:placeholder-gray-400 outline-none transition-all focus:border-amber-500 ${className}`} />
       <button type="button" onClick={() => setShow(!show)} tabIndex={-1} aria-label={show ? 'Hide password' : 'Show password'}
-        className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded-sm p-1.5 text-gray-500 transition-colors hover:bg-gray-800 hover:text-gold">
+        className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded-sm p-1.5 text-gray-500 transition-colors hover:bg-gray-800 light:hover:bg-gray-100 hover:text-gold">
         {show
           ? <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" /><path d="m1 1 22 22" /></svg>
           : <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z" /><circle cx="12" cy="12" r="3" /></svg>}
@@ -108,9 +108,19 @@ function Layout({ children }: { children: React.ReactNode }) {
   const [menu, setMenu] = useState(false)
   const [notifs, setNotifs] = useState<any[]>([])
   const [notifOpen, setNotifOpen] = useState(false)
+  const notifRef = useRef<HTMLDivElement>(null)
   const admin = JSON.parse(localStorage.getItem('admin_user') || '{}')
   const path = useLocation().pathname
   const logout = () => { localStorage.removeItem('admin_token'); localStorage.removeItem('admin_user'); window.location.href = '/login' }
+
+  /* Close the notification dropdown when clicking outside it */
+  useEffect(() => {
+    const onOutside = (e: MouseEvent) => {
+      if (notifRef.current && !notifRef.current.contains(e.target as Node)) setNotifOpen(false)
+    }
+    document.addEventListener('mousedown', onOutside)
+    return () => document.removeEventListener('mousedown', onOutside)
+  }, [])
 
   useEffect(() => {
     // Admin bell — vendor product changes & new registrations land here.
@@ -125,6 +135,7 @@ function Layout({ children }: { children: React.ReactNode }) {
     { p: '/vendors', l: 'Vendors' },
     { p: '/orders', l: 'Orders' },
     { p: '/payments', l: 'Payments' },
+    { p: '/sms', l: 'SMS' },
     { p: '/revenue', l: 'Revenue' },
     { p: '/feedback', l: 'Feedback' },
     { p: '/reviews', l: 'Reviews' },
@@ -143,7 +154,7 @@ function Layout({ children }: { children: React.ReactNode }) {
               <Link key={item.p} to={item.p} className={`rounded-pill px-3 py-2 text-sm font-semibold transition-all ${path === item.p ? 'bg-gold text-black' : 'text-gray-400 hover:bg-gray-800 hover:text-white'}`}>{item.l}</Link>
             ))}
             <ThemeButton />
-            <div className="relative">
+            <div ref={notifRef} className="relative">
               <button onClick={() => setNotifOpen(!notifOpen)} className="rounded-pill px-2 py-2 text-sm text-gray-400 transition-all hover:bg-gray-800 hover:text-white">
                 <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M6 9a6 6 0 1 1 12 0c0 5 2 6 2 6H4s2-1 2-6Z" /><path d="M10 20a2.2 2.2 0 0 0 4 0" /></svg>
                 {notifs.length > 0 && <span className="ml-1 text-xs font-bold text-gold">{notifs.length}</span>}
@@ -503,7 +514,7 @@ function UsersPage() {
 function VendorsPage() {
   const [vendors, setVendors] = useState<any[]>([]); const [products, setProducts] = useState<any[]>([]); const [selectedShop, setSelectedShop] = useState(''); const [msg, setMsg] = useState(''); const [loading, setLoading] = useState(true)
   const [logs, setLogs] = useState<any>(null); const [logsShop, setLogsShop] = useState('')
-  const [vendorFilter, setVendorFilter] = useState<'approved' | 'pending' | 'removed'>('approved')
+  const [vendorFilter, setVendorFilter] = useState<'approved' | 'pending' | 'suspended' | 'removed'>('approved')
   const [todayOrders, setTodayOrders] = useState<any[]>([]); const [todayShop, setTodayShop] = useState(''); const [todayCount, setTodayCount] = useState(0); const [todayShopName, setTodayShopName] = useState('')
   const [settingsShop, setSettingsShop] = useState(''); const [settingsForm, setSettingsForm] = useState({ upi_id: '', upi_enabled: true, cod_enabled: true, phone: '' }); const [settingsSaving, setSettingsSaving] = useState(false)
   const [editProduct, setEditProduct] = useState<any>(null); const [productForm, setProductForm] = useState({ name: '', price: '', category: 'Food', description: '', inventory: '0', prep_time: '10', available: true }); const [productSaving, setProductSaving] = useState(false); const [productShopId, setProductShopId] = useState('')
@@ -593,11 +604,13 @@ function VendorsPage() {
   const filteredVendors = vendors.filter((v: any) =>
     vendorFilter === 'approved' ? v.approval_status === 'Approved'
       : vendorFilter === 'pending' ? v.approval_status === 'Pending Approval'
-        : v.approval_status === 'Removed')
-  const filterCount = (id: 'approved' | 'pending' | 'removed') => vendors.filter((v: any) =>
+        : vendorFilter === 'suspended' ? v.approval_status === 'Suspended'
+          : v.approval_status === 'Removed')
+  const filterCount = (id: 'approved' | 'pending' | 'suspended' | 'removed') => vendors.filter((v: any) =>
     id === 'approved' ? v.approval_status === 'Approved'
       : id === 'pending' ? v.approval_status === 'Pending Approval'
-        : v.approval_status === 'Removed').length
+        : id === 'suspended' ? v.approval_status === 'Suspended'
+          : v.approval_status === 'Removed').length
 
   return (
     <div className="mx-auto max-w-7xl px-4 py-6">
@@ -609,6 +622,7 @@ function VendorsPage() {
         {([
           { id: 'approved', l: 'Approved' },
           { id: 'pending', l: 'Pending' },
+          { id: 'suspended', l: 'Suspended' },
           { id: 'removed', l: 'Removed' },
         ] as const).map(f => (
           <button key={f.id} onClick={() => setVendorFilter(f.id)}
@@ -618,7 +632,7 @@ function VendorsPage() {
         ))}
       </div>
 
-      <h2 className="mb-3 text-lg font-bold text-gray-400">{vendorFilter === 'approved' ? 'Approved' : vendorFilter === 'pending' ? 'Pending' : 'Removed'} Vendors ({filteredVendors.length})</h2>
+      <h2 className="mb-3 text-lg font-bold text-gray-400">{vendorFilter === 'approved' ? 'Approved' : vendorFilter === 'pending' ? 'Pending' : vendorFilter === 'suspended' ? 'Suspended' : 'Removed'} Vendors ({filteredVendors.length})</h2>
       {loading ? <p className="text-center text-gray-500 py-8">Loading...</p> : (
         <div className="space-y-3">
           {/* The number is computed from the row position (not the DB id), so
@@ -1466,6 +1480,42 @@ function ReviewsPage() {
   )
 }
 
+/* SMS Logs — every order SMS (out) and confirm/reject reply (in) the system
+   sent or received, so the admin can watch the phone-notification pipeline. */
+function SmsLogsPage() {
+  const [logs, setLogs] = useState<any[]>([])
+  const [loading, setLoading] = useState(true)
+  useEffect(() => {
+    const load = () => { if (document.visibilityState === 'visible') api.get('/local/sms-logs').then(r => { setLogs(r.data || []); setLoading(false) }).catch(() => { setLoading(false) }) }
+    load(); const t = setInterval(load, 15000); return () => clearInterval(t)
+  }, [])
+  return (
+    <div className="mx-auto max-w-5xl px-4 py-6">
+      <div className="mb-6">
+        <h1 className="text-2xl font-bold text-white">SMS Logs</h1>
+        <p className="text-sm text-gray-400">Order SMS sent to shopkeepers' phones + the YES/NO confirm replies — refreshed live</p>
+      </div>
+      {loading ? <p className="text-gray-500">Loading...</p> : logs.length === 0 ? (
+        <div className="rounded-btn border border-gray-800 bg-gray-900 p-8 text-center text-gray-500">No SMS sent yet. Place an order to see the pipeline.</div>
+      ) : (
+        <div className="space-y-2">
+          {logs.map((s: any) => (
+            <div key={s.id} className="rounded-btn border border-gray-800 bg-gray-900 p-4">
+              <div className="flex items-center justify-between gap-2">
+                <span className={`rounded-pill px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide ${s.direction === 'in' ? 'bg-emerald-900/40 text-emerald-300' : 'bg-primary-dark/40 text-primary'}`}>{s.direction === 'in' ? 'Received' : 'Sent'}</span>
+                <span className="text-xs text-gray-500">{(s.created_at || '').replace('T', ' ').slice(0, 19)}</span>
+              </div>
+              <p className="mt-1.5 whitespace-pre-line font-mono text-xs leading-relaxed text-gray-300">{s.message}</p>
+              {s.phone && <p className="mt-1 text-xs text-gray-500">→ {s.phone}{s.status ? ` · ${s.status}` : ''}</p>}
+              {s.sub_order_id && <p className="text-[11px] text-gray-600">order {s.sub_order_id}</p>}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function App() {
   return (
     <Router>
@@ -1473,27 +1523,42 @@ export default function App() {
         <Route path="/login" element={<Login />} />
         <Route path="/forgot-password" element={<ForgotPassword />} />
         <Route path="/*" element={
-          <Layout>
-            <Routes>
-              <Route path="/dashboard" element={<Dashboard />} />
-              <Route path="/users" element={<UsersPage />} />
-              <Route path="/vendors" element={<VendorsPage />} />
-              <Route path="/orders" element={<OrdersAdminPage />} />
-              <Route path="/payments" element={<PaymentsPage />} />
-              <Route path="/revenue" element={<RevenuePage />} />
-              <Route path="/feedback" element={<FeedbackPage />} />
-              <Route path="/reviews" element={<ReviewsPage />} />
-              <Route path="/settings" element={<SettingsPage />} />
-              <Route path="*" element={<NavigateToDashboard />} />
-            </Routes>
-          </Layout>
+          <RequireAuth>
+            <Layout>
+              <Routes>
+                <Route path="/dashboard" element={<Dashboard />} />
+                <Route path="/users" element={<UsersPage />} />
+                <Route path="/vendors" element={<VendorsPage />} />
+                <Route path="/orders" element={<OrdersAdminPage />} />
+                <Route path="/payments" element={<PaymentsPage />} />
+                <Route path="/sms" element={<SmsLogsPage />} />
+                <Route path="/revenue" element={<RevenuePage />} />
+                <Route path="/feedback" element={<FeedbackPage />} />
+                <Route path="/reviews" element={<ReviewsPage />} />
+                <Route path="/settings" element={<SettingsPage />} />
+                <Route path="*" element={<NavigateToDashboard />} />
+              </Routes>
+            </Layout>
+          </RequireAuth>
         } />
       </Routes>
     </Router>
   )
 }
 
+/* ─── Auth guard: redirects to /login if no valid admin token ─── */
+function RequireAuth({ children }: { children: React.ReactNode }) {
+  const navigate = useNavigate()
+  const token = localStorage.getItem('admin_token')
+  useEffect(() => {
+    if (!token) navigate('/login', { replace: true })
+  }, [token, navigate])
+  if (!token) return null
+  return <>{children}</>
+}
+
 function NavigateToDashboard() {
-  useEffect(() => { window.location.href = localStorage.getItem('admin_token') ? '/dashboard' : '/login' }, [])
+  const navigate = useNavigate()
+  useEffect(() => { navigate(localStorage.getItem('admin_token') ? '/dashboard' : '/login', { replace: true }) }, [])
   return null
 }

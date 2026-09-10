@@ -1,10 +1,13 @@
 """
 Local runnable API routes backed by SQLite / Supabase.
 """
-from fastapi import APIRouter, HTTPException, Depends, Header
+from fastapi import APIRouter, HTTPException, Depends, Header, UploadFile, File, Form
 from pydantic import BaseModel, EmailStr, Field
 from datetime import datetime
 import asyncio
+import os
+import re
+import shutil
 
 from app.core.config import settings
 from app.core import local_mongo_db
@@ -19,6 +22,7 @@ from app.core.order_slots import (
 )
 from app.core.security import hash_password, verify_password, create_access_token, create_refresh_token, decode_token
 from app.services import push_service
+from app.services import sms_service
 from typing import Optional
 import logging
 
@@ -99,6 +103,14 @@ async def database_status():
             "database": "Turso/libSQL",
             "persistent": True,
             "message": "Turso is active. Business data is stored in a persistent cloud database.",
+        }
+    if settings.USE_SUPABASE_DB:
+        return {
+            "connected": True,
+            "mode": "supabase",
+            "database": "Supabase Postgres",
+            "persistent": True,
+            "message": "Supabase Postgres is active. Business data is stored in a persistent cloud database.",
         }
     return {
         "connected": True,
@@ -582,6 +594,13 @@ async def add_order(data: LocalOrderCreate):
         except Exception as e:
             logger.warning(f"Could not schedule order push notification: {e}")
 
+    # SMS the shopkeeper (and a copy to the admin) so the order can be
+    # CONFIRMED by replying "YES <token>" — see sms_service + /sms/incoming.
+    try:
+        asyncio.get_running_loop().create_task(_notify_order_via_sms(order))
+    except Exception as e:
+        logger.warning(f"Could not schedule order SMS: {e}")
+
     return order
 
 
@@ -666,6 +685,339 @@ async def cancel_own_order(order_id: str, current_user: dict = Depends(get_curre
     }
 
 
+async def _notify_order_via_sms(order: dict) -> None:
+    """Send the new-order SMS to the shopkeeper's phone and a copy to the admin.
+
+    The message ends with "REPLY: YES <token> = CONFIRM | NO <token> = REJECT".
+    A real gateway replaces the ``log_sms`` calls in ``send_sms_async``; the
+    rest of the flow (webhook → Confirmed) is gateway-independent.
+    """
+    try:
+        if not order or not order.get("id"):
+            return
+        message = sms_service.compose_order_sms(order)
+        if not _use_mongo():
+            shop = await _db(db.get_shop, order["shop_id"])
+            shop_phone = str((shop or {}).get("phone") or "").strip()
+            # Admin copy — the first registered admin's phone.
+            admins = await _db(db.list_users_by_role, "admin")
+            admin_phone = ""
+            for a in admins or []:
+                p = str((a or {}).get("phone") or "").strip()
+                if p:
+                    admin_phone = p
+                    break
+            if shop_phone:
+                await sms_service.send_sms_async(
+                    shop_phone, message, _sms_log_fn, sub_order_id=order["id"]
+                )
+            if admin_phone:
+                await sms_service.send_sms_async(
+                    admin_phone,
+                    f"DETOMSITE: {message.splitlines()[0]} — order is waiting for confirmation.",
+                    _sms_log_fn,
+                    sub_order_id=order["id"],
+                )
+        else:
+            shop = await local_mongo_db.get_shop(order["shop_id"])
+            shop_phone = str((shop or {}).get("phone") or "").strip()
+            if shop_phone:
+                await local_mongo_db.log_sms(
+                    sub_order_id=order["id"],
+                    phone=shop_phone,
+                    message=message,
+                    status="Sent",
+                    direction="out",
+                )
+    except Exception as e:
+        logger.warning(f"SMS notify error for order {order.get('id')}: {e}")
+
+
+def _sms_log_fn(sub_order_id: str, phone: str, message: str, status: str) -> dict | None:
+    """Bounds to the active store's sync log_sms (runs in a worker thread)."""
+    return db.log_sms(
+        sub_order_id=sub_order_id,
+        phone=phone,
+        message=message,
+        status=status,
+        direction="out",
+    )
+
+
+async def _log_sms_inbound(order_id: str, phone: str, text: str, status: str) -> None:
+    """Log an inbound SMS reply against the active store."""
+    try:
+        if _use_mongo():
+            await local_mongo_db.log_sms(
+                sub_order_id=order_id, phone=phone, message=text, status=status, direction="in"
+            )
+        else:
+            await _db(db.log_sms, order_id, phone, text, status=status, direction="in")
+    except Exception as e:
+        logger.warning(f"SMS inbound log error: {e}")
+
+
+class LocalIncomingSms(BaseModel):
+    """An SMS received on a phone — normally from the shopkeeper/admin replying
+    ``YES <token>`` or ``NO <token>`` to confirm/reject an order."""
+    phone: str = ""
+    text: str = ""
+
+
+_UTR_PATTERNS = [
+    # Explicit "UTR/Ref: <code>" — most bank credit SMS mark it clearly.
+    re.compile(r"(?i)\butr\s*:?\s*([a-z0-9]{8,30})"),
+    re.compile(r"(?i)\bref(?:erence|\.|no|#)?\.?\s*:?\s*(?:re)?\s*([a-z0-9]{8,30})"),
+    # A bare 12-character alphanumeric block (the classic NPCI UTR shape) when
+    # nothing else is labelled — e.g. "THQ4201072496184" / "415390232910".
+    re.compile(r"(?<![\w.])([a-z]{0,4}\d{10,16})(?![\w.])"),
+]
+
+
+def _extract_utr(text: str) -> str:
+    """Pull a UPI transaction reference number out of a bank credit SMS.
+
+    Returns the raw code (uppercased) or ``""`` if none is recognisable.
+    """
+    if not text:
+        return ""
+    lowered = text.lower()
+    # A bank SMS almost always contains balance/credited key-words; requiring
+    # one of them keeps a random forwarded sms (e.g. an OTP) from being
+    # treated as a payment proof.
+    if not any(k in lowered for k in ("cred", "depos", "trns", "txn", "upi", "bene", "debit")):
+        return ""
+    for pattern in _UTR_PATTERNS:
+        m = pattern.search(text)
+        if m:
+            return m.group(1).upper()
+    return ""
+
+
+async def _confirm_order_via_utr(utr: str, phone: str = "", raw_text: str = "") -> dict | None:
+    """Auto-confirm an order when a bank SMS UTR matches the student's UTR.
+
+    The student pays via UPI and pastes their UTR on the order page. The shop's
+    bank sends a credit SMS containing the same UTR. When both are present the
+    payment is provably received → order becomes **Confirmed**. Returns the
+    updated order, or ``None`` when there is no pending match yet.
+    """
+    try:
+        if _use_mongo():
+            payment = await local_mongo_db.get_payment_by_utr(utr)
+        else:
+            payment = await _db(db.get_payment_by_utr, utr)
+        if not payment:
+            return None
+        order = await local_mongo_db.get_order(payment["order_id"]) if _use_mongo() else await _db(db.get_order, payment["order_id"])
+        if not order:
+            return None
+        terminated = order.get("status") in ("Completed", "Cancelled", "Failed", "Refunded")
+        already_confirmed = order.get("status") == "Confirmed"
+        if terminated or already_confirmed:
+            return None
+
+        # Payment proven → mark it Success and pin the order to Confirmed.
+        if _use_mongo():
+            await local_mongo_db.update_payment_status(payment["id"], "Success")
+            updated = await local_mongo_db.update_order_status(order["id"], "Confirmed")
+            await local_mongo_db.create_notification(
+                title="Payment confirmed — order confirmed",
+                message=f"UTR {utr} matched your payment — token #{order.get('token')} is confirmed.",
+                order_id=order["id"],
+                status="Confirmed",
+            )
+        else:
+            await _db(db.update_payment_status, payment["id"], "Success")
+            updated = await _db(db.update_order_status, order["id"], "Confirmed")
+            await _db(
+                db.create_notification,
+                title="Payment confirmed — order confirmed",
+                message=f"UTR {utr} matched your payment — token #{order.get('token')} is confirmed.",
+                order_id=order["id"],
+                status="Confirmed",
+                target_role="student",
+            )
+            try:
+                await _db(
+                    db.create_notification,
+                    title="Order confirmed via UTR match",
+                    message=f"Token #{order.get('token')} — the bank SMS UTR matched the student's UTR.",
+                    order_id=order["id"],
+                    status="Confirmed",
+                    target_role="admin",
+                )
+            except Exception as e:
+                logger.warning(f"Admin UTR-match notification error: {e}")
+            if raw_text:
+                await _log_sms_inbound(order["id"], phone, raw_text, "UTR Matched")
+            student_phone = str(order.get("student_phone") or "").strip()
+            if student_phone:
+                await sms_service.send_sms_async(
+                    student_phone,
+                    sms_service.compose_confirmation_sms(order),
+                    _sms_log_fn,
+                    sub_order_id=order["id"],
+                )
+        return updated or order
+    except Exception as e:
+        logger.warning(f"UTR auto-confirm error for {utr}: {e}")
+        return None
+
+
+class LocalPaymentUtr(BaseModel):
+    order_id: str
+    utr_number: str = Field(..., min_length=6, max_length=40)
+
+
+@router.post("/payments/utr")
+async def submit_payment_utr(data: LocalPaymentUtr):
+    """The student pastes the UPI transaction UTR after paying.
+
+    It is stored against the order's payment record. When the shopkeeper's
+    bank credit SMS (with the same UTR) arrives via ``/sms/incoming`` the two
+    sides match and the order is auto-confirmed. If the bank SMS already
+    arrived first, the match happens right now.
+    """
+    order = await local_mongo_db.get_order(data.order_id) if _use_mongo() else await _db(db.get_order, data.order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    utr = (data.utr_number or "").strip().upper()
+    if _use_mongo():
+        payment = await local_mongo_db.set_payment_utr(data.order_id, utr)
+    else:
+        payment = await _db(db.set_payment_utr, data.order_id, utr)
+    if not payment:
+        raise HTTPException(status_code=400, detail="No payment record for this order yet — try again in a moment.")
+
+    # Bank SMS may have arrived before the student typed the UTR.
+    confirmed = await _confirm_order_via_utr(utr)
+    if confirmed:
+        return {"message": "UTR matched the bank SMS — your order is confirmed!", "payment": payment, "order": confirmed}
+    return {
+        "message": "UTR saved — your order auto-confirms the moment the bank's credit SMS with this UTR arrives.",
+        "payment": payment,
+        "order": None,
+    }
+
+
+@router.post("/sms/incoming")
+async def sms_incoming(data: LocalIncomingSms):
+    """Receive an inbound SMS reply and act on it.
+
+    Two flows are supported:
+
+    1. **Payment auto-confirm (bank SMS):** when the SMS contains a UTR that
+       matches a student-entered UTR on a pending payment, the order is marked
+       **Confirmed** automatically — the money is provably in the shop's bank.
+    2. **Manual confirm/reject (plain phone):** ``YES <token>`` /
+       ``NO <token>`` (case-insensitive) sets the order to **Confirmed** or
+       **Cancelled**. Tokens are printed in the order SMS, so the shopkeeper
+       can confirm from their plain phone — no app taps needed.
+    """
+    text = (data.text or "").strip()
+    phone = (data.phone or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="No SMS text provided")
+
+    report = {"received": True, "phone": phone, "text": text, "order": None}
+
+    # Flow 1 — the bank's credit SMS: extract the UTR and auto-confirm when it
+    # matches the student's UTR on a pending payment.
+    utr = _extract_utr(text)
+    if utr:
+        await _log_sms_inbound("", phone, text, "UTR Received")
+        matched = await _confirm_order_via_utr(utr, phone=phone, raw_text=text)
+        if matched:
+            report["order"] = matched
+            report["matched"] = {"utr": utr}
+            return report
+
+    # Flow 2 — "YES 123" / "NO 123" — token may carry a leading #.
+    lowered = text.lower().replace("#", " ")
+    words = lowered.split()
+    action = None
+    token = ""
+    for i, w in enumerate(words):
+        if w in ("yes", "y", "confirm", "accept", "ok"):
+            action = "Confirmed"
+            if i + 1 < len(words):
+                token = words[i + 1]
+            break
+        if w in ("no", "n", "reject", "decline", "cancel"):
+            action = "Cancelled"
+            if i + 1 < len(words):
+                token = words[i + 1]
+            break
+    if not action:
+        await _log_sms_inbound("", phone, text, "Unknown")
+        raise HTTPException(status_code=400, detail="Unrecognised SMS — send a UTR to auto-confirm, or reply YES <token> / NO <token>.")
+
+    # Find the order by token (matches today's/latest order with that token).
+    if _use_mongo():
+        order = await local_mongo_db.find_order_by_token(token)
+    else:
+        order = await _db(db.find_order_by_token, token)
+    if not order:
+        await _log_sms_inbound("", phone, text, "No Match")
+        raise HTTPException(status_code=404, detail=f"No order with token #{token} found.")
+
+    if action == "Confirmed":
+        if _use_mongo():
+            updated = await local_mongo_db.update_order_status(order["id"], "Confirmed")
+        else:
+            updated = await _db(db.update_order_status, order["id"], "Confirmed")
+            # The admin watches the pipeline too — bell them when a shop
+            # confirms an order over SMS (shop + admin both have the app).
+            try:
+                await _db(
+                    db.create_notification,
+                    title="Order confirmed via SMS",
+                    message=f"Token #{token} confirmed — {order.get('shop_name', 'a shop')} accepted the order.",
+                    order_id=order["id"],
+                    status="Confirmed",
+                    target_role="admin",
+                )
+            except Exception as e:
+                logger.warning(f"Admin SMS-confirm notification error: {e}")
+        if not updated:
+            raise HTTPException(status_code=400, detail="Could not confirm the order.")
+    else:
+        if _use_mongo():
+            updated = await local_mongo_db.update_order_status(order["id"], "Cancelled")
+        else:
+            updated = await _db(db.update_order_status, order["id"], "Cancelled")
+        if not updated:
+            raise HTTPException(status_code=400, detail="Could not cancel the order.")
+
+    # Log the inbound reply and the confirmation SMS to the student.
+    await _log_sms_inbound(order["id"], phone, text, "Processed")
+    if not _use_mongo():
+        try:
+            student_phone = str(order.get("student_phone") or "").strip()
+            if student_phone and action == "Confirmed":
+                await sms_service.send_sms_async(
+                    student_phone,
+                    sms_service.compose_confirmation_sms(order),
+                    _sms_log_fn,
+                    sub_order_id=order["id"],
+                )
+        except Exception as e:
+            logger.warning(f"SMS confirmation log error: {e}")
+
+    report["order"] = updated or order
+    return report
+
+
+@router.get("/sms-logs")
+async def sms_logs(limit: int = 100):
+    """Admin view of all SMS messages (out-bound orders + inbound replies)."""
+    if _use_mongo():
+        return await local_mongo_db.list_sms_logs(limit)
+    return await _db(db.list_sms_logs, limit)
+
+
 @router.get("/payments")
 async def payments():
     if _use_mongo():
@@ -713,6 +1065,90 @@ async def add_payment(data: LocalPaymentCreate):
     if not payment:
         raise HTTPException(status_code=400, detail="Unable to create payment")
     return payment
+
+
+@router.post("/payments/upload")
+async def upload_payment_screenshot(
+    file: UploadFile = File(...),
+    order_id: str = Form(...),
+    utr_number: str = Form(""),
+):
+    """Accept a payment screenshot for an order and attach it to the payment record.
+
+    Files are stored under ``/uploads/payments`` and served back at
+    ``/uploads/payments/<name>`` so the student and the shop can both see the
+    screenshot that proves the money was sent.
+    """
+    if not order_id:
+        raise HTTPException(status_code=400, detail="order_id is required")
+
+    # The order must exist before we accept an image for it.
+    if _use_mongo():
+        order = await local_mongo_db.get_order(order_id)
+    else:
+        order = await _db(db.get_order, order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    # Validate the file is an image.
+    filename = (file.filename or "").split("/")[-1].split("\\")[-1]
+    ext = os.path.splitext(filename)[1].lower()
+    if ext not in (".png", ".jpg", ".jpeg", ".webp", ".gif", ".pdf"):
+        raise HTTPException(status_code=400, detail="Only image files (PNG, JPG, WEBP, GIF) or PDFs are allowed")
+    if not file.content_type or not file.content_type.startswith("image/"):
+        if file.content_type != "application/pdf":
+            raise HTTPException(status_code=400, detail="Please upload an image or PDF file")
+
+    # Safe unique name: order id + timestamp + sanitized original name.
+    safe_base = re.sub(r"[^a-zA-Z0-9_-]", "", os.path.splitext(filename)[0]) or "screenshot"
+    safe_base = safe_base[:40]
+    stored_name = f"{order_id}_{int(datetime.now().timestamp())}_{safe_base}{ext}"
+    uploads_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "..", "uploads", "payments")
+    os.makedirs(uploads_dir, exist_ok=True)
+    dest_path = os.path.join(uploads_dir, stored_name)
+
+    try:
+        with open(dest_path, "wb") as out:
+            shutil.copyfileobj(file.file, out)
+    except Exception:
+        raise HTTPException(status_code=500, detail="Could not save the uploaded file")
+
+    # Attach the screenshot to the existing payment for this order (if any).
+    utr = (utr_number or "").strip() or None
+    if _use_mongo():
+        payment = await local_mongo_db.get_payment_by_order_id(order_id)
+        if payment:
+            await local_mongo_db.update_payment_doc(order_id, {"screenshot_name": stored_name, "utr_number": utr or payment.get("utr_number")})
+            payment = await local_mongo_db.get_payment_by_order_id(order_id)
+        else:
+            payment = await local_mongo_db.create_payment(order_id, int(order.get("total", 0)), "Manual UTR", utr, stored_name)
+    else:
+        payment = await _db(db.get_payment_by_order_id, order_id)
+        if payment:
+            payment = await _db(db.update_payment_record, order_id, stored_name, utr)
+        else:
+            payment = await _db(db.create_payment, order_id, int(order.get("total", 0)), "Manual UTR", utr, stored_name)
+
+    # If the UTR was attached with the screenshot, try the UTR auto-match too —
+    # the bank SMS may already have arrived.
+    matched = None
+    if utr:
+        matched = await _confirm_order_via_utr(utr)
+        if matched:
+            return {
+                "message": "Payment matched — your order is confirmed!",
+                "payment": payment,
+                "order": matched,
+                "screenshot_url": f"/uploads/payments/{stored_name}",
+                "matched": {"utr": utr},
+            }
+
+    return {
+        "message": "Payment screenshot uploaded — the shop will verify your payment.",
+        "payment": payment,
+        "screenshot_url": f"/uploads/payments/{stored_name}",
+        "order": matched,
+    }
 
 
 # ─── Razorpay endpoints ───
