@@ -948,7 +948,7 @@ function OrdersAdminPage() {
       <div className="rounded-btn border border-gray-800 bg-gray-900/50 overflow-hidden">
         {loading ? <p className="p-8 text-center text-gray-500">Loading...</p> : (
           <table className="w-full text-sm">
-            <thead><tr className="border-b border-gray-800 text-left text-xs text-gray-400">{['Token', 'Shop', 'Student', 'Phone', 'Items', 'Amount', 'Method', 'Location', 'Slot', 'Status', 'Placed'].map(h => <th key={h} className="px-4 py-3 font-bold">{h}</th>)}</tr></thead>
+            <thead><tr className="border-b border-gray-800 text-left text-xs text-gray-400">{['Token', 'Shop', 'Student', 'Phone', 'Items', 'Amount', 'Method', 'Location', 'Slot', 'Status', 'Placed', ''].map(h => <th key={h} className="px-4 py-3 font-bold">{h}</th>)}</tr></thead>
             <tbody>
               {filtered.map((o: any) => (
                 <tr key={o.id} className="border-b border-gray-800/50 text-gray-300">
@@ -963,9 +963,23 @@ function OrdersAdminPage() {
                   <td className="px-4 py-3">{o.delivery_slot}</td>
                   <td className="px-4 py-3"><span className={`rounded-sm px-2 py-0.5 text-xs ${o.status === 'Completed' ? 'bg-primary-dark/30 text-primary' : o.status === 'Cancelled' ? 'bg-red-900/30 text-red-400' : 'bg-gold-light/20 text-gold'}`}>{o.status}</span></td>
                   <td className="px-4 py-3 text-gray-500">{fmtTime(o.created_at) || o.created_at || '—'}</td>
+                  <td className="px-4 py-3">
+                    <button
+                      onClick={async () => {
+                        try {
+                          const r = await api.get(`/admin/orders/${o.id}/whatsapp-link`)
+                          window.open(r.data.url, '_blank')
+                        } catch (e: any) {
+                          alert(e?.response?.data?.detail || 'Could not build WhatsApp link for this shop')
+                        }
+                      }}
+                      title="Send this order to the shop's WhatsApp from your number"
+                      className="rounded bg-emerald-900/40 px-2 py-1 text-xs font-semibold text-emerald-400 hover:bg-emerald-800/50"
+                    >WhatsApp</button>
+                  </td>
                 </tr>
               ))}
-              {filtered.length === 0 && <tr><td colSpan={11} className="p-8 text-center text-gray-500">No orders match these filters</td></tr>}
+              {filtered.length === 0 && <tr><td colSpan={12} className="p-8 text-center text-gray-500">No orders match these filters</td></tr>}
             </tbody>
           </table>
         )}

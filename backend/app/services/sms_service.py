@@ -82,6 +82,40 @@ def compose_confirmation_sms(order: dict[str, Any]) -> str:
     )
 
 
+def compose_order_wa(order: dict[str, Any]) -> str:
+    """WhatsApp-ready order message for the shopkeeper.
+
+    Same facts as the SMS but reads naturally on WhatsApp (no CAPS shout, no
+    reply-token — the shopkeeper confirms from their app/portal instead). This
+    text is pre-filled into a ``wa.me`` chat with the shop's WhatsApp number,
+    so the shopkeeper receives it **from the admin's own number**, for free.
+    """
+    token = order.get("token") or order.get("id") or "?"
+    items = or_none(order.get("items"))
+    if not items:
+        products = order.get("products") or []
+        items = ", ".join(
+            f"{p.get('quantity', 1)}x {p.get('name', 'Item')}" for p in products
+        ) or "(no items listed)"
+    student = or_none(order.get("student_name")) or "(no name)"
+    location = or_none(order.get("delivery_location")) or "(no location)"
+    slot = or_none(order.get("delivery_slot")) or "Next batch"
+    amount = order.get("total") or 0
+    payment = or_none(order.get("payment_method")) or "UPI"
+    if payment.upper() == "COD":
+        payment = "Cash on Delivery"
+    return (
+        f"Hello! New DETOMSITE order #{token} for you 🛵\n\n"
+        f"• Student: {student}\n"
+        f"• Items: {items}\n"
+        f"• Deliver to: {location}\n"
+        f"• Slot: {slot}\n"
+        f"• Payment: {payment} ₹{amount}\n\n"
+        f"Please confirm this order in the DETOMSITE shop app. "
+        f"Thank you!"
+    )
+
+
 async def send_sms_async(
     phone: str,
     message: str,

@@ -331,6 +331,38 @@ async def list_all_orders(admin: dict = Depends(verify_admin)):
     return orders
 
 
+@router.get("/orders/{order_id}/whatsapp-link")
+async def order_whatsapp_link(order_id: str, admin: dict = Depends(verify_admin)):
+    """Free WhatsApp notify: pre-filled ``wa.me`` chat to the shop.
+
+    Opens WhatsApp on the admin's own phone with the order message ready to
+    send to the shopkeeper's WhatsApp number — the shopkeeper sees the message
+    coming FROM the admin's number. No gateway, no cost. Returns the wa.me URL
+    plus the target number so the UI can show a small preview.
+    """
+    from urllib.parse import quote
+    from app.services.sms_service import compose_order_wa
+
+    order = await _db(db.get_order, order_id)
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    shop = await _db(db.get_shop, order.get("shop_id") or "")
+    if not shop:
+        raise HTTPException(status_code=404, detail="Shop not found")
+
+    number = str(shop.get("whatsapp_number") or "").strip() or str(shop.get("phone") or "").strip()
+    if not number:
+        raise HTTPException(status_code=400, detail="Shop has no phone / WhatsApp number on file")
+
+    digits = "".join(ch for ch in number if ch.isdigit())
+    if len(digits) == 10:
+        digits = "91" + digits  # India default — admin number is Indian per the SMS flow.
+    text = compose_order_wa(order)
+    url = f"https://wa.me/{digits}?text={quote(text)}"
+    return {"shop_id": shop["id"], "shop_name": shop["name"], "number": number,
+            "message": text, "url": url}
+
+
 @router.get("/orders/date")
 async def list_orders_by_date(admin: dict = Depends(verify_admin), date: str = Query(..., description="YYYY-MM-DD")):
     """Get orders for a specific date."""
