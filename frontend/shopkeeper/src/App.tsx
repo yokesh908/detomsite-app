@@ -3,6 +3,19 @@ import { BrowserRouter as Router, Routes, Route, Link, useNavigate } from 'react
 import api from './services/api'
 import { QRCodeSVG } from 'qrcode.react'
 
+function apiError(e: any, fb = 'Request failed') {
+  const d = e?.response?.data?.detail
+  if (typeof d === 'string' && d.trim()) return d
+  if (Array.isArray(d)) {
+    const msgs = d.map((x: any) => (x?.msg || x?.message)).filter(Boolean)
+    if (msgs.length) return msgs.join(' - ')
+  }
+  const m = e?.response?.data?.message
+  if (typeof m === 'string' && m.trim()) return m
+  return (e?.message as string) || fb
+}
+
+
 /* UPI deep-link: encodes the shop's UPI ID so scanning the QR opens the
    student's UPI app with the amount filled in. Amount is left to the payer
    (a static shop QR) — the order flow pre-fills it client-side. */
@@ -202,7 +215,7 @@ function Register() {
   const navigate = useNavigate()
   const [f, setF] = useState({ username: '', email: '', phone: '', password: '', confirm: '', shopName: '', shopCategory: '', shopDescription: '', upiId: '' })
   const [err, setErr] = useState(''); const [loading, setLoading] = useState(false); const [registered, setRegistered] = useState(false)
-  const categories = ['Italian', 'Chinese', 'Indian', 'Fast Food', 'Cafe', 'Bakery', 'Desserts', 'Beverages', 'Japanese', 'Mexican', 'Continental']
+  const categories = ['Italian', 'Chinese', 'Indian', 'Fast Food', 'Biryani', 'Cafe', 'Bakery', 'Desserts', 'Beverages', 'Japanese', 'Mexican', 'Continental']
 
   const submit = async (e: FormEvent) => {
     e.preventDefault(); setErr('')
@@ -219,7 +232,7 @@ function Register() {
       localStorage.setItem('vendor_token', loginRes.data.access_token)
       localStorage.setItem('vendor_user', JSON.stringify(loginRes.data.user))
       setRegistered(true)
-    } catch (err: any) { setErr(err?.response?.data?.detail || 'Registration failed') }
+    } catch (err: any) { setErr(apiError(err, 'Registration failed')) }
     finally { setLoading(false) }
   }
 
@@ -307,7 +320,7 @@ function Login() {
       localStorage.setItem('vendor_token', res.data.access_token)
       localStorage.setItem('vendor_user', JSON.stringify(res.data.user))
       navigate('/mobile')
-    } catch (err: any) { setErr(err?.response?.data?.detail || 'Login failed') }
+    } catch (err: any) { setErr(apiError(err, 'Login failed')) }
     finally { setLoading(false) }
   }
   return (
@@ -341,7 +354,7 @@ function Login() {
             {[
               ['Your shop, online in minutes', 'Start & stop accepting orders with one tap'],
               ['Never miss an order', 'Instant alerts the moment a student orders'],
-              ['Simple monthly share', 'Clear your 5% dues to the admin right from your dashboard'],
+              ['Simple monthly share', 'Clear your ₹10-per-order dues to the admin right from your dashboard'],
             ].map(([t, s]) => (
               <li key={t} className="flex items-start gap-3">
                 <span className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-pill bg-gold/20 text-gold"><svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6 9 17l-5-5" /></svg></span>
@@ -401,7 +414,7 @@ function ForgotPassword() {
       const res = await api.post('/users/forgot-password', { identifier })
       setInfo(res.data?.message || 'A 6-digit code was sent to your registered email.')
       setStep('otp')
-    } catch (err: any) { setErr(err?.response?.data?.detail || 'Request failed') }
+    } catch (err: any) { setErr(apiError(err, 'Request failed')) }
     finally { setLoading(false) }
   }
   const resetPw = async (e: FormEvent) => {
@@ -410,7 +423,7 @@ function ForgotPassword() {
     if (pw.length < 4) { setErr('Password must be at least 4 characters'); return }
     setLoading(true)
     try { await api.post('/users/reset-password', { identifier, otp, new_password: pw }); setDone(true) }
-    catch (err: any) { setErr(err?.response?.data?.detail || 'Reset failed') }
+    catch (err: any) { setErr(apiError(err, 'Reset failed')) }
     finally { setLoading(false) }
   }
 
@@ -593,180 +606,6 @@ function CallBtn({ phone, name, compact }: { phone?: string; name?: string; comp
   )
 }
 
-/* ─── QR Scanner — reads the student's order QR with the phone camera ───
-   Uses the native BarcodeDetector API (Chrome/Android, no library needed).
-   A manual entry fallback is provided for browsers without BarcodeDetector. */
-function OrderScanner({ onDone }: { onDone: () => void }) {
-  const videoRef = useRef<HTMLVideoElement>(null)
-  const [mode, setMode] = useState<'camera' | 'manual'>('camera')
-  const [scanning, setScanning] = useState(false)
-  const [cameraErr, setCameraErr] = useState('')
-  const [manualCode, setManualCode] = useState('')
-  const [order, setOrder] = useState<Order | null>(null)
-  const [lookupErr, setLookupErr] = useState('')
-  const [acting, setActing] = useState(false)
-
-  const supportsBarcode = typeof window !== 'undefined' && 'BarcodeDetector' in window
-
-  const stopCamera = () => {
-    if (videoRef.current?.srcObject) {
-      const stream = videoRef.current.srcObject as MediaStream
-      stream.getTracks().forEach(t => t.stop())
-      videoRef.current.srcObject = null
-    }
-    setScanning(false)
-  }
-
-  const lookup = async (code: string) => {
-    const raw = String(code || '').trim()
-    if (!raw) return
-    setLookupErr(''); setOrder(null)
-    try {
-      const res = await api.get('/vendor/orders/lookup', { params: { code: raw } })
-      setOrder(res.data || null)
-      if (res.data) stopCamera()
-    } catch (err: any) {
-      setLookupErr(err?.response?.data?.detail || 'Could not find that order')
-      // A bad/unknown code shouldn't kill the scanner — turn the camera back on.
-      if (mode === 'camera') setTimeout(() => { setOrder(null); startCamera() }, 800)
-    }
-  }
-
-  const startCamera = async () => {
-    setCameraErr('')
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } })
-      if (!videoRef.current) { stream.getTracks().forEach(t => t.stop()); return }
-      videoRef.current.srcObject = stream
-      await videoRef.current.play()
-      setScanning(true)
-    } catch { setCameraErr('Could not open the camera. Use the manual entry below instead.'); setMode('manual') }
-  }
-
-  /* Detection loop — runs while the camera is live. */
-  useEffect(() => {
-    if (!scanning || !videoRef.current || !supportsBarcode) return
-    let cancelled = false
-    let timer: number | undefined
-    /* BarcodeDetector is a synchronous constructor: `new BarcodeDetector(...)`.
-       The old code called a non-existent static .create() method, which left
-       the detector undefined and the loop never picked up any QR code. */
-    let detector: any = null
-    try {
-      detector = new (window as any).BarcodeDetector({ formats: ['qr_code'] })
-    } catch {
-      detector = null
-      if (!cancelled) {
-        setCameraErr('QR scanning is not available in this browser — use Manual entry.')
-        setScanning(false)
-        setMode('manual')
-      }
-    }
-    const tick = async () => {
-      if (cancelled) return
-      const video = videoRef.current
-      if (detector && video && video.readyState >= 2) {
-        try {
-          const codes = await detector.detect(video)
-          if (!cancelled && codes && codes.length > 0 && codes[0].rawValue) {
-            stopCamera()
-            lookup(codes[0].rawValue)
-            return
-          }
-        } catch { /* frame skipped — keep scanning */ }
-      }
-      timer = window.setTimeout(tick, 250)
-    }
-    if (detector) timer = window.setTimeout(tick, 400)
-    return () => { cancelled = true; if (timer) clearTimeout(timer); stopCamera() }
-  }, [scanning, supportsBarcode])
-
-  const setStatus = async (orderId: string, status: string) => {
-    await api.patch(`/vendor/orders/${orderId}/status`, { status })
-  }
-  const confirmPaid = async (orderId: string) => {
-    await api.post(`/vendor/orders/${orderId}/payment-received`)
-  }
-  const action = async (fn: () => Promise<void>) => {
-    setActing(true)
-    try { await fn(); onDone(); setOrder(null) }
-    catch { setLookupErr('Action failed — please try again') }
-    finally { setActing(false) }
-  }
-
-  const btn = "rounded-sm px-4 py-2.5 text-sm font-bold text-white transition-all active:scale-[0.98] disabled:opacity-40"
-
-  return (
-    <div>
-      <h2 className="text-lg font-bold text-primary mb-1">Scan Order QR</h2>
-      <p className="text-xs text-gray-500 mb-4">Point the camera at the student's order QR — or type the code/order ID manually.</p>
-
-      {/* Mode toggle */}
-      <div className="mb-4 flex rounded-btn bg-gray-100 p-1">
-        <button onClick={() => { setMode('camera'); setLookupErr('') }} className={`flex-1 rounded-sm py-2 text-xs font-bold transition-all ${mode === 'camera' ? 'bg-white text-primary shadow' : 'text-gray-500'}`}>📷 Camera</button>
-        <button onClick={() => { setMode('manual'); setLookupErr('') }} className={`flex-1 rounded-sm py-2 text-xs font-bold transition-all ${mode === 'manual' ? 'bg-white text-primary shadow' : 'text-gray-500'}`}>⌨️ Manual</button>
-      </div>
-
-      {mode === 'camera' && (
-        <div className="rounded-btn overflow-hidden border border-gray-200 bg-black">
-          <video ref={videoRef} playsInline muted className="h-64 w-full object-cover" />
-          {!scanning && !order && (
-            <div className="p-4 text-center">
-              <button onClick={startCamera} className="rounded-btn bg-primary px-5 py-2.5 text-sm font-bold text-white hover:bg-primary">Start Camera</button>
-              {cameraErr && <p className="mt-2 text-xs text-gold">{cameraErr}</p>}
-              {!supportsBarcode && <p className="mt-2 text-xs text-gold">This browser has no built-in QR scanner — use Manual entry.</p>}
-            </div>
-          )}
-          {scanning && <div className="p-3 text-center text-xs font-bold text-primary/80">Scanning… point at the QR code</div>}
-        </div>
-      )}
-
-      {mode === 'manual' && (
-        <div className="rounded-btn border border-gray-200 bg-white p-4">
-          <p className="text-xs text-gray-500 mb-2">Type the code from the student's order (or the order ID).</p>
-          <div className="flex gap-2">
-            <input value={manualCode} onChange={e => setManualCode(e.target.value)} placeholder="DETOMSITE-ORDER:… or order ID" className="flex-1 rounded-sm border px-3 py-2.5 text-sm outline-none focus:border-primary-light/200" />
-            <button onClick={() => lookup(manualCode)} className="rounded-sm bg-primary px-4 py-2.5 text-sm font-bold text-white hover:bg-primary">Find</button>
-          </div>
-        </div>
-      )}
-
-      {lookupErr && <div className="mt-3 rounded-sm bg-red-100 border border-red-200 px-4 py-3 text-sm font-medium text-red-600">{lookupErr}</div>}
-
-      {/* Found order card */}
-      {order && (
-        <div className="mt-4 rounded-btn bg-white p-4 shadow-sm border border-primary/50">
-          <div className="flex items-center justify-between mb-2">
-            <span className="text-xl font-black text-primary-dark">#{order.token}</span>
-            <span className="rounded-pill px-2.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-primary bg-primary-light">✓ Found</span>
-          </div>
-          <p className="text-sm font-semibold text-gray-700">{order.student_name} · 📞 {order.student_phone || '—'}</p>
-          <p className="mt-1 text-sm text-gray-600">{order.items}</p>
-          <p className="mt-1 text-xs text-gray-500">📍 {order.delivery_location} · {order.delivery_slot} · ₹{order.total} · {order.status}</p>
-          <div className="mt-3 flex flex-wrap gap-2">
-            {(order.status === 'Pending Acceptance' || order.status === 'Pending Payment') && (
-              <button disabled={acting} onClick={() => action(() => setStatus(order!.id, 'Accepted'))} className={`${btn} bg-primary hover:bg-primary`}>Accept</button>
-            )}
-            {order.status === 'Pending Payment' && (
-              <button disabled={acting} onClick={() => action(() => confirmPaid(order!.id))} className={`${btn} bg-blue-600 hover:bg-blue-500`}>Payment Received ✓</button>
-            )}
-            {order.status === 'Accepted' && (
-              <button disabled={acting} onClick={() => action(() => setStatus(order!.id, 'Preparing'))} className={`${btn} bg-yellow-500 hover:bg-yellow-600`}>Start Preparing</button>
-            )}
-            {order.status === 'Preparing' && (
-              <button disabled={acting} onClick={() => action(() => setStatus(order!.id, 'Ready'))} className={`${btn} bg-primary hover:bg-primary`}>Mark Ready ✓</button>
-            )}
-            {order.status === 'Ready' && (
-              <button disabled={acting} onClick={() => action(() => setStatus(order!.id, 'Completed'))} className={`${btn} bg-primary hover:bg-primary`}>Complete Order</button>
-            )}
-            <button disabled={acting} onClick={() => { setOrder(null); setLookupErr(''); if (mode === 'camera') startCamera() }} className="rounded-sm border px-4 py-2.5 text-sm font-bold text-gray-600">Scan Next</button>
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
-
 function VendorMobileApp() {
   const navigate = useNavigate()
   const [page, setPage] = useState('dashboard')
@@ -794,7 +633,30 @@ function VendorMobileApp() {
   const lastRefresh = useRef(0)
   const [showDuesQr, setShowDuesQr] = useState(false)
   const [payingDues, setPayingDues] = useState(false)
+  const [showAgentGuide, setShowAgentGuide] = useState(false)
   const vendor = JSON.parse(localStorage.getItem('vendor_user') || '{}')
+
+  /* ─── Instant-first load: last-known dashboard is cached on-device so the
+     app paints orders/shop immediately on open instead of a blank "Loading
+     your shop…" stall, then refreshes in the background. This removes the
+     slow-network / cold-backend wait on every launch. Careful — the refresh
+     below stores the response, but we never cache tokens or passwords here. ─── */
+  const CACHE_KEY = 'detomsite_vendor_cache'
+  const loadCache = (): any | null => {
+    try {
+      const raw = localStorage.getItem(CACHE_KEY)
+      if (!raw) return null
+      const c = JSON.parse(raw)
+      if (!c?.shop || c?.vendorId !== (vendor?.id || '')) return null
+      return c
+    } catch { return null }
+  }
+  const saveCache = (patch: any) => {
+    try {
+      const c = loadCache() || {}
+      localStorage.setItem(CACHE_KEY, JSON.stringify({ ...c, ...patch, ts: Date.now(), vendorId: vendor?.id || '' }))
+    } catch { }
+  }
 
   /* Format a date as YYYY-MM-DD in Indian time (Asia/Kolkata) — the same
      day the server uses for the dashboard's "today", so the filter and the
@@ -836,12 +698,13 @@ function VendorMobileApp() {
       setOrders(data.orders || [])
       setStats(data.stats || {})
       setApprovalStatus(data.shop?.approval_status || 'not_found')
+      saveCache({ shop: data.shop || null, orders: data.orders || [], stats: data.stats || {} })
       return true
     } catch { if (!silent) setErr('Failed to load dashboard'); return false }
   }
 
   const loadProducts = async (silent = false) => {
-    try { const res = await api.get('/vendor/products'); setProducts(res.data || []) }
+    try { const res = await api.get('/vendor/products'); setProducts(res.data || []); saveCache({ products: res.data || [] }) }
     catch { if (!silent) setErr('Failed to load products') }
   }
 
@@ -984,7 +847,7 @@ function VendorMobileApp() {
       setPushState('subscribed')
       setMsg("Order notifications enabled — you'll be alerted the moment an order arrives")
     } catch (err: any) {
-      const msg = err?.response?.data?.detail || 'Could not enable notifications — the app service worker is not active in this browser.'
+      const msg = apiError(err, 'Could not enable notifications — the app service worker is not active in this browser.')
       setErr(msg)
       setPushError(msg)
       setPushState('error')
@@ -1000,7 +863,7 @@ function VendorMobileApp() {
       if (data.ok) setMsg(data.detail || 'Test notification sent!')
       else setPushError(data.detail || 'Test push failed')
     } catch (err: any) {
-      const msg = err?.response?.data?.detail || 'Could not send test notification'
+      const msg = apiError(err, 'Could not send test notification')
       setPushError(msg)
     } finally { setSendingTest(false) }
   }
@@ -1022,6 +885,22 @@ function VendorMobileApp() {
   useEffect(() => {
     if (!isLoggedIn) { navigate('/login'); return }
     checkPushSupport()
+    /* Instant paint: hydrate from the cached dashboard first (no network
+       round-trip), so the app renders immediately on open. The network
+       refresh below then updates it in the background. */
+    const cached = loadCache()
+    if (cached) {
+      if (cached.shop) {
+        setShop(cached.shop)
+        setApprovalStatus(cached.shop.approval_status || 'not_found')
+        setUpiId(cached.shop.upi_id || '')
+        setUpiEnabled(!!cached.shop.upi_enabled)
+        setCodEnabled(!!cached.shop.cod_enabled)
+      }
+      if (Array.isArray(cached.orders)) setOrders(cached.orders)
+      if (cached.stats) setStats(cached.stats)
+      if (Array.isArray(cached.products)) setProducts(cached.products)
+    }
     /* Boot: load the dashboard, and if that first request fails (flaky
        network right after the app opens), retry every 3s until it succeeds.
        Without this the Start/Stop toggle and the orders list could stay
@@ -1069,7 +948,7 @@ function VendorMobileApp() {
 
   const confirmPayment = async (orderId: string) => {
     try { await api.post(`/vendor/orders/${orderId}/payment-received`); setMsg('Payment received — order completed! 🎉'); loadDashboard() }
-    catch (err: any) { setErr(err?.response?.data?.detail || 'Failed to confirm payment') }
+    catch (err: any) { setErr(apiError(err, 'Failed to confirm payment')) }
   }
 
   const togglePresent = async () => {
@@ -1078,7 +957,7 @@ function VendorMobileApp() {
     catch { setErr('Failed to toggle') }
   }
 
-  /* Admin share (5% monthly fee) payment — the vendor's "Pay" tap opens a
+  /* Admin share (₹10 per order) payment — the vendor's "Pay" tap opens a
      modal showing the ADMIN's UPI QR code so the vendor can scan it with
      their own UPI app (GPay / PhonePe / Paytm). The deep-link "Open UPI App"
      button is kept as a one-tap alternative. The share is only recorded
@@ -1102,7 +981,7 @@ function VendorMobileApp() {
       setShowDuesQr(false)
       setMsg(`Share payment of ₹${duesAmount} recorded — the admin marks it received once it lands in their bank.`)
       loadDashboard()
-    } catch (err: any) { setErr(err?.response?.data?.detail || 'Could not record the payment — please try again.') }
+    } catch (err: any) { setErr(apiError(err, 'Could not record the payment — please try again.')) }
     finally { setPayingDues(false) }
   }
 
@@ -1116,7 +995,7 @@ function VendorMobileApp() {
       })
       setMsg('Product added!'); setProductForm({ name: '', price: '', category: 'Food', description: '', inventory: '10', prep_time: '10' })
       loadProducts()
-    } catch (err: any) { setErr(err?.response?.data?.detail || 'Failed to add product') }
+    } catch (err: any) { setErr(apiError(err, 'Failed to add product')) }
   }
 
   const updateProductAvailable = async (productId: string, available: boolean) => {
@@ -1159,6 +1038,15 @@ function VendorMobileApp() {
 
   const upiQrUri = upiId.trim() ? buildShopUpiUri(upiId.trim(), shop?.name || 'DETOMSITE') : ''
 
+  /* Today's menu toggle — the shopkeeper switches their shop between "Fast
+     Food" and "Biryani" day to day (e.g. today you make biryani, tomorrow
+     fast food). Students filter by this category when ordering. */
+  const setCategory = async (cat: string) => {
+    if (!shop) return
+    try { await api.patch('/vendor/shop', { category: cat }); setMsg(`Today's menu set to ${cat}`); loadDashboard() }
+    catch { setErr('Failed to update category') }
+  }
+
   if (!isLoggedIn) return null
 
   /* Combined filters: delivery slot + today-only + status. Lets the vendor see
@@ -1179,7 +1067,7 @@ function VendorMobileApp() {
 
   /* ─── Mobile App Layout ─── */
   return (
-    <div className="min-h-screen max-w-md mx-auto bg-gray-50 pb-20">
+    <div className="min-h-screen w-full mx-auto bg-gray-50 pb-20">
       {/* Header */}
       <div className="bg-primary text-white px-4 py-4 sticky top-0 z-10">
         <div className="flex items-center justify-between">
@@ -1258,11 +1146,11 @@ function VendorMobileApp() {
         </div>
       )}
 
-      {/* Admin Dues (5% platform fee) */}
+      {/* Admin Dues (₹10 per order) */}
       {shop && approvalStatus === 'Approved' && (
         <div className="mx-4 mt-3 rounded-btn border border-gold-light/60 bg-amber-50 px-4 py-3">
           <div className="flex items-center justify-between">
-            <div>                  <p className="text-sm font-bold text-gold-dark">Admin Share (5% of this month's earnings)</p>
+            <div>                  <p className="text-sm font-bold text-gold-dark">Admin Share (₹10 per order)</p>
               <p className="text-xs text-gold-dark">Earned this month: ₹{stats.month_revenue ?? stats.today_revenue ?? 0} · Your share: ₹{stats.platform_fee_due ?? 0}</p>
               {stats.share_paid_month ?? stats.share_paid_today ? (
                 <p className="mt-1 text-xs font-bold text-primary">Paid this month — the admin has received your share.</p>
@@ -1483,11 +1371,6 @@ function VendorMobileApp() {
           </div>
         )}
 
-        {/* Scan Tab */}
-        {page === 'scan' && (
-          <div><OrderScanner onDone={() => refreshAll(true)} /></div>
-        )}
-
         {/* Products Tab */}
         {page === 'products' && (
           <div>                <h2 className="text-lg font-bold text-primary mb-4">Products ({products.length})</h2>
@@ -1624,8 +1507,8 @@ function VendorMobileApp() {
             <h2 className="text-lg font-bold text-primary mb-4">Shop Settings</h2>
             {approvalStatus === 'Approved' && (
               <div className="rounded-btn bg-amber-50 border border-gold-light/60 p-4 mb-4">
-                <p className="text-sm font-bold text-gold-dark">Admin Share (5% of this month's earnings)</p>
-                <p className="mt-1 text-xs text-gold-dark">The admin takes 5% of what you earn in a month through this app — it's never added to the student's bill. This month: you earned <strong>₹{stats.month_revenue ?? stats.today_revenue ?? 0}</strong>, so your share is <strong>₹{stats.platform_fee_due ?? 0}</strong>. Pay it from the dashboard card with the <b>Pay</b> button.</p>
+                <p className="text-sm font-bold text-gold-dark">Admin Share (₹10 per order)</p>
+                <p className="mt-1 text-xs text-gold-dark">The admin takes a flat ₹10 per order you earn through this app — it's never added to the student's bill. This month your share is <strong>₹{stats.platform_fee_due ?? 0}</strong>. Pay it from the dashboard card with the <b>Pay</b> button.</p>
               </div>
             )}
             {/* Payment methods — the shopkeeper controls which ways students can pay */}
@@ -1695,8 +1578,56 @@ function VendorMobileApp() {
                 ) : null}
               </div>
 
+              {/* Payment Agent — SMS-based auto-order confirmation */}
+              <div className="rounded-btn border border-dashed border-emerald-300 bg-emerald-50/60 p-4 space-y-2">
+                <h3 className="flex items-center gap-1.5 text-sm font-bold text-emerald-800">
+                  <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10Z"/></svg>
+                  Payment Agent — Auto-confirm UPI orders
+                </h3>
+                <p className="text-xs text-emerald-700">
+                  Install the <strong>DETOMSITE SMS Payment Agent</strong> on the phone that is linked to your shop's bank account (the number your bank sends credit SMS to). It auto-confirms orders the moment the bank's credit SMS arrives — you never have to manually verify a UTR again.
+                </p>
+                <div className="space-y-1.5">
+                  <p className="text-[11px] font-semibold text-emerald-700 uppercase tracking-wide">How to set up</p>
+                  <ol className="text-xs text-emerald-700 space-y-1 list-decimal pl-4">
+                    <li>Install the agent app on the phone your bank sends SMS to</li>
+                    <li>Tap <strong>Grant SMS permission</strong> inside the agent (required to read bank credit SMS)</li>
+                    <li>Enter your backend URL and agent key (ask your admin)</li>
+                    <li>Save — done! Orders will auto-confirm in seconds</li>
+                  </ol>
+                </div>
+                {/* The web app cannot read SMS — the real SMS-permission button lives
+                    in the native agent app. The agent is a private app (not on the
+                    Play Store), so we show an install guide instead of deep-linking
+                    straight to the Play Store. */}
+                <button
+                  onClick={() => setShowAgentGuide(true)}
+                  className="mt-2 w-full rounded-sm bg-emerald-700 px-3 py-2.5 text-sm font-bold text-white transition-colors hover:bg-emerald-800">
+                  📲 Set up the Payment Agent
+                </button>
+                <div className="rounded-sm bg-emerald-100/80 border border-emerald-200 p-3 mt-2">
+                  <p className="text-[11px] font-bold text-emerald-800 uppercase tracking-wide mb-1">Privacy guarantee</p>
+                  <p className="text-xs text-emerald-700">
+                    Your bank SMS <strong>never leaves this phone</strong>. The agent reads the SMS locally, extracts only the transaction code (UTR) and amount, and sends only those two fields to the server — <strong>no balances, no sender, no raw text</strong> is ever shared over the internet.
+                  </p>
+                </div>
+              </div>
+
               <div className="border-t pt-4"><p className="text-sm font-semibold text-gray-700">Shop Name</p><p className="text-gray-600">{shop?.name || '—'}</p></div>
-              <div><p className="text-sm font-semibold text-gray-700">Category</p><p className="text-gray-600">{shop?.category || '—'}</p></div>
+              <div>
+                <p className="text-sm font-semibold text-gray-700">Today's Menu Type</p>
+                <p className="mt-0.5 text-xs text-gray-400">Switch each day — students filter orders by this. Set to Biryani on biryani days, Fast Food otherwise.</p>
+                <div className="mt-2 grid grid-cols-2 gap-2">
+                  <button onClick={() => setCategory('Fast Food')}
+                    className={`rounded-pill px-3 py-2.5 text-sm font-bold transition-all ${(shop?.category || '') === 'Fast Food' ? 'bg-primary text-white shadow' : 'bg-white border border-gray-200 text-gray-600 hover:border-primary/50'}`}>
+                    🍔 Fast Food
+                  </button>
+                  <button onClick={() => setCategory('Biryani')}
+                    className={`rounded-pill px-3 py-2.5 text-sm font-bold transition-all ${(shop?.category || '') === 'Biryani' ? 'bg-primary text-white shadow' : 'bg-white border border-gray-200 text-gray-600 hover:border-primary/50'}`}>
+                    🍛 Biryani
+                  </button>
+                </div>
+              </div>
               <div><p className="text-sm font-semibold text-gray-700">Hours</p><p className="text-gray-600">{shop?.opening_time} - {shop?.closing_time}</p></div>
               <div><p className="text-sm font-semibold text-gray-700">Phone</p><p className="text-gray-600">{shop?.phone || '—'}</p></div>
               <div>
@@ -1735,10 +1666,9 @@ function VendorMobileApp() {
       </div>
 
       {/* Bottom Tab Bar */}
-      <nav className="fixed bottom-0 left-0 right-0 max-w-md mx-auto bg-white border-t flex z-10">
+      <nav className="fixed bottom-0 left-0 right-0 w-full bg-white border-t flex z-10">
         {[
           { id: 'dashboard', label: 'Orders', icon: <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" /></svg> },
-          { id: 'scan', label: 'Scan', icon: <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 7V5a2 2 0 0 1 2-2h2M17 3h2a2 2 0 0 1 2 2v2M21 17v2a2 2 0 0 1-2 2h-2M7 21H5a2 2 0 0 1-2-2v-2" /><path d="M7 12h10" /></svg> },
           { id: 'history', label: 'History', icon: <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 3" /></svg> },
           { id: 'products', label: 'Products', icon: <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 8 12 3 3 8v8l9 5 9-5V8Z" /><path d="M3 8l9 5 9-5M12 13v8" /></svg> },
           { id: 'settings', label: 'Settings', icon: <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.2a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.2a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3h.1a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.2a1.7 1.7 0 0 0 1 1.5h.1a1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9v.1a1.7 1.7 0 0 0 1.5 1h.2a2 2 0 1 1 0 4h-.2a1.7 1.7 0 0 0-1.5 1Z" /></svg> },
@@ -1752,7 +1682,7 @@ function VendorMobileApp() {
       </nav>
 
       {/* Admin Share UPI QR modal — the vendor scans the admin's QR to pay
-          the 5% share (or uses the one-tap UPI app button). */}
+          the ₹10 per-order share (or uses the one-tap UPI app button). */}
       {showDuesQr && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={() => setShowDuesQr(false)}>
           <div className="w-full max-w-sm rounded-card bg-white p-6 shadow-2xl" onClick={e => e.stopPropagation()}>
@@ -1768,6 +1698,39 @@ function VendorMobileApp() {
               <button onClick={() => void recordDuesPaid()} disabled={payingDues} className="rounded-btn bg-amber-600 px-4 py-2.5 text-sm font-bold text-white transition-colors hover:bg-gold disabled:opacity-40">{payingDues ? 'Recording…' : "I've Paid ✓"}</button>
             </div>
             <button onClick={() => setShowDuesQr(false)} className="mt-2 w-full rounded-btn border px-4 py-2 text-sm font-bold text-gray-500 transition-colors hover:bg-gray-50">Close</button>
+          </div>
+        </div>
+      )}
+
+      {showAgentGuide && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={() => setShowAgentGuide(false)}>
+          <div className="w-full max-w-sm rounded-card bg-white p-5 shadow-2xl" onClick={e => e.stopPropagation()}>
+            <h3 className="text-lg font-bold text-emerald-800">📲 Set up the Payment Agent</h3>
+            <p className="mt-1 text-xs text-gray-500">
+              The Payment Agent is a small <b>Android app</b> (not on the Play Store — it only goes on your shop's phone with your admin's help). It reads the bank's credit SMS <b>on your phone</b>, extracts the UTR + amount, and auto-confirms orders.
+            </p>
+            <ol className="mt-3 space-y-2 text-sm text-gray-700">
+              <li className="flex gap-2"><span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-pill bg-emerald-700 text-[11px] font-bold text-white">1</span>Get the agent APK from your admin, or download it here: <a href="/mobile/Detomsite-SMS-Agent.apk" download className="underline text-emerald-700 font-semibold">Download APK</a></li>
+              <li className="flex gap-2"><span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-pill bg-emerald-700 text-[11px] font-bold text-white">2</span>Install it on the phone your bank sends SMS to — allow <b>install from unknown sources</b> when prompted.</li>
+              <li className="flex gap-2"><span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-pill bg-emerald-700 text-[11px] font-bold text-white">3</span>Open the agent → tap <b>Grant SMS permission</b>.</li>
+              <li className="flex gap-2"><span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-pill bg-emerald-700 text-[11px] font-bold text-white">4</span>Enter your backend URL + agent key (ask your admin for both) and tap <b>Save</b>.</li>
+            </ol>
+            <div className="mt-4 rounded-sm bg-emerald-50 border border-emerald-200 p-3">
+              <p className="text-[11px] font-bold text-emerald-800 uppercase tracking-wide">🔒 Bank SMS never leaves this phone</p>
+              <p className="mt-1 text-xs text-emerald-700">The agent reads the SMS locally and sends only the UTR + amount. No balances, no sender, no raw text ever leaves your phone.</p>
+            </div>
+            <div className="mt-4 space-y-2">
+              <button
+                onClick={() => {
+                  setShowAgentGuide(false)
+                  location.href = 'intent://open#Intent;scheme=detomsite-agent;package=com.detomsite.smsagent;end'
+                  setMsg('⏳ If the agent app doesn\'t open, it isn\'t installed on this phone yet.')
+                }}
+                className="w-full rounded-btn bg-emerald-700 px-4 py-2.5 text-sm font-bold text-white transition-colors hover:bg-emerald-800">
+                I have the agent — Open it
+              </button>
+              <button onClick={() => setShowAgentGuide(false)} className="w-full rounded-btn border px-4 py-2 text-sm font-bold text-gray-500 transition-colors hover:bg-gray-50">Close</button>
+            </div>
           </div>
         </div>
       )}

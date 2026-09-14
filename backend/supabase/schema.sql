@@ -83,7 +83,7 @@ create table if not exists public.products (
   created_at timestamptz not null default now()
 );
 
--- ─── Orders (with the full 5% fee breakdown stored per order) ───
+-- ─── Orders (with the full ₹10-per-order fee breakdown stored per order) ───
 create table if not exists public.orders (
   id text primary key,
   token integer not null,
@@ -93,7 +93,7 @@ create table if not exists public.orders (
   shop_name text not null,
   items text not null,
   subtotal integer not null default 0,
-  service_fee integer not null default 0,      -- 5% platform service fee (admin's cut)
+  service_fee integer not null default 0,      -- ₹10 per order platform fee (admin's cut)
   tax integer not null default 0,
   delivery_fee integer not null default 0,
   total integer not null default 0,
@@ -231,7 +231,7 @@ create index if not exists idx_shops_shopkeeper_email_lower on public.shops (low
 -- token; the composite index serves both the WHERE and the ORDER BY.
 create index if not exists idx_orders_shop_id_token on public.orders (shop_id, token desc);
 
--- ─── Share payments (5% commission paid by shops to the admin) ───
+-- ─── Share payments (₹10-per-order commission paid by shops to the admin) ───
 -- The vendor dashboard and admin reports read these on every load.
 create table if not exists public.share_payments (
   id text primary key,
@@ -465,6 +465,7 @@ create table if not exists public.whatsapp_logs (
   phone text not null default '',
   message_type text not null default '',
   message text not null default '',
+  url text not null default '',
   status text not null default 'sent',
   order_id text,
   created_at timestamptz not null default now()

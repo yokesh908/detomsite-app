@@ -60,11 +60,20 @@ async def _find_user_for_reset(identifier: str) -> Optional[dict]:
 
 async def _send_reset_otp(user: dict) -> None:
     """Generate + store a fresh OTP for this user and email it.
-    The code is only ever delivered by email — never returned to the client."""
+    The code is only ever delivered by email — never returned to the client.
+    Admin accounts carry a placeholder DB email (admin@detomsite.local) because
+    DEFAULT_SUPER_ADMIN_EMAIL is usually already claimed by another role's
+    account, so admin reset codes go straight to DEFAULT_SUPER_ADMIN_EMAIL."""
     otp = _generate_otp()
     await asyncio.to_thread(db.create_password_reset, user["username"], otp, 1)
+    admin_email = (settings.DEFAULT_SUPER_ADMIN_EMAIL or "").strip()
+    to_email = (
+        admin_email
+        if user.get("role") == "admin" and admin_email
+        else (user.get("email") or f"{user['username']}@campus.local")
+    )
     await EmailService.send_otp_email(
-        user.get("email") or f"{user['username']}@campus.local",
+        to_email,
         otp,
         purpose="password reset",
     )

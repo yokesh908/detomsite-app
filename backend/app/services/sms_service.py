@@ -82,13 +82,19 @@ def compose_confirmation_sms(order: dict[str, Any]) -> str:
     )
 
 
-def compose_order_wa(order: dict[str, Any]) -> str:
+def compose_order_wa(order: dict[str, Any], paid: bool | None = None) -> str:
     """WhatsApp-ready order message for the shopkeeper.
 
     Same facts as the SMS but reads naturally on WhatsApp (no CAPS shout, no
     reply-token — the shopkeeper confirms from their app/portal instead). This
     text is pre-filled into a ``wa.me`` chat with the shop's WhatsApp number,
     so the shopkeeper receives it **from the admin's own number**, for free.
+
+    ``paid`` reflects whether the payment is verified *at send time*:
+      - ``True``  → "UPI paid ₹X ✓"   (bank-SMS/UTR match, screenshot verified)
+      - ``False`` → "UPI ₹X — awaiting payment"   (order just placed, no proof yet)
+      - ``None``  → old behaviour: assume the payer is proven (legacy callers)
+    COD is always shown as "Cash on Delivery ₹X".
     """
     token = order.get("token") or order.get("id") or "?"
     items = or_none(order.get("items"))
@@ -103,14 +109,18 @@ def compose_order_wa(order: dict[str, Any]) -> str:
     amount = order.get("total") or 0
     payment = or_none(order.get("payment_method")) or "UPI"
     if payment.upper() == "COD":
-        payment = "Cash on Delivery"
+        paid_label = "Cash on Delivery ₹" + str(amount)
+    elif paid is False:
+        paid_label = f"{payment.upper()} ₹{amount} — awaiting payment"
+    else:
+        paid_label = f"{payment.upper()} paid ₹{amount} ✓"
     return (
         f"Hello! New DETOMSITE order #{token} for you 🛵\n\n"
         f"• Student: {student}\n"
         f"• Items: {items}\n"
         f"• Deliver to: {location}\n"
         f"• Slot: {slot}\n"
-        f"• Payment: {payment} ₹{amount}\n\n"
+        f"• Payment: {paid_label}\n\n"
         f"Please confirm this order in the DETOMSITE shop app. "
         f"Thank you!"
     )

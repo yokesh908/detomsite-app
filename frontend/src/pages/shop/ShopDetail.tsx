@@ -1,8 +1,10 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState, useCallback } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import api from '../../services/api'
 import { canOrderFromShop, LocalProduct, LocalShop, shopStatusText } from '../../types/localApi'
-import { addProductToCart } from '../../utils/cart'
+import { addProductToCart, updateCartQuantity } from '../../utils/cart'
+import { usePolling } from '../../hooks/usePolling'
+import { same } from '../../utils/same'
 
 export function ShopDetail() {
   const { shopId } = useParams<{ shopId: string }>()
@@ -11,20 +13,26 @@ export function ShopDetail() {
   const [loading, setLoading] = useState(true)
   const [added, setAdded] = useState<string | null>(null)
   const [activeQty, setActiveQty] = useState<Record<string, number>>({})
+  const addedTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  useEffect(() => {
+  const load = useCallback(() => {
     if (!shopId) return
-    const load = () => Promise.all([
-      api.get<LocalShop>(`/local/shops/${shopId}`),
-      api.get<LocalProduct[]>('/local/products/stock').then(r => {
-        return (r.data as LocalProduct[]).filter(p => p.shop_id === shopId)
-      }),
-    ]).then(([s, p]) => { setShop(s.data); setProducts(p) }).catch(() => setShop(null)).finally(() => setLoading(false))
-    load()
-    // Refresh every 8s so the Open/Closed status and stock stay accurate
-    const t = window.setInterval(load, 8000)
-    return () => window.clearInterval(t)
+    // Shop and menu failures are independent — a bad stock call must not
+    // nuke the whole page into "Shop not found".
+    api.get<LocalShop>(`/local/shops/${shopId}`)
+      .then(s => setShop(cur => same(cur, s.data) ? cur : s.data))
+      .catch(() => setShop(null))
+    api.get<LocalProduct[]>('/local/products/stock')
+      .then(r => setProducts(cur => same(cur, (r.data || []).filter(p => (p.shop_id || '') === shopId)) ? cur : (r.data || []).filter(p => (p.shop_id || '') === shopId)))
+      .catch(() => setProducts([]))
+      .finally(() => setLoading(false))
   }, [shopId])
+
+  // Refresh every 8s while visible so the Open/Closed status and stock stay
+  // accurate; background tabs pause and refresh instantly when you switch back.
+  usePolling(load, 8000, [shopId])
+
+  useEffect(() => () => { if (addedTimer.current) clearTimeout(addedTimer.current) }, [])
 
   const handleAdd = (product: LocalProduct, qty = 1) => {
     if (!shop) return
@@ -32,7 +40,16 @@ export function ShopDetail() {
     addProductToCart(p, shop)
     setActiveQty(prev => ({ ...prev, [product.id]: (prev[product.id] || 0) + qty }))
     setAdded(product.id)
-    setTimeout(() => setAdded(null), 1500)
+    if (addedTimer.current) clearTimeout(addedTimer.current)
+    addedTimer.current = setTimeout(() => setAdded(null), 1500)
+  }
+
+  /* Decrement must actually shrink the cart — otherwise the stepper showed −1
+     while the cart still charged 1 (and hitting 0 left a ghost item behind). */
+  const handleDec = (product: LocalProduct) => {
+    const next = Math.max(0, (activeQty[product.id] || 1) - 1)
+    updateCartQuantity(product.id, next)
+    setActiveQty(prev => ({ ...prev, [product.id]: next }))
   }
 
   if (loading) return <div className="flex min-h-screen items-center justify-center bg-white text-gray-400">Loading...</div>
@@ -110,7 +127,7 @@ export function ShopDetail() {
                       <div className="flex shrink-0 flex-col items-center gap-1.5">
                         {qtyInCart > 0 ? (
                           <div className="flex items-center gap-2 rounded-pill bg-primary-light/30 px-2 py-1">
-                            <button onClick={() => { setActiveQty(prev => ({ ...prev, [product.id]: Math.max(0, (prev[product.id] || 1) - 1) })) }}
+                            <button onClick={() => handleDec(product)}
                               className="h-6 w-6 rounded-full bg-primary text-white font-bold">−</button>
                             <span className="w-5 text-center font-bold text-primary">{qtyInCart}</span>
                             <button onClick={() => handleAdd(product)}

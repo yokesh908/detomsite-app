@@ -1,13 +1,14 @@
 {
-  "name": "DETOMSITE",
+  "name": "DETOMSITE — Campus Food Ordering",
   "short_name": "DETOMSITE",
-  "description": "Enterprise Campus Food Ordering Platform",
+  "description": "Campus Food Ordering Platform for Students & Shopkeepers",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
   "orientation": "portrait-primary",
-  "background_color": "#ffffff",
-  "theme_color": "#EA580C",
+  "background_color": "#F8FAFC",
+  "theme_color": "#15803D",
+  "categories": ["food", "shopping"],
   "icons": [
     {
       "src": "/icon-192.png",
@@ -23,22 +24,9 @@
     },
     {
       "src": "/icon-maskable.png",
-      "sizes": "192x192",
+      "sizes": "512x512",
       "type": "image/png",
       "purpose": "maskable"
-    }
-  ],
-  "categories": ["food", "shopping"],
-  "screenshots": [
-    {
-      "src": "/screenshot1.png",
-      "sizes": "540x720",
-      "type": "image/png"
-    },
-    {
-      "src": "/screenshot2.png",
-      "sizes": "540x720",
-      "type": "image/png"
     }
   ]
 }

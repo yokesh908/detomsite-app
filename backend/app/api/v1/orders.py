@@ -82,9 +82,9 @@ async def create_order(
                 "addon_selections": item.addon_selections
             })
         
-        # Calculate fees — only the 5% platform service fee (no tax, no delivery)
+        # Calculate fees — flat ₹10 per order admin commission (no tax, no delivery)
         delivery_fee = 0
-        platform_fee = subtotal * 0.05  # 5% platform fee
+        platform_fee = 10  # flat ₹10 per order
         tax = 0
         total_amount = subtotal + platform_fee
         

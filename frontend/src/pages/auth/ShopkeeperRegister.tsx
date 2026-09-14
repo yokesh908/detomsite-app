@@ -10,7 +10,7 @@ export function ShopkeeperRegister() {
   const [form, setForm] = useState({ fullName: '', email: '', phone: '', password: '', confirmPassword: '', shopName: '', shopCategory: '', campus: '' })
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
-  const categories = ['Italian', 'Chinese', 'Indian', 'Fast Food', 'Cafe', 'Bakery', 'Desserts', 'Beverages', 'Vegan', 'Japanese', 'Mexican', 'Continental']
+  const categories = ['Italian', 'Chinese', 'Indian', 'Fast Food', 'Biryani', 'Cafe', 'Bakery', 'Desserts', 'Beverages', 'Vegan', 'Japanese', 'Mexican', 'Continental']
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()

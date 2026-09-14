@@ -16,7 +16,7 @@ export function PaymentPage() {
   const [ps, setPs] = useState<LocalPaymentSettings | null>(null)
   const [method, setMethod] = useState<'manual' | 'cod'>('manual')
   const [utr, setUtr] = useState('')
-  const [ss, setSs] = useState('')
+  const [ssFile, setSsFile] = useState<File | null>(null)
   const [loc, setLoc] = useState(session?.default_delivery_location || 'Hostel A Block 201')
   const [phone, setPhone] = useState(session?.phone || '')
   const [locating, setLocating] = useState(false)
@@ -30,6 +30,13 @@ export function PaymentPage() {
     api.get<LocalPaymentSettings>('/local/payment-settings')
       .then(r => setPs(r.data)).catch(() => setError('Cannot load payment settings'))
   }, [])
+
+  /* Payment settings load async — if UPI isn't configured on the server the
+     "UPI (UTR)" tab disappears, so stop the form from silently keeping a
+     'manual' selection the shop can't accept. */
+  useEffect(() => {
+    if (ps && !manualReady && method === 'manual') setMethod('cod')
+  }, [ps, manualReady, method])
 
   const reverseGeocode = async (lat: number, lon: number): Promise<string> => {
     try {
@@ -75,7 +82,7 @@ export function PaymentPage() {
 
     if (method === 'manual') {
       if (!manualReady) { setError('Manual payment not configured'); return }
-      if (!utr.trim() || !ss.trim()) { setError('Enter UTR and attach screenshot'); return }
+      if (!utr.trim() || !ssFile) { setError('Enter UTR and attach screenshot'); return }
     }
 
     setLoading(true)
@@ -91,22 +98,38 @@ export function PaymentPage() {
         payment_method: method === 'cod' ? 'COD' : 'UTR',
       })
 
-      // Step 2: If UPI/UTR, submit the payment record. Verification is done
-      // by the admin/backend (frontend never decides payment success).
+      // Step 2: If UPI/UTR, submit the payment record and upload the real
+      // screenshot file. Verification is done by the admin/backend (frontend
+      // never decides payment success). If payment delivery fails the ORDER
+      // already exists — never re-submit it (that created duplicate orders),
+      // just flag the payment as pending and let the student retry later.
+      let paymentPending = false
       if (method === 'manual') {
-        await api.post('/local/payments', {
-          order_id: order.data.id,
-          amount: total,
-          method: 'Manual UTR',
-          utr_number: utr,
-          screenshot_name: ss,
-        })
+        try {
+          await api.post('/local/payments', {
+            order_id: order.data.id,
+            amount: total,
+            method: 'Manual UTR',
+            utr_number: utr,
+            screenshot_name: ssFile?.name,
+          })
+          if (ssFile) {
+            const fd = new FormData()
+            fd.append('file', ssFile)
+            fd.append('order_id', order.data.id)
+            fd.append('utr_number', utr)
+            await api.post('/local/payments/upload', fd)
+          }
+        } catch {
+          paymentPending = true
+        }
       }
 
       clearCart()
+      if (paymentPending) sessionStorage.setItem('payment_pending', '1')
       navigate(`/order-result/${order.data.id}`)
     } catch (err: any) {
-      setError(err?.response?.data?.detail || 'Payment could not be completed')
+      setError(err?.response?.data?.detail || 'Order could not be placed')
     } finally {
       setLoading(false)
     }
@@ -114,7 +137,7 @@ export function PaymentPage() {
 
   const canPay = method === 'cod'
     ? true
-    : manualReady && Boolean(utr.trim()) && Boolean(ss.trim())
+    : manualReady && Boolean(utr.trim()) && Boolean(ssFile)
 
   return (
     <div className="min-h-screen bg-white">
@@ -122,7 +145,7 @@ export function PaymentPage() {
         <div className="mb-6">
           <h1 className="text-2xl font-bold text-primary-dark">Checkout</h1>
           <p className="mt-1 text-sm font-medium text-gray-500">
-            {groups.length === 0 ? 'Review your order' : `${groups.length} shop${groups.length > 1 ? 's' : ''} · one payment · token #${''}`}
+            {groups.length === 0 ? 'Review your order' : `${groups.length} shop${groups.length > 1 ? 's' : ''} · one payment`}
           </p>
         </div>
         {groups.length === 0 ? (
@@ -199,8 +222,8 @@ export function PaymentPage() {
                   <div className="grid gap-3 md:grid-cols-2">
                     <input value={utr} onChange={e => setUtr(e.target.value)}
                       className="rounded-btn border-2 border-gray-200 px-4 py-2.5 text-sm text-gray-900 placeholder-gray-400 outline-none focus:border-primary focus:shadow-emerald-sm" placeholder="UTR / Transaction ID" required={method === 'manual'} />
-                    <input onChange={e => setSs(e.target.files?.[0]?.name || '')}
-                      className="rounded-btn border-2 border-gray-200 px-4 py-2.5 text-sm text-gray-900 outline-none focus:border-primary focus:shadow-emerald-sm" type="file" accept="image/*" required={method === 'manual'} />
+                    <input onChange={e => setSsFile(e.target.files?.[0] || null)}
+                      className="rounded-btn border-2 border-gray-200 px-4 py-2.5 text-sm text-gray-900 outline-none focus:border-primary focus:shadow-emerald-sm" type="file" accept="image/*,.pdf" required={method === 'manual'} />
                   </div>
                 </div>
               )}
@@ -227,7 +250,7 @@ export function PaymentPage() {
                 <div className="flex justify-between border-t border-gray-100 pt-3 text-lg font-bold text-primary-dark">
                   <span>Total</span><span>₹{total}</span>
                 </div>
-                <p className="pt-1 text-xs text-gray-400">No delivery fee, no taxes, no COD fee. Each shop's 5% share is on them, never you.</p>
+                <p className="pt-1 text-xs text-gray-400">No delivery fee, no taxes, no COD fee. Each shop's flat ₹10 per order is on them, never you.</p>
               </div>
               <button type="submit" disabled={loading || !canPay}
                 className="mt-5 w-full rounded-btn bg-primary px-5 py-3 text-sm font-bold text-white shadow-gold transition-all hover:bg-primary-dark disabled:opacity-40">

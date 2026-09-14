@@ -3,6 +3,19 @@ import { BrowserRouter as Router, Routes, Route, Link, Navigate, useNavigate, us
 import api from './services/api'
 import { QRCodeSVG } from 'qrcode.react'
 
+function apiError(e: any, fb = 'Request failed') {
+  const d = e?.response?.data?.detail
+  if (typeof d === 'string' && d.trim()) return d
+  if (Array.isArray(d)) {
+    const msgs = d.map((x: any) => (x?.msg || x?.message)).filter(Boolean)
+    if (msgs.length) return msgs.join(' - ')
+  }
+  const m = e?.response?.data?.message
+  if (typeof m === 'string' && m.trim()) return m
+  return (e?.message as string) || fb
+}
+
+
 /* ─── Auth guard: blocks every protected page unless the token is valid ─── */
 /* Last-validated token check. Skips the /users/profile round-trip on every
    navigation so clicking around the portal feels instant; re-validates when
@@ -395,7 +408,7 @@ function Register() {
     try {
       await api.post('/users/register', { username: f.username, email: f.email, password: f.password, name: f.username, phone: f.phone })
       navigate('/login?registered=true')
-    } catch (err: any) { setErr(err?.response?.data?.detail || 'Registration failed') }
+    } catch (err: any) { setErr(apiError(err, 'Registration failed')) }
     finally { setLoading(false) }
   }
   return (
@@ -454,7 +467,7 @@ function Login() {
       localStorage.setItem('access_token', res.data.access_token)
       localStorage.setItem('user_data', JSON.stringify(res.data.user))
       navigate('/shops')
-    } catch (err: any) { setErr(err?.response?.data?.detail || 'Login failed') }
+    } catch (err: any) { setErr(apiError(err, 'Login failed')) }
     finally { setLoading(false) }
   }
   return (
@@ -551,7 +564,7 @@ function ForgotPassword() {
       const res = await api.post('/users/forgot-password', { identifier })
       setInfo(res.data?.message || 'A 6-digit code was sent to your registered email.')
       setStep('otp')
-    } catch (err: any) { setErr(err?.response?.data?.detail || 'Request failed') }
+    } catch (err: any) { setErr(apiError(err, 'Request failed')) }
     finally { setLoading(false) }
   }
 
@@ -564,7 +577,7 @@ function ForgotPassword() {
     try {
       await api.post('/users/reset-password', { identifier, otp, new_password: pw })
       setDone(true)
-    } catch (err: any) { setErr(err?.response?.data?.detail || 'Reset failed') }
+    } catch (err: any) { setErr(apiError(err, 'Reset failed')) }
     finally { setLoading(false) }
   }
 
@@ -886,7 +899,7 @@ function OrdersPage() {
       await api.post(`/local/orders/${o.id}/cancel`)
       invalidateOrdersCache()
       setOrders(prev => prev.map(x => x.id === o.id ? { ...x, status: 'Cancelled' } : x))
-    } catch (err: any) { window.alert(err?.response?.data?.detail || 'Could not cancel the order') }
+    } catch (err: any) { window.alert(apiError(err, 'Could not cancel the order')) }
   }
   const grouped = { pending: orders.filter(o => o.status === 'Pending Acceptance'), active: orders.filter(o => ['Accepted', 'Confirmed', 'Preparing', 'Ready'].includes(o.status)), completed: orders.filter(o => ['Completed', 'Cancelled'].includes(o.status)) }
   return (
@@ -1036,7 +1049,7 @@ function PaymentPage() {
 
       clearCart()
       if (lastOrder) navigate(`/order/${lastOrder.id}`)
-    } catch (err: any) { setErr(err?.response?.data?.detail || 'Failed') }
+    } catch (err: any) { setErr(apiError(err, 'Failed')) }
     finally { setLoading(false) }
   }
 
@@ -1200,7 +1213,7 @@ function OrderResultPage() {
       if (res.data?.order?.status === 'Confirmed') {
         const s = await api.get<Order>(`/local/orders/${orderId}`).catch(() => null); if (s?.data) setOrder(s.data)
       }
-    } catch (err: any) { setUtrErr(err?.response?.data?.detail || 'Could not save the UTR — please try again') }
+    } catch (err: any) { setUtrErr(apiError(err, 'Could not save the UTR — please try again')) }
     finally { setUtrSaving(false) }
   }
   const uploadScreenshot = async () => {
@@ -1215,7 +1228,7 @@ function OrderResultPage() {
       setScreenshot(null)
       if (res.data?.matched) setUtrMsg('UTR matched the bank SMS — your order is confirmed!')
       const s = await api.get<Order>(`/local/orders/${orderId}`).catch(() => null); if (s?.data) setOrder(s.data)
-    } catch (err: any) { setUploadErr(err?.response?.data?.detail || 'Upload failed — please try again') }
+    } catch (err: any) { setUploadErr(apiError(err, 'Upload failed — please try again')) }
     finally { setUploading(false) }
   }
   /* Cancellation follows the delivery window: orders placed inside a window
@@ -1229,7 +1242,7 @@ function OrderResultPage() {
       const res = await api.post(`/local/orders/${order.id}/cancel`)
       setOrder(res.data?.order || order)
       invalidateOrdersCache()
-    } catch (err: any) { setCancelErr(err?.response?.data?.detail || 'Could not cancel the order') }
+    } catch (err: any) { setCancelErr(apiError(err, 'Could not cancel the order')) }
     finally { setCancelling(false) }
   }
   useEffect(() => {
@@ -1333,15 +1346,12 @@ function OrderResultPage() {
             </div>
           )
         })()}
-        {/* Collect-your-order QR — the shopkeeper's scanner reads this to find
-            the order instantly (no typing, no misreads). */}
+        {/* Order pickup — show token number for counter pickup */}
         {order.status !== 'Cancelled' && order.status !== 'Failed' && (
           <div className="mt-6 rounded-btn border-2 border-dashed border-emerald-300 bg-primary-light/30/60 p-4">
-            <p className="text-sm font-bold text-primary">Your order QR — show this at the counter</p>
-            <div className="mx-auto mt-3 w-fit rounded-card bg-white p-3 shadow-sm">
-              <QRCodeSVG value={`DETOMSITE-ORDER:${order.id}`} size={168} level="M" bgColor="#ffffff" fgColor="#064E3B" className="h-auto w-40 max-w-[180px] sm:w-44" />
-            </div>
-            <p className="mx-auto mt-3 max-w-xs text-center text-xs leading-relaxed text-primary">The shop scans this QR to fetch your order. Also handy: your token number is <b>#{order.token}</b> — tell it to the counter if you prefer.</p>
+            <p className="text-sm font-bold text-primary">Pickup from the counter</p>
+            <p className="mt-2 text-center text-2xl font-black text-primary-dark">Token #{order.token}</p>
+            <p className="mt-2 text-center text-xs leading-relaxed text-primary">Tell the shop your token number when collecting your order.</p>
           </div>
         )}
         <div className="mt-6 flex flex-wrap justify-center gap-3">
@@ -1366,7 +1376,7 @@ function ReviewsPage() {
   const submitReview = async (e: FormEvent) => {
     e.preventDefault(); setMsg('')
     try { await api.post('/users/reviews', f); setMsg('Review submitted!'); setF({ shop_id: '', rating: 5, comment: '' }) }
-    catch (err: any) { setMsg(err?.response?.data?.detail || 'Failed') }
+    catch (err: any) { setMsg(apiError(err, 'Failed')) }
   }
   return (
     <div className="mx-auto max-w-4xl px-4 py-6">
@@ -1465,7 +1475,7 @@ function SupportPage() {
   const submit = async (e: FormEvent) => {
     e.preventDefault(); setErr(''); setMsg('')
     try { await api.post('/local/tickets', { ...f, name: user.name || 'Student', email: user.email || '', phone_number: user.phone || '' }); setMsg('Ticket submitted!'); setF({ category: 'Order Issue', title: '', description: '' }) }
-    catch (err: any) { setErr(err?.response?.data?.detail || 'Failed') }
+    catch (err: any) { setErr(apiError(err, 'Failed')) }
   }
   return (
     <div className="mx-auto max-w-3xl px-4 py-6">

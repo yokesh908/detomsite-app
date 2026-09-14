@@ -1,9 +1,9 @@
 import React, { useEffect, useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
-import api from '../services/api'
 import { LocalNotification } from '../types/localApi'
 import { getCart } from '../utils/cart'
 import { clearLocalSession, getLocalSession, LocalSession } from '../utils/session'
+import { subscribeNotifications } from '../services/notifStore'
 import { InstallPwaCard } from './InstallPwaCard'
 
 const SEEN = 'detomsite-seen-completed'
@@ -19,7 +19,7 @@ interface LayoutProps { children: React.ReactNode; className?: string }
 
 export const MainLayout: React.FC<LayoutProps> = ({ children, className = '' }) => {
   const [mobileOpen, setMobileOpen] = useState(false)
-  const [session] = useState<LocalSession | null>(() => getLocalSession())
+  const [session, setSession] = useState<LocalSession | null>(() => getLocalSession())
   const [cartCount, setCartCount] = useState(() => getCart().reduce((s, i) => s + i.quantity, 0))
   const [notifications, setNotifications] = useState<LocalNotification[]>([])
   const [notifOpen, setNotifOpen] = useState(false)
@@ -33,22 +33,29 @@ export const MainLayout: React.FC<LayoutProps> = ({ children, className = '' }) 
     return () => window.removeEventListener('detomsite-cart-updated', sync)
   }, [])
 
+  /* Re-read the session on every navigation — RoleGate/phone login writes to
+     localStorage after this component first mounted, so a persist-only read
+     left the top navbar showing the pre-login state. */
   useEffect(() => {
-    const load = () => {
-      api.get<LocalNotification[]>('/local/notifications')
-        .then(res => {
-          setNotifications(res.data)
-          const latest = res.data.find(n => n.status === 'Completed')
-          if (latest && !getSeen().has(latest.id)) setCompletionToast(prev => prev?.id === latest.id ? prev : latest)
-        }).catch(() => setNotifications([]))
-    }
-    load()
-    const t = window.setInterval(load, 30000)
-    return () => window.clearInterval(t)
+    setSession(getLocalSession())
+  }, [location.pathname])
+
+  useEffect(() => {
+    return subscribeNotifications(list => {
+      setNotifications(list)
+      const latest = list.find(n => n.status === 'Completed')
+      if (latest && !getSeen().has(latest.id)) setCompletionToast(prev => prev?.id === latest.id ? prev : latest)
+    })
   }, [])
 
   const logout = () => { clearLocalSession(); window.location.href = '/' }
   const closeToast = () => { if (completionToast) markSeen(completionToast.id); setCompletionToast(null) }
+  /* Back button: don't leave the app when the user deep-linked into a page. */
+  const goBack = () => {
+    const idx = (window.history.state as { idx?: number } | null)?.idx
+    if (idx != null && idx > 0) navigate(-1)
+    else navigate('/')
+  }
 
   const navItems = [
     { path: '/', label: 'Home' },
@@ -130,7 +137,7 @@ export const MainLayout: React.FC<LayoutProps> = ({ children, className = '' }) 
       {location.pathname !== '/' && (
         <div className="border-b border-primary-light/30 bg-white/70">
           <div className="mx-auto max-w-7xl px-4 py-2">
-            <button type="button" onClick={() => navigate(-1)}
+            <button type="button" onClick={goBack}
               className="inline-flex items-center gap-1.5 rounded-pill px-3 py-1.5 text-sm font-semibold text-slate-600 transition-colors hover:bg-primary-light/30 hover:text-primary">← Back</button>
           </div>
         </div>

@@ -73,7 +73,10 @@ def _approved_shop_with_product(shopkeeper_email: str, shopkeeper_name: str):
     return shop, product
 
 
-async def _place_order(client, shop_id, product_id, student_name, method="COD"):
+async def _place_order(client, shop_id, product_id, student_name, method="COD", token=None):
+    """POST /local/orders — requires the student's auth token, so callers must
+    pass the token from ``_register_and_login``."""
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
     res = await client.post("/api/v1/local/orders", json={
         "shop_id": shop_id,
         "items": [{"product_id": product_id, "quantity": 2}],
@@ -82,7 +85,7 @@ async def _place_order(client, shop_id, product_id, student_name, method="COD"):
         "delivery_location": "Hostel A Block 101",
         "delivery_slot": "Evening",
         "payment_method": method,
-    })
+    }, headers=headers)
     assert res.status_code == 200
     return res.json()
 
@@ -93,7 +96,8 @@ async def test_order_auto_accepted_within_window(client, monkeypatch):
     await _register_and_login(client, _u("autos1"), "password123", "Auto Student", "student")
     shop, product = _approved_shop_with_product(_u("autos1vendor") + "@example.com", "Auto Vendor")
 
-    order = await _place_order(client, shop["id"], product["id"], "Auto Student", method="COD")
+    _tok = await _register_and_login(client, _u("autos1_tok"), "password123", "Auto", "student")
+    order = await _place_order(client, shop["id"], product["id"], "Auto Student", method="COD", token=_tok)
     assert order["status"] == "Accepted"
 
 
@@ -103,7 +107,8 @@ async def test_order_not_auto_accepted_outside_window(client, monkeypatch):
     await _register_and_login(client, _u("autos2"), "password123", "Auto Student 2", "student")
     shop, product = _approved_shop_with_product(_u("autos2vendor") + "@example.com", "Auto Vendor 2")
 
-    order = await _place_order(client, shop["id"], product["id"], "Auto Student 2", method="COD")
+    _tok2 = await _register_and_login(client, _u("autos2_tok"), "password123", "Auto 2", "student")
+    order = await _place_order(client, shop["id"], product["id"], "Auto Student 2", method="COD", token=_tok2)
     assert order["status"] == "Pending Acceptance"
 
 
@@ -115,7 +120,7 @@ async def test_student_cancels_order_within_window(client, monkeypatch):
     student_token = await _register_and_login(client, _u("cancels1"), "password123", "Cancel Student", "student")
     shop, product = _approved_shop_with_product(_u("cancels1vendor") + "@example.com", "Cancel Vendor")
 
-    order = await _place_order(client, shop["id"], product["id"], "Cancel Student", method="COD")
+    order = await _place_order(client, shop["id"], product["id"], "Cancel Student", method="COD", token=student_token)
     assert order["status"] == "Accepted"
 
     # 11:00 AM — still inside the window (cut-off 12:30) → cancellation works.
@@ -143,7 +148,7 @@ async def test_cannot_cancel_after_window_closes(client, monkeypatch):
     _freeze_time(monkeypatch, 10, 0)
     student_token = await _register_and_login(client, _u("cancels2"), "password123", "Cancel Student 2", "student")
     shop, product = _approved_shop_with_product(_u("cancels2vendor") + "@example.com", "Cancel Vendor 2")
-    order = await _place_order(client, shop["id"], product["id"], "Cancel Student 2", method="COD")
+    order = await _place_order(client, shop["id"], product["id"], "Cancel Student 2", method="COD", token=student_token)
 
     # 1:00 PM — the morning window (cut-off 12:30) has closed.
     _freeze_time(monkeypatch, 13, 0)
@@ -163,7 +168,7 @@ async def test_cannot_cancel_order_placed_outside_windows(client, monkeypatch):
     _freeze_time(monkeypatch, 10, 0)
     student_token = await _register_and_login(client, _u("cancels3"), "password123", "Cancel Student 3", "student")
     shop, product = _approved_shop_with_product(_u("cancels3vendor") + "@example.com", "Cancel Vendor 3")
-    order = await _place_order(client, shop["id"], product["id"], "Cancel Student 3", method="COD")
+    order = await _place_order(client, shop["id"], product["id"], "Cancel Student 3", method="COD", token=student_token)
 
     # The order's placement time maps to no delivery window at all.
     monkeypatch.setattr(local_mod, "slot_cutoff_for", lambda _dt: None)
@@ -180,7 +185,7 @@ async def test_cannot_cancel_completed_order(client, monkeypatch):
     _freeze_time(monkeypatch, 10, 0)
     student_token = await _register_and_login(client, _u("cancels4"), "password123", "Cancel Student 4", "student")
     shop, product = _approved_shop_with_product(_u("cancels4vendor") + "@example.com", "Cancel Vendor 4")
-    order = await _place_order(client, shop["id"], product["id"], "Cancel Student 4", method="COD")
+    order = await _place_order(client, shop["id"], product["id"], "Cancel Student 4", method="COD", token=student_token)
     db.update_order_status(order["id"], "Completed")
 
     res = await client.post(
@@ -199,7 +204,7 @@ async def test_cannot_cancel_someone_elses_order(client, monkeypatch):
     student_token = await _register_and_login(client, _u("cancels5"), "password123", "Cancel Student 5", "student")
     await _register_and_login(client, _u("cancels6"), "password123", "Other Student", "student", phone="+919000000001")
     shop, product = _approved_shop_with_product(_u("cancels5vendor") + "@example.com", "Cancel Vendor 5")
-    order = await _place_order(client, shop["id"], product["id"], "Cancel Student 5", method="COD")
+    order = await _place_order(client, shop["id"], product["id"], "Cancel Student 5", method="COD", token=student_token)
 
     # The wrong student can't cancel it — the order belongs to someone else.
     other_token = (await client.post("/api/v1/local/auth/login", json={"username": _u("cancels6"), "password": "password123"})).json()["access_token"]

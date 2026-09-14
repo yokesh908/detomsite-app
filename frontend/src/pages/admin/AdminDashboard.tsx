@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import api from '../../services/api'
 import {
   LocalComplaint,
@@ -13,8 +13,32 @@ import {
   LocalSummary,
 } from '../../types/localApi'
 import { getLocalSession } from '../../utils/session'
+import { usePolling } from '../../hooks/usePolling'
+import { same } from '../../utils/same'
 
 const money = (v: number) => `₹${v.toLocaleString('en-IN')}`
+
+/* ─── Web Push helpers (mirror of the shopkeeper app) ─── */
+/* Convert the base64url VAPID public key into the Uint8Array the browser's
+   PushManager.subscribe() expects. */
+function urlBase64ToUint8Array(base64String: string): Uint8Array<ArrayBuffer> {
+  const padding = '='.repeat((4 - (base64String.length % 4)) % 4)
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/')
+  const raw = atob(base64)
+  const output = new Uint8Array(new ArrayBuffer(raw.length))
+  for (let i = 0; i < raw.length; i++) output[i] = raw.charCodeAt(i)
+  return output
+}
+
+function pushKeyToBase64(key: ArrayBuffer | null): string {
+  if (!key) return ''
+  let binary = ''
+  const bytes = new Uint8Array(key)
+  for (let i = 0; i < bytes.byteLength; i++) binary += String.fromCharCode(bytes[i])
+  return btoa(binary)
+}
+
+type PushState = 'checking' | 'disabled' | 'unsupported' | 'denied' | 'unsubscribed' | 'subscribed' | 'error'
 
 type Tab =
   | 'approvals'
@@ -41,8 +65,13 @@ export function AdminDashboard() {
   const [error, setError] = useState('')
   const [tab, setTab] = useState<Tab>('approvals')
   const session = getLocalSession()
+  const [pushState, setPushState] = useState<PushState>('checking')
+  const [pushPublicKey, setPushPublicKey] = useState('')
+  const [pushReason, setPushReason] = useState('')
+  const [pushError, setPushError] = useState('')
+  const [sendingTest, setSendingTest] = useState(false)
 
-  const load = async () => {
+  const load = useCallback(async () => {
     setError('')
     try {
       const [s, p, o, pa, su, ps, cm, re, se, mc] = await Promise.all([
@@ -57,25 +86,184 @@ export function AdminDashboard() {
         api.get<LocalSettlement[]>('/local/settlements'),
         api.get<LocalMenuChangeRequest[]>('/local/menu-change-requests'),
       ])
-      setShops(s.data)
-      setProducts(p.data)
-      setOrders(o.data)
-      setPayments(pa.data)
-      setSummary(su.data)
-      setPaymentSettings(ps.data)
-      setComplaints(cm.data)
-      setRefunds(re.data)
-      setSettlements(se.data)
-      setMenuChanges(mc.data)
+      setShops(cur => same(cur, s.data) ? cur : s.data)
+      setProducts(cur => same(cur, p.data) ? cur : p.data)
+      setOrders(cur => same(cur, o.data) ? cur : o.data)
+      setPayments(cur => same(cur, pa.data) ? cur : pa.data)
+      setSummary(cur => same(cur, su.data) ? cur : su.data)
+      setPaymentSettings(cur => same(cur, ps.data) ? cur : ps.data)
+      setComplaints(cur => same(cur, cm.data) ? cur : cm.data)
+      setRefunds(cur => same(cur, re.data) ? cur : re.data)
+      setSettlements(cur => same(cur, se.data) ? cur : se.data)
+      setMenuChanges(cur => same(cur, mc.data) ? cur : mc.data)
     } catch {
       setError('Backend not reachable')
     }
-  }
-  useEffect(() => {
-    void load()
-    const i = window.setInterval(load, 15000)
-    return () => window.clearInterval(i)
   }, [])
+
+  // Poll every 15s while this tab is visible; background tabs pause and refresh
+  // instantly when you switch back.
+  usePolling(load, 15000, [load])
+
+  /* ─── Web push notifications (ring this phone) ─── */
+  /* Start the app service worker and wait until it is really ACTIVE so
+     push subscriptions never race a still-installing worker. */
+  const ensureServiceWorker = async (timeoutMs = 12000): Promise<ServiceWorkerRegistration> => {
+    const registration = await navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' })
+    const deadline = Date.now() + timeoutMs
+    while (Date.now() < deadline) {
+      const reg = await navigator.serviceWorker.getRegistration()
+      if (reg?.active || registration.active || navigator.serviceWorker.controller) return reg || registration
+      await new Promise((r) => setTimeout(r, 400))
+    }
+    const state = registration.active ? 'active' : registration.installing ? 'installing' : registration.waiting ? 'waiting' : 'none'
+    throw new Error('service-worker-timeout:' + state)
+  }
+
+  const swStartError = (err: any) => {
+    const detail = err?.message || ''
+    if (detail.startsWith('service-worker-timeout')) {
+      const state = detail.split(':')[1]
+      if (state === 'installing' || state === 'waiting') {
+        return 'The app service worker got stuck while starting. Close and reopen the app, then try again.'
+      }
+      return 'The app service worker did not start in this browser. You need the HTTPS site (https://...), a normal tab (not private), and service workers allowed.'
+    }
+    if (err?.name === 'TypeError' && /mime|script|register/i.test(detail)) {
+      return 'The service worker file is not being served correctly. Open /sw.js in your browser — it should show JavaScript code, not HTML.'
+    }
+    return 'Could not start the app service worker: ' + (detail || 'unknown error')
+  }
+
+  const checkPushSupport = async () => {
+    try {
+      const res = await api.get('/admin/push/config')
+      const cfg = res.data || {}
+      if (!cfg.enabled || !cfg.vapid_public_key) {
+        setPushReason(cfg.reason || 'Push alerts are not configured on the server yet (VAPID keys missing).')
+        setPushState('disabled')
+        return
+      }
+      setPushReason('')
+      setPushPublicKey(cfg.vapid_public_key)
+      if (!window.isSecureContext) {
+        setPushError('Push needs a secure (HTTPS) connection. Open the deployed app URL (https://...) instead of a local or LAN address.')
+        setPushState('unsupported')
+        return
+      }
+      if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) {
+        setPushState('unsupported')
+        return
+      }
+      let reg
+      try {
+        reg = await ensureServiceWorker()
+      } catch (err) {
+        setPushError(swStartError(err))
+        setPushState('unsupported')
+        return
+      }
+      try {
+        const sub = await reg.pushManager.getSubscription()
+        if (sub) {
+          // Re-register the current subscription — browsers rotate push keys
+          // and endpoints over time, so this keeps the server copy fresh.
+          try {
+            await api.post('/admin/push/subscribe', {
+              endpoint: sub.endpoint,
+              keys: { p256dh: pushKeyToBase64(sub.getKey('p256dh')), auth: pushKeyToBase64(sub.getKey('auth')) },
+            })
+          } catch { /* best-effort — the app still treats it as subscribed */ }
+          setPushState('subscribed')
+        } else if (Notification.permission === 'denied') setPushState('denied')
+        else setPushState('unsubscribed')
+      } catch {
+        setPushState('unsubscribed')
+      }
+    } catch {
+      setPushReason('The server could not be reached to check push status.')
+      setPushState('disabled')
+    }
+  }
+
+  useEffect(() => {
+    if (session?.role === 'admin') void checkPushSupport()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const enablePush = async () => {
+    setPushError('')
+    try {
+      if (!pushPublicKey) { setError('Notifications are not configured on the server yet.'); return }
+      if (!window.isSecureContext) {
+        const msg = 'Push needs a secure (HTTPS) connection — open the deployed app URL (https://...) instead of a local or LAN address, then try again.'
+        setError(msg)
+        setPushError(msg)
+        setPushState('unsupported')
+        return
+      }
+      if (!('serviceWorker' in navigator) || !('PushManager' in window)) { setError("This browser doesn't support push notifications."); return }
+      if (Notification.permission === 'denied') { setPushState('denied'); setError('Notifications are blocked — allow them in your browser/site settings.'); return }
+      let permission: NotificationPermission = Notification.permission
+      if (permission === 'default') permission = await Notification.requestPermission()
+      if (permission !== 'granted') { setPushState('denied'); setError('Permission was not granted.'); return }
+      let reg
+      try {
+        reg = await ensureServiceWorker()
+      } catch (err) {
+        const msg = swStartError(err)
+        setError(msg)
+        setPushError(msg)
+        setPushState('unsupported')
+        return
+      }
+      let sub = await reg.pushManager.getSubscription()
+      if (!sub) {
+        sub = await reg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToUint8Array(pushPublicKey),
+        })
+      }
+      await api.post('/admin/push/subscribe', {
+        endpoint: sub.endpoint,
+        keys: { p256dh: pushKeyToBase64(sub.getKey('p256dh')), auth: pushKeyToBase64(sub.getKey('auth')) },
+      })
+      setPushState('subscribed')
+      setMessage("Admin notifications enabled — you'll be alerted the moment something needs you")
+    } catch (err: any) {
+      const msg = err?.response?.data?.detail || 'Could not enable notifications — the app service worker is not active in this browser.'
+      setError(msg)
+      setPushError(msg)
+      setPushState('error')
+    }
+  }
+
+  const sendTestPush = async () => {
+    setSendingTest(true)
+    setPushError('')
+    try {
+      const res = await api.post('/admin/push/test')
+      const data = res.data || {}
+      if (data.ok) setMessage(data.detail || 'Test notification sent!')
+      else setPushError(data.detail || 'Test push failed')
+    } catch (err: any) {
+      setPushError(err?.response?.data?.detail || 'Could not send test notification')
+    } finally { setSendingTest(false) }
+  }
+
+  const disablePush = async () => {
+    setPushError('')
+    try {
+      const reg = await navigator.serviceWorker.ready
+      const sub = await reg.pushManager.getSubscription()
+      if (sub) {
+        try { await api.delete('/admin/push/subscribe', { params: { endpoint: sub.endpoint } }) } catch { /* best-effort */ }
+        await sub.unsubscribe()
+      }
+      setPushState('unsubscribed')
+      setMessage('Admin notifications disabled')
+    } catch { setError('Could not disable notifications') }
+  }
 
   const approveShop = async (id: string, st: string) => {
     const r = await api.patch<LocalShop>(`/local/shops/${id}`, { approval_status: st })
@@ -151,6 +339,58 @@ export function AdminDashboard() {
               {error || message}
             </div>
           )}
+        </div>
+
+        <div className="mb-6 rounded-btn border border-primary-light/40 bg-primary-light/10 p-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <span className="text-2xl">🔔</span>
+              <div>
+                <p className="font-bold text-primary-dark">Admin Notifications</p>
+                <p className="text-xs text-gray-500">
+                  Get an alert on this phone when something needs you (new vendor, payment to verify, feedback).
+                </p>
+                {pushState === 'subscribed' && (
+                  <p className="mt-0.5 text-xs font-semibold text-emerald-600">Notifications enabled on this device</p>
+                )}
+                {pushState === 'denied' && (
+                  <p className="mt-0.5 text-xs font-semibold text-red-600">
+                    Notifications are blocked — allow them in your browser/site settings.
+                  </p>
+                )}
+                {pushState !== 'subscribed' && pushState !== 'denied' && (pushReason || pushError) && (
+                  <p className="mt-0.5 text-xs font-medium text-amber-600">{pushError || pushReason}</p>
+                )}
+              </div>
+            </div>
+            <div className="flex shrink-0 gap-2">
+              {pushState === 'subscribed' ? (
+                <>
+                  <button
+                    onClick={() => void sendTestPush()}
+                    disabled={sendingTest}
+                    className="rounded-lg border border-primary/30 bg-white px-3 py-2 text-sm font-bold text-primary hover:bg-primary-light/20 disabled:opacity-50"
+                  >
+                    {sendingTest ? 'Sending...' : 'Test Alert'}
+                  </button>
+                  <button
+                    onClick={() => void disablePush()}
+                    className="rounded-lg border border-red-200 bg-white px-3 py-2 text-sm font-bold text-red-600 hover:bg-red-50"
+                  >
+                    Disable
+                  </button>
+                </>
+              ) : (
+                <button
+                  onClick={() => void enablePush()}
+                  disabled={pushState === 'checking' || pushState === 'disabled' || pushState === 'unsupported'}
+                  className="rounded-lg bg-primary px-4 py-2 text-sm font-bold text-white hover:bg-primary-dark disabled:opacity-50"
+                >
+                  {pushState === 'checking' ? 'Checking...' : 'Enable Notifications'}
+                </button>
+              )}
+            </div>
+          </div>
         </div>
 
         <div className="mb-6 grid grid-cols-3 gap-3 sm:grid-cols-6">

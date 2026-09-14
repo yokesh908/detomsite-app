@@ -10,7 +10,7 @@ def test_shop_toggle_and_admin_actions(monkeypatch, tmp_path):
     monkeypatch.setenv("FRONTEND_URL", "https://example.com")
     monkeypatch.setenv("BACKEND_URL", "https://api.example.com")
     monkeypatch.delenv("USE_TURSO_DB", raising=False)
-    monkeypatch.delenv("USE_SUPABASE_DB", raising=False)
+    monkeypatch.setenv("USE_SUPABASE_DB", "false")
     monkeypatch.setenv("USE_LOCAL_DB", "true")
 
     import app.core.config as config_module

@@ -33,6 +33,11 @@ def init_store() -> bool:
                 "Supabase store is not reachable. Check SUPABASE_DATABASE_URL in "
                 "backend/.env and that backend/supabase/schema.sql has been run."
             )
-        return ok
-    store.init_local_demo_db()
+            return ok
+    else:
+        store.init_local_demo_db()
+    # Seed the super admin as a real DB user (role='admin') so the admin
+    # forgot-password OTP flow can find and update it.
+    if hasattr(store, "ensure_admin_user"):
+        store.ensure_admin_user()
     return True

@@ -3,6 +3,7 @@ Main FastAPI application
 """
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -25,30 +26,34 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # ─── In-app keep-alive cron ───
-KEEP_ALIVE_INTERVAL_SECONDS = 5 * 60
+# Pings faster (every 2 min) and hits SEVERAL endpoints so Vercel keeps a few
+# warm lambda instances instead of one — cold Python starts (≈10–20s) are the
+# single biggest slowness users feel on the portals.
+KEEP_ALIVE_INTERVAL_SECONDS = 2 * 60
+KEEP_ALIVE_PATHS = ("/health", "/api/v1/local/batch", "/api/v1/local/status")
 
 
 async def keep_alive_loop():
-    """Background task: hit /health every 5 minutes like a cron job."""
+    """Background task: warm a few backend endpoints every 2 minutes so the
+    portals rarely hit a cold start."""
     import httpx
 
-    url = (os.environ.get("HEALTH_URL") or "").strip()
-    if not url:
-        base = (settings.BACKEND_URL or "").strip().rstrip("/")
-        if base:
-            url = f"{base}/health"
-    if not url:
+    base = (os.environ.get("HEALTH_URL") or settings.BACKEND_URL or "").strip().rstrip("/")
+    if not base:
         logger.warning("keep-alive: no HEALTH_URL/BACKEND_URL configured — self-ping disabled")
         return
+    if not base.startswith("http"):
+        base = f"https://{base}"
 
-    logger.info(f"keep-alive: self-ping cron active every {KEEP_ALIVE_INTERVAL_SECONDS // 60} min → {url}")
+    logger.info(f"keep-alive: warm-up cron active every {KEEP_ALIVE_INTERVAL_SECONDS // 60} min → {base}")
     while True:
-        try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                response = await client.get(url)
-            logger.info(f"keep-alive: pinged {url} → {response.status_code}")
-        except Exception as exc:
-            logger.warning(f"keep-alive: ping error -> {exc}")
+        for path in KEEP_ALIVE_PATHS:
+            try:
+                async with httpx.AsyncClient(timeout=10) as client:
+                    response = await client.get(f"{base}{path}")
+                logger.info(f"keep-alive: {path} → {response.status_code}")
+            except Exception as exc:
+                logger.warning(f"keep-alive: {path} error -> {exc}")
         await asyncio.sleep(KEEP_ALIVE_INTERVAL_SECONDS)
 
 # Initialize Sentry if DSN is provided — sample 10% of traces (not 100%)
@@ -63,7 +68,11 @@ if sentry_sdk and settings.SENTRY_DSN:
 # Protects auth endpoints from brute-force attacks. No external deps needed.
 _rate_limit_store: dict[str, list[float]] = defaultdict(list)
 _RATE_LIMIT_WINDOW = 60  # seconds
-_RATE_LIMIT_MAX = 10     # max requests per window per IP
+# Cap per real client IP (not per Vercel proxy IP), tuned for a campus behind
+# a shared NAT: generous enough that a lunch-rush login flash is never blocked,
+# tight enough to blunt naive flood attacks. Real brute-force defence happens
+# per-account in the auth endpoints themselves.
+_RATE_LIMIT_MAX = 60
 
 
 async def rate_limit_middleware(request: Request, call_next):
@@ -75,7 +84,11 @@ async def rate_limit_middleware(request: Request, call_next):
     if not any(path.endswith(p) for p in sensitive_prefixes):
         return await call_next(request)
 
-    client_ip = request.client.host if request.client else "unknown"
+    # Trust the first x-forwarded-for hop (set by Vercel) so every student gets
+    # their OWN bucket; using request.client.host would lump the whole campus
+    # behind the proxy's IP into a single 10/min quota.
+    forwarded = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
+    client_ip = forwarded or (request.client.host if request.client else "unknown")
     now = time.time()
     key = f"{client_ip}:{path}"
     # Prune old entries
@@ -188,12 +201,34 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Compress every JSON response ≥ 500 bytes — cuts transfer ~80% on the big
+# lists (orders, products, notifications) that the portals poll all day.
+app.add_middleware(GZipMiddleware, minimum_size=500)
+
+
+# Drop the read TTL-cache after any successful write, so cached portals
+# (admin/shopkeeper lists) never show stale rows once an action lands.
+from app.core import ttl_cache, shared_cache
+
+
+async def cache_invalidation_middleware(request: Request, call_next):
+    response = await call_next(request)
+    if request.method in ("POST", "PUT", "PATCH", "DELETE") and response.status_code < 400:
+        ttl_cache.clear()
+        if shared_cache.enabled():
+            await asyncio.to_thread(shared_cache.clear)
+    return response
+
+
+app.add_middleware(BaseHTTPMiddleware, dispatch=cache_invalidation_middleware)
+
 
 # Include routers
 from app.api.v1 import local, users, vendor, local_admin
-from app.middleware.error_handler import ErrorHandlingMiddleware, LoggingMiddleware
+from app.middleware.error_handler import ErrorHandlingMiddleware, LoggingMiddleware, SecurityHeadersMiddleware
 
 # Add middleware (order matters — last added = first executed)
+app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(ErrorHandlingMiddleware)
 app.add_middleware(LoggingMiddleware)
 app.add_middleware(BaseHTTPMiddleware, dispatch=rate_limit_middleware)

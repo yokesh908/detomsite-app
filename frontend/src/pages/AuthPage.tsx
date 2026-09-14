@@ -5,17 +5,6 @@ import { saveSessionToBackend } from '../services/localApi'
 import { saveLocalSession, UserRoleChoice, getDashboardPath } from '../utils/session'
 import { syncProfileToSupabase, isSupabaseConfigured } from '../services/supabase'
 
-/* ─── Admin credentials (hardcoded for now, change in production) ─── */
-const ADMIN_USERNAME = import.meta.env.VITE_ADMIN_USERNAME || 'admin'
-const ADMIN_PASSWORD = import.meta.env.VITE_ADMIN_PASSWORD || 'admin123'
-
-/* ─── Role definitions ─── */
-const roles: { id: UserRoleChoice; label: string; icon: string; color: string }[] = [
-  { id: 'student', label: 'Student', icon: '🎓', color: 'emerald' },
-  { id: 'shopkeeper', label: 'Shopkeeper', icon: '👨‍🍳', color: 'gold' },
-  { id: 'admin', label: 'Admin', icon: '⚙️', color: 'emerald' },
-]
-
 type AuthMode = 'login' | 'signup'
 
 /* Password field with a show/hide toggle, styled to match the portal switcher. */
@@ -42,7 +31,6 @@ function AuthPasswordField({ value, onChange, placeholder, autoComplete, require
 export function AuthPage() {
   const navigate = useNavigate()
   const [mode, setMode] = useState<AuthMode>('login')
-  const [role, setRole] = useState<UserRoleChoice>('student')
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
@@ -79,8 +67,9 @@ export function AuthPage() {
       if (accessToken) {
         localStorage.setItem('access_token', accessToken)
       }
+      const role: UserRoleChoice = 'student'
       const session = {
-        role: user.role as UserRoleChoice,
+        role,
         email: `${user.username}@campus.local`,
         name: user.name,
       }
@@ -89,35 +78,19 @@ export function AuthPage() {
       saveSessionToBackend(session)
       if (isSupabaseConfigured()) {
         syncProfileToSupabase({
-          id: `${user.role}-${user.username}`,
+          id: `student-${user.username}`,
           email: session.email,
           name: session.name,
           role: user.role,
         })
       }
-      navigate(getDashboardPath(user.role as UserRoleChoice))
+      navigate(getDashboardPath(role))
     }
 
     setLoading(true)
 
     try {
-      // ─── Admin: use hardcoded credentials (no registration) ───
-      if (role === 'admin') {
-        if (mode === 'signup') {
-          setError('Admin accounts cannot be created here. Contact system administrator.')
-          setLoading(false)
-          return
-        }
-        if (username.trim() !== ADMIN_USERNAME || password !== ADMIN_PASSWORD) {
-          setError('Invalid admin credentials')
-          setLoading(false)
-          return
-        }
-        finishAuth({ username: ADMIN_USERNAME, name: 'Administrator', role: 'admin' }, null)
-        return
-      }
-
-      // ─── Student / Shopkeeper: use backend API ───
+      // ─── Student only: use backend API ───
       const cleanUsername = username.trim()
       const profileName = fullName.trim() || cleanUsername
 
@@ -134,7 +107,7 @@ export function AuthPage() {
           username: cleanUsername,
           password,
           name: profileName,
-          role,
+          role: 'student',
         })
         const { user } = response.data
 
@@ -255,30 +228,6 @@ export function AuthPage() {
             </button>
           </div>
 
-          <div className="mb-6">
-            <label className="mb-2 block text-sm font-semibold text-slate-700">I want to join as</label>
-            <div className="flex gap-2">
-              {roles.map(opt => (
-                <button key={opt.id} type="button" onClick={() => { setRole(opt.id); setError('') }}
-                  className={`flex-1 rounded-card border py-3 text-center transition-all ${
-                    role === opt.id
-                      ? 'border-emerald-500 bg-primary-light/30 shadow-[0_8px_20px_rgba(15,118,110,0.1)]'
-                      : 'border-slate-200 bg-white hover:border-emerald-300'
-                  }`}>
-                  <span className="block text-lg">{opt.icon}</span>
-                  <span className={`mt-0.5 block text-xs font-bold ${role === opt.id ? 'text-primary' : 'text-slate-500'}`}>
-                    {opt.label}
-                  </span>
-                </button>
-              ))}
-            </div>
-            <p className="mt-2 text-xs text-slate-500">
-              {role === 'student' && 'Students access the website and can browse shops and place orders.'}
-              {role === 'shopkeeper' && 'Shopkeepers can use the mobile app experience and wait for admin approval.'}
-              {role === 'admin' && 'Admins use the secure admin portal with dedicated credentials.'}
-            </p>
-          </div>
-
           {error && (
             <div className="mb-4 flex items-center gap-2 rounded-card border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-600">
               <span>⚠️</span>
@@ -287,7 +236,7 @@ export function AuthPage() {
           )}
 
           <form onSubmit={handleSubmit} className="space-y-4">
-            {mode === 'signup' && role !== 'admin' && (
+            {mode === 'signup' && (
               <div>
                 <label className="mb-1.5 block text-sm font-semibold text-slate-700">Full Name</label>
                 <div className="relative">
@@ -300,16 +249,12 @@ export function AuthPage() {
             )}
 
             <div>
-              <label className="mb-1.5 block text-sm font-semibold text-slate-700">
-                {role === 'admin' ? 'Admin Username' : 'Username'}
-              </label>
+              <label className="mb-1.5 block text-sm font-semibold text-slate-700">Username</label>
               <div className="relative">
-                <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400">
-                  {role === 'admin' ? '🔑' : role === 'student' ? '🎓' : '👨‍🍳'}
-                </span>
+                <span className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400">🎓</span>
                 <input type="text" value={username} onChange={e => setUsername(e.target.value)}
                   className="w-full rounded-card border border-slate-200 bg-white pl-11 pr-4 py-3 text-slate-700 placeholder-slate-400 outline-none transition-all focus:border-primary focus:shadow-[0_0_0_3px_rgba(15,118,110,0.12)]"
-                  placeholder={role === 'admin' ? 'Enter admin username' : 'Choose a username'}
+                  placeholder="Choose a username"
                   autoComplete="username" required />
               </div>
             </div>
@@ -326,21 +271,6 @@ export function AuthPage() {
                 <label className="mb-1.5 block text-sm font-semibold text-slate-700">Confirm Password</label>
                 <AuthPasswordField value={confirmPassword} onChange={setConfirmPassword}
                   placeholder="Confirm your password" autoComplete="new-password" />
-              </div>
-            )}
-
-            {role === 'admin' && mode === 'login' && (
-              <div className="rounded-card border border-primary-light/50 bg-primary-light/30 px-4 py-2.5">
-                <p className="text-xs font-medium text-primary">
-                  🔑 Default admin: <strong>{ADMIN_USERNAME}</strong> / <strong>{ADMIN_PASSWORD}</strong>
-                </p>
-              </div>
-            )}
-            {role === 'shopkeeper' && mode === 'signup' && (
-              <div className="rounded-card border border-gold-light/60 bg-amber-50 px-4 py-2.5">
-                <p className="text-xs font-medium text-gold-dark">
-                  ⏳ After signup, your shop will be <strong>Pending Approval</strong>. An admin must approve it before students can order.
-                </p>
               </div>
             )}
 

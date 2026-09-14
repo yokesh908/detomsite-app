@@ -1,34 +1,44 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, useCallback } from 'react'
 import { Link } from 'react-router-dom'
 import api from '../../services/api'
 import { LocalNotification, LocalParentOrder, LocalTicket } from '../../types/localApi'
 import { getLocalSession } from '../../utils/session'
+import { subscribeNotifications } from '../../services/notifStore'
+import { usePolling } from '../../hooks/usePolling'
+import { same } from '../../utils/same'
+
+type Notice = { kind: 'ok' | 'error'; text: string } | null
 
 export function CustomerDashboard() {
   const session = getLocalSession()
   const [orders, setOrders] = useState<LocalParentOrder[]>([])
   const [tickets, setTickets] = useState<LocalTicket[]>([])
   const [notifications, setNotifications] = useState<LocalNotification[]>([])
-  const [message, setMessage] = useState('')
+  const [notice, setNotice] = useState<Notice>(null)
 
   useEffect(() => {
-    const load = () => {
-      Promise.all([
-        api.get<LocalParentOrder[]>('/local/orders/parent'),
-        api.get<LocalTicket[]>('/local/tickets'),
-        api.get<LocalNotification[]>('/local/notifications'),
-      ]).then(([o, t, n]) => { setOrders(o.data); setTickets(t.data); setNotifications(n.data) }).catch(() => {})
-    }
-    load(); const i = window.setInterval(load, 10000); return () => window.clearInterval(i)
+    // Notifications come from the shared store (same 10s poller as the navbar
+    // bell) so we don't double-fetch the endpoint.
+    return subscribeNotifications(setNotifications)
   }, [])
 
+  const load = useCallback(() => {
+    Promise.all([
+      api.get<LocalParentOrder[]>('/local/orders/parent'),
+      api.get<LocalTicket[]>('/local/tickets'),
+    ]).then(([o, t]) => { setOrders(cur => same(cur, o.data) ? cur : o.data); setTickets(cur => same(cur, t.data) ? cur : t.data) })
+      .catch(() => setNotice({ kind: 'error', text: 'Could not load your data — check your network and try again.' }))
+  }, [])
+
+  // Poll every 10s while this tab is visible; background tabs pause and refresh
+  // instantly when you switch back.
+  usePolling(load, 10000, [load])
+
   const myOrders = useMemo(() => {
-    if (!session?.name) return orders
-    const mine = orders.filter(o => o.student_name.toLowerCase() === session.name!.toLowerCase())
-    const byPhone = session.phone
-      ? orders.filter(o => o.student_phone.replace(/\D/g, '').slice(-10) === session.phone!.replace(/\D/g, '').slice(-10))
-      : []
-    const merged = [...mine, ...byPhone.filter(p => !mine.some(m => m.id === p.id))]
+    const phone = (session?.phone || '').replace(/\D/g, '')
+    const byName = session?.name ? orders.filter(o => String(o.student_name || '').toLowerCase() === session!.name!.toLowerCase()) : []
+    const byPhone = phone ? orders.filter(o => String(o.student_phone || '').replace(/\D/g, '').slice(-10) === phone.slice(-10)) : []
+    const merged = [...byName, ...byPhone.filter(p => !byName.some(m => m.id === p.id))]
     return merged.length ? merged : orders
   }, [orders, session?.name, session?.phone])
 
@@ -42,9 +52,9 @@ export function CustomerDashboard() {
     try {
       const r = await api.patch<LocalParentOrder>(`/local/orders/${orderId}/cancel`)
       setOrders(curr => curr.map(o => o.id === orderId ? r.data : o))
-      setMessage('Order cancelled successfully')
+      setNotice({ kind: 'ok', text: 'Order cancelled successfully' })
     } catch (err: any) {
-      setMessage(err?.response?.data?.detail || 'Cannot cancel this order')
+      setNotice({ kind: 'error', text: err?.response?.data?.detail || 'Cannot cancel this order' })
     }
   }
 
@@ -58,10 +68,10 @@ export function CustomerDashboard() {
           <p className="mt-1 text-sm font-medium text-gray-500">{session?.name || session?.email || 'Student'}</p>
         </div>
 
-        {message && (
-          <div className={`mb-4 rounded-btn px-4 py-3 text-sm font-medium ${message.includes('cancel') ? 'bg-red-50 text-red-600 border border-red-200' : 'bg-primary-light/30 text-primary border border-primary-light/50'}`}>
-            {message}
-            <button onClick={() => setMessage('')} className="ml-2 font-bold">✕</button>
+        {notice && (
+          <div className={`mb-4 rounded-btn px-4 py-3 text-sm font-medium border ${notice.kind === 'error' ? 'bg-red-50 text-red-600 border-red-200' : 'bg-emerald-50 text-emerald-700 border-emerald-200'}`}>
+            {notice.text}
+            <button onClick={() => setNotice(null)} className="ml-2 font-bold">✕</button>
           </div>
         )}
 

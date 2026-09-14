@@ -82,7 +82,7 @@ export function CartPage() {
                 <div className="flex justify-between border-t border-gray-100 pt-3 text-lg font-bold text-primary-dark">
                   <span>Total ({groups.length} shops)</span><span>₹{bill.total}</span>
                 </div>
-                <p className="pt-1 text-xs text-gray-400">No delivery fee, no taxes. The 5% platform share is deducted from each shop, not you.</p>
+                <p className="pt-1 text-xs text-gray-400">No delivery fee, no taxes. The flat ₹10 platform fee per order is deducted from each shop, not you.</p>
               </div>
               <button onClick={() => navigate('/payment')}
                 className="mt-5 w-full rounded-btn bg-primary px-5 py-3 text-sm font-bold text-white shadow-gold transition-all hover:bg-primary-dark hover:shadow-gold-lg">

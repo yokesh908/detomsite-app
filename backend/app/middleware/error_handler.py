@@ -51,3 +51,23 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         
         logger.info(f"Response status: {response.status_code}")
         return response
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """Add sensible security headers to every response.
+
+    Defense-in-depth: guards against MIME sniffing, clickjacking and the like.
+    The strictest CSP variant is impractical here because the frontends are
+    served from separate Vercel origins (list-style directives would break the
+    student/admin/shopkeeper portals), so we set the no-sniff/frame guards that
+    are origin-agnostic.
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+        response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+        response.headers.setdefault("X-XSS-Protection", "1; mode=block")
+        response.headers.setdefault("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+        return response

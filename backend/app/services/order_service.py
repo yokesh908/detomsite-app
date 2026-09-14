@@ -24,9 +24,9 @@ class OrderService:
                 if product:
                     subtotal += product.price * item["quantity"]
             
-            # Only the 5% platform service fee (no tax, no delivery)
+            # Flat ₹10-per-order admin commission (no tax, no delivery)
             delivery_fee = 0
-            platform_fee = subtotal * 0.05  # 5% platform fee
+            platform_fee = 10  # flat ₹10 per order
             tax = 0
             total_amount = subtotal + platform_fee
             

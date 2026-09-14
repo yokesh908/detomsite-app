@@ -236,3 +236,77 @@ async def notify_shop_new_order_async(order: dict[str, Any]) -> None:
         await asyncio.to_thread(send_order_push, order)
     except Exception:
         logger.exception("Unexpected error while sending order push notification")
+
+
+# ─── Admin push (Admin Centre / admin-dashboard) ───
+# The admin channel reuses the same push_subscriptions table with the sentinel
+# shop_id="admin" — no schema change, one bucket for every admin device.
+
+ADMIN_CHANNEL = "admin"
+
+
+def send_admin_push(title: str, body: str, data: dict[str, Any] | None = None) -> int:
+    """Deliver a web push to every subscribed admin-app device. Returns how
+    many pushes were sent. Never raises — failures are logged and dead
+    subscriptions are cleaned up exactly like the shop flow."""
+    keys = get_vapid_keys()
+    if not keys:
+        return 0
+    try:
+        subscriptions = db.list_push_subscriptions(ADMIN_CHANNEL)
+    except Exception as e:
+        logger.warning(f"Could not list admin push subscriptions: {e}")
+        return 0
+    if not subscriptions:
+        return 0
+
+    payload = json.dumps({
+        "title": title,
+        "body": body,
+        "tag": (data or {}).get("tag", "admin-alert"),
+        "url": (data or {}).get("url", "/admin-dashboard"),
+    })
+    return _deliver(ADMIN_CHANNEL, subscriptions, payload, keys)
+
+
+def send_admin_test_push() -> dict[str, Any]:
+    """Send a test push to the admin's subscribed devices and return a
+    human-readable result (used by the admin dashboard's test button)."""
+    keys = get_vapid_keys()
+    if not keys:
+        return {"ok": False, "detail": "Push is not configured on the server yet (VAPID keys missing)."}
+    try:
+        subscriptions = db.list_push_subscriptions(ADMIN_CHANNEL)
+    except Exception as e:
+        logger.warning(f"Could not list admin push subscriptions: {e}")
+        return {"ok": False, "detail": "Could not read subscriptions from the database."}
+    if not subscriptions:
+        return {
+            "ok": False,
+            "detail": "No admin device is subscribed yet — tap 'Enable Notifications' first, then try again.",
+        }
+
+    payload = json.dumps({
+        "title": "🔔 Test notification",
+        "body": "Your admin app notifications are working!",
+        "tag": "test-push",
+        "url": "/admin-dashboard",
+    })
+    sent, errors = _deliver_detailed(ADMIN_CHANNEL, subscriptions, payload, keys)
+    if sent:
+        return {"ok": True, "sent": sent, "detail": f"Sent to {sent} admin device(s). Check your phone!"}
+    return {"ok": False, "detail": "Push failed: " + ("; ".join(errors[:2]) if errors else "unknown error")}
+
+
+def notify_admin_async(title: str, body: str, data: dict[str, Any] | None = None) -> None:
+    """Fire an admin web push in a background thread (fire-and-forget). Never
+    raises — web pushes must never break order placement or the API."""
+    import threading
+
+    def _run() -> None:
+        try:
+            send_admin_push(title, body, data)
+        except Exception:
+            logger.exception("Unexpected error while sending admin push notification")
+
+    threading.Thread(target=_run, daemon=True).start()

@@ -28,7 +28,7 @@ create index if not exists idx_orders_created_at on public.orders (created_at);
 -- Products menu per shop.
 create index if not exists idx_products_shop_id on public.products (shop_id);
 
--- Share payments (vendor → admin 5%) are read by shop on dashboard load.
+-- Share payments (vendor → admin ₹10 per order) are read by shop on dashboard load.
 create index if not exists idx_share_payments_shop_id on public.share_payments (shop_id);
 create index if not exists idx_share_payments_status on public.share_payments (status);
 

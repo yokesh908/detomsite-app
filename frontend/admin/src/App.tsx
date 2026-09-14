@@ -2,6 +2,19 @@ import { useState, useEffect, FormEvent, useRef } from 'react'
 import { BrowserRouter as Router, Routes, Route, Link, useNavigate, useLocation } from 'react-router-dom'
 import api from './services/api'
 
+function apiError(e: any, fb = 'Request failed') {
+  const d = e?.response?.data?.detail
+  if (typeof d === 'string' && d.trim()) return d
+  if (Array.isArray(d)) {
+    const msgs = d.map((x: any) => (x?.msg || x?.message)).filter(Boolean)
+    if (msgs.length) return msgs.join(' - ')
+  }
+  const m = e?.response?.data?.message
+  if (typeof m === 'string' && m.trim()) return m
+  return (e?.message as string) || fb
+}
+
+
 /* ─── Dark / light mode ───
    The admin portal is dark by default; a `light` class on <html> flips the
    palette (the stylesheet overrides the dark utilities). Module-level singleton
@@ -136,6 +149,7 @@ function Layout({ children }: { children: React.ReactNode }) {
     { p: '/orders', l: 'Orders' },
     { p: '/payments', l: 'Payments' },
     { p: '/sms', l: 'SMS' },
+    { p: '/whatsapp', l: 'WhatsApp' },
     { p: '/revenue', l: 'Revenue' },
     { p: '/feedback', l: 'Feedback' },
     { p: '/reviews', l: 'Reviews' },
@@ -154,6 +168,7 @@ function Layout({ children }: { children: React.ReactNode }) {
               <Link key={item.p} to={item.p} className={`rounded-pill px-3 py-2 text-sm font-semibold transition-all ${path === item.p ? 'bg-gold text-black' : 'text-gray-400 hover:bg-gray-800 hover:text-white'}`}>{item.l}</Link>
             ))}
             <ThemeButton />
+            <a href={`${window.location.origin}/Detomsite-Admin.apk`} target="_blank" rel="noopener" title="Download the Android admin app" className="rounded-pill px-3 py-2 text-sm font-semibold text-white transition-all hover:opacity-90" style={{ background: 'linear-gradient(90deg,#16a34a,#0f766e)' }}>📲 Admin App</a>
             <div ref={notifRef} className="relative">
               <button onClick={() => setNotifOpen(!notifOpen)} className="rounded-pill px-2 py-2 text-sm text-gray-400 transition-all hover:bg-gray-800 hover:text-white">
                 <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M6 9a6 6 0 1 1 12 0c0 5 2 6 2 6H4s2-1 2-6Z" /><path d="M10 20a2.2 2.2 0 0 0 4 0" /></svg>
@@ -183,6 +198,7 @@ function Layout({ children }: { children: React.ReactNode }) {
           <div className="border-t border-gray-800 px-4 py-3 md:hidden">
             {nav.map(item => (<Link key={item.p} to={item.p} onClick={() => setMenu(false)} className={`block rounded-btn px-4 py-2.5 text-sm font-semibold ${path === item.p ? 'bg-gold text-black' : 'text-gray-400'}`}>{item.l}</Link>))}
             <ThemeButton />
+            <a href={`${window.location.origin}/Detomsite-Admin.apk`} target="_blank" rel="noopener" className="mt-2 block w-full rounded-btn bg-emerald-700 px-4 py-2.5 text-center text-sm font-semibold text-white">📲 Download Admin App (Android)</a>
             <button onClick={logout} className="block w-full rounded-btn px-4 py-2.5 text-left text-sm font-semibold text-red-400">Logout</button>
           </div>
         )}
@@ -205,7 +221,7 @@ function Login() {
       localStorage.setItem('admin_token', res.data.access_token)
       localStorage.setItem('admin_user', JSON.stringify(res.data.user))
       navigate('/dashboard')
-    } catch (err: any) { setErr(err?.response?.data?.detail || 'Invalid credentials') }
+    } catch (err: any) { setErr(apiError(err, 'Invalid credentials')) }
     finally { setLoading(false) }
   }
   return (
@@ -235,7 +251,7 @@ function Login() {
         <div className="relative">
           <span className="inline-flex items-center gap-2 rounded-pill border border-amber-400/25 bg-gold/10 px-4 py-1.5 text-xs font-bold uppercase tracking-widest text-gold backdrop-blur-sm"><svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 3 2 20h20L12 3Z" /><path d="M12 10v4M12 17.5v.5" /></svg> DETOMSITE</span>
           <h2 className="mt-8 max-w-md text-4xl font-black leading-tight">Your campus commerce,<br />under control.</h2>
-          <p className="mt-4 max-w-sm text-sm leading-relaxed text-gray-300">Approve shops, watch revenue grow, and track your monthly 5% share — all from one dashboard.</p>
+          <p className="mt-4 max-w-sm text-sm leading-relaxed text-gray-300">Approve shops, watch revenue grow, and track every shop's admin share (₹10 per order) — all from one dashboard.</p>
           <ul className="mt-8 space-y-4 text-sm text-gray-100">
             {[
               ['Approve & manage shops', 'One click to approve, suspend or remove'],
@@ -301,7 +317,7 @@ function ForgotPassword() {
       const res = await api.post('/users/forgot-password', { identifier })
       setInfo(res.data?.message || 'A 6-digit code was sent to your registered email.')
       setStep('otp')
-    } catch (err: any) { setErr(err?.response?.data?.detail || 'Request failed') }
+    } catch (err: any) { setErr(apiError(err, 'Request failed')) }
     finally { setLoading(false) }
   }
   const resetPw = async (e: FormEvent) => {
@@ -310,7 +326,7 @@ function ForgotPassword() {
     if (pw.length < 4) { setErr('Password must be at least 4 characters'); return }
     setLoading(true)
     try { await api.post('/users/reset-password', { identifier, otp, new_password: pw }); setDone(true) }
-    catch (err: any) { setErr(err?.response?.data?.detail || 'Reset failed') }
+    catch (err: any) { setErr(apiError(err, 'Reset failed')) }
     finally { setLoading(false) }
   }
 
@@ -398,7 +414,7 @@ function Dashboard() {
     { l: 'Total Orders', v: stats.total_orders || 0 },
     { l: "Today's Orders", v: stats.today_orders || 0 },
     { l: 'Revenue', v: `₹${(stats.total_revenue || 0).toLocaleString('en-IN')}` },
-    { l: "Admin's 5% Share", v: `₹${(stats.total_service_fee || 0).toLocaleString('en-IN')}` },
+    { l: "Admin's ₹10/order Share", v: `₹${(stats.total_service_fee || 0).toLocaleString('en-IN')}` },
     { l: 'Pending Payments', v: stats.pending_payments || 0 },
   ]
 
@@ -462,7 +478,7 @@ function UsersPage() {
       setMsg(`Deleted ${u.username} — the username and email can now be used again.`)
       setErr('')
       setUsers(users.filter((x: any) => x.id !== u.id))
-    } catch (e: any) { setErr(e?.response?.data?.detail || 'Could not delete user') }
+    } catch (e: any) { setErr(apiError(e, 'Could not delete user')) }
   }
 
   return (
@@ -846,11 +862,11 @@ function VendorsPage() {
                   <div className="mb-4 grid gap-3 sm:grid-cols-3">
                     <div className="rounded-sm bg-gray-800/50 p-3"><p className="text-xs text-gray-400">Total Revenue</p><p className="text-lg font-bold text-white">₹{(logs.summary?.total_revenue || 0).toLocaleString('en-IN')}</p></div>
                     <div className="rounded-sm bg-gray-800/50 p-3"><p className="text-xs text-gray-400">Total Orders</p><p className="text-lg font-bold text-white">{logs.summary?.total_orders || 0}</p></div>
-                    <div className="rounded-sm bg-amber-900/20 p-3"><p className="text-xs text-gold">Admin's 5% Share</p><p className="text-lg font-bold text-gold">₹{(logs.summary?.total_admin_fee || 0).toLocaleString('en-IN')}</p></div>
+                    <div className="rounded-sm bg-amber-900/20 p-3"><p className="text-xs text-gold">Admin's ₹10/order Share</p><p className="text-lg font-bold text-gold">₹{(logs.summary?.total_admin_fee || 0).toLocaleString('en-IN')}</p></div>
                   </div>
                   <div className="overflow-x-auto rounded-sm border border-gray-800">
                     <table className="w-full text-sm">
-                      <thead><tr className="border-b border-gray-800 text-left text-xs text-gray-400">{['Date', 'Orders', 'Earnings', "Admin's 5%", 'Vendor Keeps'].map(h => <th key={h} className="px-4 py-2.5 font-bold">{h}</th>)}</tr></thead>
+                      <thead><tr className="border-b border-gray-800 text-left text-xs text-gray-400">{['Date', 'Orders', 'Earnings', "Admin's ₹10/order", 'Vendor Keeps'].map(h => <th key={h} className="px-4 py-2.5 font-bold">{h}</th>)}</tr></thead>
                       <tbody>
                         {logs.daily?.map((d: any) => (
                           <tr key={d.created_at} className="border-b border-gray-800/50 text-gray-300">
@@ -970,7 +986,7 @@ function OrdersAdminPage() {
                           const r = await api.get(`/admin/orders/${o.id}/whatsapp-link`)
                           window.open(r.data.url, '_blank')
                         } catch (e: any) {
-                          alert(e?.response?.data?.detail || 'Could not build WhatsApp link for this shop')
+                          alert(apiError(e, 'Could not build WhatsApp link for this shop'))
                         }
                       }}
                       title="Send this order to the shop's WhatsApp from your number"
@@ -989,7 +1005,7 @@ function OrdersAdminPage() {
 }
 
 /* Payments — order payments are read-only (shops confirm UPI directly), but
-   vendor→admin 5% share payments are monitored LIVE here: who paid, who
+   vendor→admin ₹10-per-order share payments are monitored LIVE here: who paid, who
    hasn't, and a mark-received action once the money lands in the admin's UPI. */
 function PaymentsPage() {
   const [payments, setPayments] = useState<any[]>([])
@@ -1024,7 +1040,7 @@ function PaymentsPage() {
       await api.patch(`/admin/shares/${id}`, { status: 'Completed' })
       setMsg('Marked as received — the share is now counted as collected.')
       loadShares(true)
-    } catch (err: any) { setShareErr(err?.response?.data?.detail || 'Failed to update') }
+    } catch (err: any) { setShareErr(apiError(err, 'Failed to update')) }
   }
   const markRejected = async (id: string) => {
     try { await api.patch(`/admin/shares/${id}`, { status: 'Rejected' }); setMsg('Share payment rejected.'); loadShares(true) } catch {}
@@ -1046,7 +1062,7 @@ function PaymentsPage() {
     <div className="mx-auto max-w-7xl px-4 py-6">
       <div className="mb-6 flex items-center justify-between">
         <div><h1 className="text-2xl font-bold text-white">Payments & Vendor Shares</h1>
-        <p className="text-sm text-gray-400">Order payments (read-only) + the monthly 5% share each vendor pays you — updated live every 15s</p></div>
+        <p className="text-sm text-gray-400">Order payments (read-only) + the ₹10-per-order share each vendor pays you — updated live every 15s</p></div>
         <span className={`flex items-center gap-2 rounded-pill px-3 py-1.5 text-xs font-bold ${live ? 'bg-primary-dark/30 text-primary' : 'bg-gray-800 text-gray-400'}`}>
           <span className={`h-2 w-2 rounded-pill ${live ? 'bg-emerald-400 animate-pulse' : 'bg-gray-500'}`} /> LIVE
         </span>
@@ -1058,7 +1074,7 @@ function PaymentsPage() {
       {/* Live summary cards — this month's share cycle */}
       <div className="mb-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <div className="rounded-btn border border-amber-900/30 bg-amber-900/10 p-4">
-          <p className="text-xs font-semibold text-gold">Expected This Month (5% shares)</p>
+          <p className="text-xs font-semibold text-gold">Expected This Month (₹10/order shares)</p>
           <p className="mt-1 text-2xl font-bold text-white">₹{((summary.expected_month || 0)).toLocaleString('en-IN')}</p>
           <p className="mt-1 text-xs text-gold-dark">{shares?.month_label || ''} — resets on the 1st of each month</p>
         </div>
@@ -1083,10 +1099,10 @@ function PaymentsPage() {
         <>
           {/* Per-vendor live status */}
           <div className="mb-8 rounded-btn border border-gray-800 bg-gray-900/50 overflow-hidden">
-            <h2 className="border-b border-gray-800 px-5 py-4 text-lg font-bold text-white">Vendor Share Status <span className="text-xs font-semibold text-gray-500">(5% of {shares?.month_label || 'this month'}'s earnings)</span></h2>
+            <h2 className="border-b border-gray-800 px-5 py-4 text-lg font-bold text-white">Vendor Share Status <span className="text-xs font-semibold text-gray-500">(₹10 per order)</span></h2>
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
-                <thead><tr className="border-b border-gray-800 text-left text-xs text-gray-400">{['Vendor', 'Month Orders', 'Month Revenue', 'Month 5% Share', 'Status', 'Last Paid'].map(h => <th key={h} className="px-5 py-3 font-bold">{h}</th>)}</tr></thead>
+                <thead><tr className="border-b border-gray-800 text-left text-xs text-gray-400">{['Vendor', 'Month Orders', 'Month Revenue', 'Month ₹10/order Share', 'Status', 'Last Paid'].map(h => <th key={h} className="px-5 py-3 font-bold">{h}</th>)}</tr></thead>
                 <tbody>
                   {vendorList.map((v: any) => (
                     <tr key={v.shop_id} className="border-b border-gray-800/50 text-gray-300">
@@ -1190,7 +1206,7 @@ function RevenuePage() {
         created_at: date,
         count: list.length,
         revenue,
-        service_fee: Math.round(revenue * 0.05),
+        service_fee: list.length * 10,
       }])
     }).catch(() => setDaily([])).finally(() => setLoading(false))
   }
@@ -1209,14 +1225,14 @@ function RevenuePage() {
           <p className="text-3xl font-bold text-white">₹{total.toLocaleString('en-IN')}</p>
         </div>
         <div className="rounded-btn border border-amber-900/30 bg-amber-900/10 p-5">
-          <p className="text-sm text-gold">Admin's 5% Share</p>
+          <p className="text-sm text-gold">Admin's ₹10/order Share</p>
           <p className="text-3xl font-bold text-gold">₹{totalFee.toLocaleString('en-IN')}</p>
-          <p className="mt-1 text-xs text-gold-dark">5% platform fee collected on every order</p>
+          <p className="mt-1 text-xs text-gold-dark">₹10-per-order platform fee collected on every order</p>
         </div>
         <div className="rounded-btn border border-primary/15 bg-primary-dark/10 p-5">
           <p className="text-sm text-primary">Vendor Share</p>
           <p className="text-3xl font-bold text-primary">₹{Math.max(0, total - totalFee).toLocaleString('en-IN')}</p>
-          <p className="mt-1 text-xs text-primary">Total minus the 5% platform fee</p>
+          <p className="mt-1 text-xs text-primary">Total minus the ₹10-per-order platform fee</p>
         </div>
       </div>
 
@@ -1230,7 +1246,7 @@ function RevenuePage() {
         <h2 className="px-5 py-4 text-lg font-bold text-white border-b border-gray-800">{filter ? `Orders on ${filter}` : 'Orders by Date'}</h2>
         {loading ? <p className="p-8 text-center text-gray-500">Loading...</p> : (
           <table className="w-full text-sm">
-            <thead><tr className="border-b border-gray-800 text-left text-xs text-gray-400">{['Date', 'Orders', 'Revenue', "Admin's 5%", 'Vendor Share'].map(h => <th key={h} className="px-5 py-3 font-bold">{h}</th>)}</tr></thead>
+            <thead><tr className="border-b border-gray-800 text-left text-xs text-gray-400">{['Date', 'Orders', 'Revenue', "Admin's ₹10/order", 'Vendor Share'].map(h => <th key={h} className="px-5 py-3 font-bold">{h}</th>)}</tr></thead>
             <tbody>
               {daily.map((d: any) => (
                 <tr key={d.created_at} className="border-b border-gray-800/50 text-gray-300">
@@ -1251,7 +1267,7 @@ function RevenuePage() {
 }
 
 /* Settings — the admin only needs their UPI ID. Vendors' "Pay" button opens a
-   UPI app directed to this account to settle their 5% monthly share. */
+   UPI app directed to this account to settle their ₹10-per-order monthly share. */
 function SettingsPage() {
   const [upiId, setUpiId] = useState('')
   const [msg, setMsg] = useState(''); const [err, setErr] = useState(''); const [loading, setLoading] = useState(true); const [saving, setSaving] = useState(false)
@@ -1264,9 +1280,9 @@ function SettingsPage() {
     try {
       // Saving a UPI ID also enables UPI payments automatically
       await api.patch('/local/payment-settings', { upi_id: value, manual_enabled: true })
-      setMsg('UPI ID saved & enabled — vendors will now be directed to this account when they pay their 5% share.')
+      setMsg('UPI ID saved & enabled — vendors will now be directed to this account when they pay their ₹10-per-order share.')
     }
-    catch (err: any) { setErr(err?.response?.data?.detail || 'Failed to save') }
+    catch (err: any) { setErr(apiError(err, 'Failed to save')) }
     finally { setSaving(false) }
   }
   return (
@@ -1279,8 +1295,8 @@ function SettingsPage() {
             {msg && <div className="rounded-btn bg-primary-dark/30 border border-primary/20 px-4 py-3 text-sm text-primary">{msg}</div>}
             {err && <div className="rounded-btn bg-red-900/30 border border-red-900/50 px-4 py-3 text-sm text-red-400">{err}</div>}
             <div className="rounded-btn bg-amber-900/10 border border-amber-900/30 p-4">
-              <p className="flex items-center gap-2 text-sm font-bold text-gold"><svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="5" width="20" height="14" rx="2" /><path d="M2 10h20" /></svg>Your UPI ID (receive the 5% share)</p>
-              <p className="mt-1 text-xs text-gold-dark">When a vendor taps <b>Pay</b> on their dashboard, they'll be directed to this UPI account to pay their 5% monthly share. Saving this also enables UPI payments for students.</p>
+              <p className="flex items-center gap-2 text-sm font-bold text-gold"><svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="5" width="20" height="14" rx="2" /><path d="M2 10h20" /></svg>Your UPI ID (receive the ₹10/order share)</p>
+              <p className="mt-1 text-xs text-gold-dark">When a vendor taps <b>Pay</b> on their dashboard, they'll be directed to this UPI account to pay their ₹10-per-order monthly share. Saving this also enables UPI payments for students.</p>
             </div>
             <div>
               <label className="mb-1 block text-xs font-bold text-gray-400">UPI ID (e.g. yourname@upi)</label>
@@ -1288,7 +1304,7 @@ function SettingsPage() {
             </div>
             <button type="submit" disabled={saving} className="w-full rounded-btn bg-gold px-5 py-3 text-sm font-bold text-black hover:bg-gold disabled:opacity-40">{saving ? 'Saving...' : 'Save & Enable'}</button>
           </form>
-          <p className="mt-4 rounded-btn border border-gray-800 bg-gray-900/50 px-4 py-3 text-xs leading-relaxed text-gray-400">Students pay the shop by <b>scanning a UPI QR</b> (or Cash on Delivery) — the shop confirms each payment in the vendor app. Your UPI ID here is only the account vendors use to pay their <b>monthly 5% share</b>.</p>
+          <p className="mt-4 rounded-btn border border-gray-800 bg-gray-900/50 px-4 py-3 text-xs leading-relaxed text-gray-400">Students pay the shop by <b>scanning a UPI QR</b> (or Cash on Delivery) — the shop confirms each payment in the vendor app. Your UPI ID here is only the account vendors use to pay their <b>₹10-per-order share</b>.</p>
           </>
         )}
       </div>
@@ -1322,7 +1338,7 @@ function FeedbackPage() {
       ])
       setItems(userRes.data || [])
       setAtsCount(atsRes.data?.length || 0)
-    } catch (e: any) { setErr(e?.response?.data?.detail || 'Could not load feedback — is the backend running?') }
+    } catch (e: any) { setErr(apiError(e, 'Could not load feedback — is the backend running?')) }
     finally { setLoading(false) }
   }
   useEffect(() => { load() }, [])
@@ -1334,7 +1350,7 @@ function FeedbackPage() {
       setMsg('Automated test data cleared — only real student feedback remains.')
       setErr('')
       setAtsCount(0)
-    } catch (e: any) { setErr(e?.response?.data?.detail || 'Could not clear test data') }
+    } catch (e: any) { setErr(apiError(e, 'Could not clear test data')) }
   }
 
   const setStatus = async (id: string, status: string) => {
@@ -1343,7 +1359,7 @@ function FeedbackPage() {
       setMsg(status === 'Fixed' ? 'Marked as fixed — thanks for the report!' : `Status updated → ${status}`)
       setErr('')
       load()
-    } catch (e: any) { setErr(e?.response?.data?.detail || 'Failed to update status') }
+    } catch (e: any) { setErr(apiError(e, 'Failed to update status')) }
   }
 
   const counts = FEEDBACK_STATUSES.reduce<Record<string, number>>((acc, s) => { acc[s] = items.filter(i => i.status === s).length; return acc }, {})
@@ -1494,6 +1510,150 @@ function ReviewsPage() {
   )
 }
 
+/* WhatsApp Center — every order generates a free wa.me deep-link (from the
+   admin's number to the shopkeeper). Pending ones sit here for one-tap send,
+   with a bulk "Send All" option. Live mode auto-refreshes every 8s and, when
+   a NEW payment-verified notification arrives, auto-opens WhatsApp so the
+   admin only presses the WhatsApp send button. */
+
+const WA_SENT_KEY = 'detomsite-wa-auto'  // if "1", run live auto-send
+let autoEnabled = false
+try { autoEnabled = localStorage.getItem(WA_SENT_KEY) !== '0' } catch { /* ignore */ }
+
+function WhatsAppCenter() {
+  const [pending, setPending] = useState<any[]>([])
+  const [loading, setLoading] = useState(true)
+  const [busy, setBusy] = useState<string[]>([])
+  const [msg, setMsg] = useState('')
+  const [sendingAll, setSendingAll] = useState(false)
+  const [auto, setAuto] = useState(autoEnabled)
+  const seenRef = useRef<Set<string>>(new Set())
+
+  const load = async (silent = false, autoOpen = false) => {
+    if (!silent) setLoading(true)
+    try {
+      const r = await api.get('/admin/whatsapp-pending')
+      const list = (r.data || []).filter((x: any) => x && x.url && x.phone)
+      setPending(list)
+      if (autoOpen) {
+        for (const item of list) {
+          if (!seenRef.current.has(item.id)) {
+            seenRef.current.add(item.id)
+            try { window.open(item.url, '_blank') } catch { /* popup blocked */ }
+            try { await api.post(`/admin/whatsapp/${item.id}/mark-sent`).catch(() => {}) } catch { /* ignore */ }
+          }
+        }
+        setPending(p => p.filter(x => seenRef.current.has(x.id)))
+      } else {
+        list.forEach((x: any) => seenRef.current.add(x.id))
+      }
+    } catch { if (!silent) setMsg('Could not load WhatsApp notifications') }
+    finally { if (!silent) setLoading(false) }
+  }
+
+  useEffect(() => {
+    load(false, auto)
+    const t = setInterval(() => { if (document.visibilityState === 'visible') load(true, auto) }, 8000)
+    return () => clearInterval(t)
+  }, [auto])
+
+  const send = async (item: any) => {
+    setMsg('')
+    setBusy(b => [...b, item.id])
+    try {
+      window.open(item.url, '_blank')
+      await api.post(`/admin/whatsapp/${item.id}/mark-sent`)
+      seenRef.current.add(item.id)
+      setPending(p => p.filter(x => x.id !== item.id))
+    } catch { setMsg('Could not mark WhatsApp as sent') }
+    finally { setBusy(b => b.filter(x => x.id !== item.id)) }
+  }
+
+  const sendAll = async () => {
+    setMsg('')
+    setSendingAll(true)
+    const list = [...pending]
+    for (const item of list) {
+      try {
+        window.open(item.url, '_blank')
+        await api.post(`/admin/whatsapp/${item.id}/mark-sent`)
+        seenRef.current.add(item.id)
+        setPending(p => p.filter(x => x.id !== item.id))
+      } catch { /* keep going */ }
+    }
+    setSendingAll(false)
+    if (list.length) setMsg(`Opened WhatsApp for all ${list.length} pending orders — tap send on each.`)
+  }
+
+  const toggleAuto = () => {
+    const next = !auto
+    setAuto(next)
+    try { localStorage.setItem(WA_SENT_KEY, next ? '1' : '0') } catch { /* ignore */ }
+    setMsg(next ? 'Auto-send ON — new payment-verified orders open WhatsApp automatically.' : 'Auto-send OFF — new orders will only list here.')
+  }
+
+  return (
+    <div className="mx-auto max-w-5xl px-4 py-6">
+      <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-bold text-white">WhatsApp Center</h1>
+          <p className="text-sm text-gray-400">Orders whose <b className="text-gold">SMS payment is verified</b> auto-generate a WhatsApp message to the shopkeeper — sent <b className="text-gold">from your number</b>. Refreshes live every 8s.</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <button onClick={toggleAuto}
+            className={`rounded-pill px-3 py-2.5 text-sm font-bold transition-all ${auto ? 'bg-emerald-600 text-white' : 'bg-gray-800 text-gray-300 hover:bg-gray-700'}`}
+            title="When ON, a new payment-verified order opens WhatsApp on this device automatically">
+            ⚡ Auto-send: {auto ? 'ON' : 'OFF'}
+          </button>
+          {pending.length > 0 && (
+            <button onClick={sendAll} disabled={sendingAll}
+              className="rounded-btn bg-emerald-900/60 px-4 py-2.5 text-sm font-bold text-emerald-300 transition-all hover:bg-emerald-800/70 disabled:opacity-40">
+              {sendingAll ? 'Opening…' : `Send All (${pending.length}) 🔗`}
+            </button>
+          )}
+        </div>
+      </div>
+
+      {msg && <div className="mb-4 rounded-btn border border-emerald-900/60 bg-emerald-900/20 px-4 py-3 text-sm font-semibold text-emerald-300">{msg}</div>}
+
+      {loading ? <p className="text-gray-500">Loading...</p> : pending.length === 0 ? (
+        <div className="rounded-btn border border-gray-800 bg-gray-900 p-10 text-center">
+          <p className="text-4xl">💬</p>
+          <p className="mt-3 text-gray-400">No pending WhatsApp notifications.</p>
+          <p className="mt-1 text-sm text-gray-600">When a student's payment is verified, its message appears here ready to send to the shop.</p>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {pending.map((item: any) => (
+            <div key={item.id} className="rounded-btn border border-gray-800 bg-gray-900 p-4">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-lg font-black text-white">#{item.order_token}</span>
+                    <span className="rounded-pill bg-emerald-900/50 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-emerald-300">{item.shop_name || 'Shop'}</span>
+                    <span className="rounded-pill bg-emerald-900/40 px-2 py-0.5 text-[10px] font-bold uppercase text-emerald-300">✓ Payment verified</span>
+                  </div>
+                  <p className="mt-1.5 text-sm font-semibold text-gray-300">{item.student_name} · <span className="text-gray-500">₹{item.total}</span></p>
+                  <p className="mt-0.5 text-xs text-gray-500">→ {item.phone}</p>
+                  <p className="mt-2 whitespace-pre-line rounded-btn bg-gray-950/60 px-3 py-2 text-[11px] leading-relaxed text-gray-400">{String(item.message || '').slice(0, 220)}{(item.message || '').length > 220 ? '…' : ''}</p>
+                </div>
+                <div className="flex shrink-0 flex-col gap-2">
+                  <button onClick={() => send(item)} disabled={busy.includes(item.id)}
+                    className="rounded-btn bg-emerald-600 px-4 py-2.5 text-sm font-bold text-white transition-all hover:bg-emerald-500 disabled:opacity-40">
+                    {busy.includes(item.id) ? 'Sending…' : 'Send on WhatsApp'}
+                  </button>
+                  <a href={item.url} target="_blank" rel="noreferrer" className="text-center text-xs font-semibold text-gray-500 hover:text-emerald-400">Open link only</a>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+
 /* SMS Logs — every order SMS (out) and confirm/reject reply (in) the system
    sent or received, so the admin can watch the phone-notification pipeline. */
 function SmsLogsPage() {
@@ -1546,6 +1706,7 @@ export default function App() {
                 <Route path="/orders" element={<OrdersAdminPage />} />
                 <Route path="/payments" element={<PaymentsPage />} />
                 <Route path="/sms" element={<SmsLogsPage />} />
+                <Route path="/whatsapp" element={<WhatsAppCenter />} />
                 <Route path="/revenue" element={<RevenuePage />} />
                 <Route path="/feedback" element={<FeedbackPage />} />
                 <Route path="/reviews" element={<ReviewsPage />} />

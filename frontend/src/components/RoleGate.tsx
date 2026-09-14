@@ -1,82 +1,54 @@
 import { FormEvent, ReactNode, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { saveSessionToBackend } from '../services/localApi'
-import { getDashboardPath, getLocalSession, saveLocalSession, UserRoleChoice } from '../utils/session'
+import api from '../services/api'
+import { getLocalSession, saveLocalSession } from '../utils/session'
 import { PhoneInput, isValidMobile } from './PhoneInput'
 
 interface RoleGateProps { children: ReactNode }
 
-const ROLE_ROUTES: Record<string, UserRoleChoice> = {
-  '/shops': 'student', '/shop': 'student', '/cart': 'student', '/payment': 'student',
-  '/order-result': 'student', '/customer-dashboard': 'student', '/feedback': 'student',
-  '/support': 'student', '/home': 'student',
-  '/shopkeeper-dashboard': 'shopkeeper',
-  '/admin-dashboard': 'admin',
-}
-
-const roles = [
-  { id: 'student' as UserRoleChoice, label: 'Student', icon: '🎓', desc: 'Order food from campus shops — login with your phone number', color: 'from-emerald-500 to-emerald-700' },
-  { id: 'shopkeeper' as UserRoleChoice, label: 'Shopkeeper', icon: '👨‍🍳', desc: 'Manage your shop and orders', color: 'from-gold-500 to-gold-700' },
-  { id: 'admin' as UserRoleChoice, label: 'Admin', icon: '⚙️', desc: 'Oversee campus operations', color: 'from-emerald-600 to-emerald-900' },
-]
+/* Students enter the student portal only — there is no role switcher here.
+   Phone-first onboarding creates a real student account (via /local/auth/phone)
+   and stores its JWT, so the protected order/payment APIs work exactly like a
+   password-login. */
 
 export function RoleGate({ children }: RoleGateProps) {
   const navigate = useNavigate()
   const [hasSession, setHasSession] = useState(false)
-  const [role, setRole] = useState<UserRoleChoice>('student')
   const [name, setName] = useState('')
-  const [email, setEmail] = useState('')
   const [phone, setPhone] = useState('')
-  const [accessDenied, setAccessDenied] = useState(false)
+  const [error, setError] = useState('')
+  const [loading, setLoading] = useState(false)
 
   useEffect(() => {
-    const session = getLocalSession()
-    if (session) {
-      // Check role-based access: if user is on a dashboard that doesn't match their role, redirect
-      const path = window.location.pathname
-      const requiredRole = Object.entries(ROLE_ROUTES).find(([prefix]) => path.startsWith(prefix))?.[1]
-      if (requiredRole && session.role !== requiredRole) {
-        setAccessDenied(true)
-        return
-      }
-      setHasSession(true)
-    }
+    if (getLocalSession()) setHasSession(true)
   }, [])
 
-  const handleStart = (event: FormEvent) => {
+  const handleStart = async (event: FormEvent) => {
     event.preventDefault()
-    if (!name.trim()) return
-    // Students enter by phone number (OTP-ready); shopkeepers/admins use email.
-    const identity = role === 'student' ? phone : email.trim()
-    if (!identity) return
-    const session: Parameters<typeof saveLocalSession>[0] = {
-      role,
-      email: role === 'student' ? phone : identity,
-      name: name.trim(),
-      phone: role === 'student' ? phone : undefined,
+    if (!name.trim() || !isValidMobile(phone)) return
+    setError('')
+    setLoading(true)
+    try {
+      const res = await api.post('/local/auth/phone', {
+        name: name.trim(),
+        phone: phone.trim(),
+      })
+      const { access_token, refresh_token, user } = res.data || {}
+      if (access_token) localStorage.setItem('access_token', access_token)
+      if (refresh_token) localStorage.setItem('refresh_token', refresh_token)
+      saveLocalSession({
+        role: 'student',
+        email: `${user?.username || 'student'}@student.local`,
+        name: (user?.name || name.trim()),
+        phone: phone.trim(),
+      })
+      setHasSession(true)
+      navigate('/shops')
+    } catch (err: any) {
+      setError(err?.response?.data?.detail || 'Could not sign you in. Please try again.')
+    } finally {
+      setLoading(false)
     }
-    saveLocalSession(session)
-    void saveSessionToBackend({ role, email: identity, name: name.trim() })
-    setHasSession(true)
-    navigate(getDashboardPath(role))
-  }
-
-  if (accessDenied) {
-    const session = getLocalSession()
-    const correctPath = session ? getDashboardPath(session.role) : '/'
-    return (
-      <div className="min-h-screen bg-gradient-to-br from-white to-red-50 flex items-center justify-center px-6">
-        <div className="max-w-md text-center">
-          <div className="text-6xl mb-4">🚫</div>
-          <h1 className="text-2xl font-bold text-red-600">Access Denied</h1>
-          <p className="mt-2 text-gray-500">You don't have permission to access this page as a <strong>{session?.role}</strong>.</p>
-          <button onClick={() => { setAccessDenied(false); navigate(correctPath) }}
-            className="mt-4 rounded-btn bg-primary px-5 py-2.5 text-sm font-bold text-white shadow-gold-sm hover:bg-primary-dark">
-            Go to your dashboard
-          </button>
-        </div>
-      </div>
-    )
   }
 
   if (hasSession) return <>{children}</>
@@ -93,21 +65,10 @@ export function RoleGate({ children }: RoleGateProps) {
         </div>
 
         <div className="rounded-card bg-white p-8 shadow-gold-lg">
-          <h2 className="mb-6 text-xl font-bold text-primary">Welcome, who are you?</h2>
+          <h2 className="mb-2 text-xl font-bold text-primary">Student Portal</h2>
+          <p className="mb-6 text-sm font-medium text-gray-500">Browse shops, order, and track deliveries — login with your phone number</p>
 
           <form onSubmit={handleStart} className="space-y-5">
-            <div className="grid grid-cols-3 gap-3">
-              {roles.map(option => (
-                <button key={option.id} type="button" onClick={() => setRole(option.id)}
-                  className={`group rounded-btn border-2 p-4 text-center transition-all ${
-                    role === option.id ? 'border-emerald-500 bg-primary-light/30 shadow-emerald-sm' : 'border-gray-100 bg-white hover:border-primary-light/50'
-                  }`}>
-                  <span className="block text-2xl">{option.icon}</span>
-                  <span className={`mt-1 block text-sm font-bold ${role === option.id ? 'text-primary' : 'text-gray-600'}`}>{option.label}</span>
-                </button>
-              ))}
-            </div>
-
             <div>
               <label className="mb-1.5 block text-sm font-semibold text-gray-700">Your Name</label>
               <input value={name} onChange={e => setName(e.target.value)}
@@ -115,29 +76,17 @@ export function RoleGate({ children }: RoleGateProps) {
                 placeholder="Enter your name" required />
             </div>
 
-            {role === 'student' ? (
-              <div>
-                <label className="mb-1.5 block text-sm font-semibold text-gray-700">Phone Number</label>
-                <PhoneInput value={phone} onChange={setPhone} />
-                <p className="mt-1 text-xs font-medium text-gray-400">Shop deliveries will use this number to reach you.</p>
-              </div>
-            ) : (
-              <div>
-                <label className="mb-1.5 block text-sm font-semibold text-gray-700">Email Address</label>
-                <input type="email" value={email} onChange={e => setEmail(e.target.value)}
-                  className="w-full rounded-btn border-2 border-gray-200 bg-white px-4 py-3 text-gray-900 placeholder-gray-400 outline-none transition-all focus:border-primary focus:shadow-emerald-sm"
-                  placeholder={role === 'shopkeeper' ? 'shop@campus.com' : 'admin@campus.com'} required />
-              </div>
-            )}
-
-            <div className="rounded-btn bg-primary-light/30 px-4 py-3 text-sm font-medium text-primary">
-              {roles.find(r => r.id === role)?.desc}
+            <div>
+              <label className="mb-1.5 block text-sm font-semibold text-gray-700">Phone Number</label>
+              <PhoneInput value={phone} onChange={setPhone} />
+              <p className="mt-1 text-xs font-medium text-gray-400">Shop deliveries will use this number to reach you.</p>
             </div>
 
-            <button type="submit"
-              disabled={!name.trim() || (role === 'student' ? !isValidMobile(phone) : !email.trim())}
+            {error && <p className="rounded-btn bg-red-50 border border-red-200 px-4 py-2.5 text-sm font-medium text-red-600">{error}</p>}
+
+            <button type="submit" disabled={!name.trim() || !isValidMobile(phone) || loading}
               className="w-full rounded-btn bg-primary px-6 py-3.5 text-base font-bold text-white shadow-gold transition-all hover:bg-primary-dark hover:shadow-gold-lg disabled:opacity-40 disabled:cursor-not-allowed">
-              Continue →
+              {loading ? 'Signing in…' : 'Continue →'}
             </button>
           </form>
         </div>

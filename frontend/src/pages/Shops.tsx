@@ -1,8 +1,10 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, useCallback } from 'react'
 import { Link } from 'react-router-dom'
 import api from '../services/api'
 import { canOrderFromShop, LocalProduct, LocalShop, shopStatusText } from '../types/localApi'
 import { addProductToCart } from '../utils/cart'
+import { usePolling } from '../hooks/usePolling'
+import { same } from '../utils/same'
 
 const gradients = ['from-emerald-500 to-emerald-700', 'from-amber-400 to-orange-500', 'from-emerald-600 to-emerald-800', 'from-teal-400 to-emerald-600']
 
@@ -16,15 +18,23 @@ export function Shops() {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    const load = () => Promise.all([
-      api.get<LocalShop[]>('/local/shops', { params: { public_only: true } }),
-      api.get<LocalProduct[]>('/local/products'),
-    ]).then(([s, p]) => { setShops(s.data); setProducts(p.data) }).finally(() => setLoading(false))
-    load()
-    // Refresh every 8s so vendor Open/Closed toggles show up quickly
-    const t = window.setInterval(load, 8000)
-    return () => window.clearInterval(t)
+    // Products/menu change rarely; fetch once and only re-poll the shop list
+    // (Open/Closed toggles).
+    api.get<LocalProduct[]>('/local/products')
+      .then(res => setProducts(cur => same(cur, res.data || []) ? cur : (res.data || [])))
+      .catch(() => setProducts([]))
   }, [])
+
+  const loadShops = useCallback(() => {
+    api.get<LocalShop[]>('/local/shops', { params: { public_only: true } })
+      .then(res => setShops(cur => same(cur, res.data || []) ? cur : (res.data || [])))
+      .catch(() => { /* keep the last known list on transient failures */ })
+      .finally(() => setLoading(false))
+  }, [])
+
+  // Re-poll every 8s while visible; background tabs stop hammering the API and
+  // refresh instantly when you switch back.
+  usePolling(loadShops, 8000, [loadShops])
 
   const query = search.trim().toLowerCase()
 
@@ -78,7 +88,7 @@ export function Shops() {
           <input value={search} onChange={e => { setSearch(e.target.value); setPage(1) }}
             placeholder="Search restaurants or dishes..."
             className="min-w-[240px] flex-1 rounded-card border border-primary-light/30 bg-white/90 px-4 py-2.5 text-sm text-slate-700 placeholder-slate-400 outline-none transition-all focus:border-primary focus:shadow-[0_0_0_3px_rgba(15,118,110,0.12)]" />
-          <select value={sort} onChange={e => setSort(e.target.value)}
+          <select value={sort} onChange={e => { setSort(e.target.value); setPage(1) }}
             className="rounded-card border border-primary-light/30 bg-white/90 px-4 py-2.5 text-sm font-medium text-slate-700 outline-none transition-all focus:border-primary focus:shadow-[0_0_0_3px_rgba(15,118,110,0.12)]">
             <option value="rating">Rating</option>
             <option value="status">Open First</option>

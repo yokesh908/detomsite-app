@@ -1,80 +1,80 @@
-"""
-Service worker for offline support and caching
-"""
-const CACHE_NAME = 'detomsite-v2';
-const urlsToCache = [
-  '/',
-  '/index.html',
-  '/assets/main.css',
-  '/assets/main.js',
-];
+const CACHE_NAME = 'detomsite-v3';
+const PRECACHE = ['/', '/index.html'];
 
 self.addEventListener('install', event => {
-  // Activate immediately so a newly deployed bundle replaces the old one
-  // instead of lingering until every tab is closed.
   self.skipWaiting();
   event.waitUntil(
-    caches.open(CACHE_NAME).then(cache => {
-      return cache.addAll(urlsToCache);
-    })
-  );
-});
-
-self.addEventListener('fetch', event => {
-  event.respondWith(
-    caches.match(event.request).then(response => {
-      if (response) {
-        return response;
-      }
-
-      return fetch(event.request).then(response => {
-        // Cache successful responses
-        if (!response || response.status !== 200 || response.type === 'error') {
-          return response;
-        }
-
-        const responseToCache = response.clone();
-        caches.open(CACHE_NAME).then(cache => {
-          cache.put(event.request, responseToCache);
-        });
-
-        return response;
-      }).catch(() => {
-        // Return offline page if available
-        return caches.match('/offline.html');
-      });
-    })
+    caches.open(CACHE_NAME).then(cache => cache.addAll(PRECACHE))
   );
 });
 
 self.addEventListener('activate', event => {
   event.waitUntil(
     Promise.all([
-      // Take control of already-open tabs right away.
       self.clients.claim(),
-      // Drop every old cache (e.g. detomsite-v1) so users get the new bundle.
-      caches.keys().then(cacheNames => {
-        return Promise.all(
-          cacheNames.map(cacheName => {
-            if (cacheName !== CACHE_NAME) {
-              return caches.delete(cacheName);
-            }
-          })
-        );
-      }),
+      caches.keys().then(keys =>
+        Promise.all(keys.filter(k => k !== CACHE_NAME).map(k => caches.delete(k)))
+      ),
     ])
   );
 });
 
-// Handle push notifications
-self.addEventListener('push', event => {
-  const options = {
-    body: event.data.text(),
-    icon: '/icon-192.png',
-    badge: '/badge.png',
-  };
+self.addEventListener('fetch', event => {
+  const { request } = event;
+  if (request.method !== 'GET') return;
 
-  event.waitUntil(
-    self.registration.showNotification('DETOMSITE', options)
+  // Network-first for API calls
+  if (request.url.includes('/api/')) {
+    event.respondWith(
+      fetch(request).catch(() => caches.match(request))
+    );
+    return;
+  }
+
+  // Cache-first for hashed Vite assets (immutable)
+  if (request.url.includes('/assets/')) {
+    event.respondWith(
+      caches.match(request).then(cached => {
+        if (cached) return cached;
+        return fetch(request).then(response => {
+          if (response.ok) {
+            const clone = response.clone();
+            caches.open(CACHE_NAME).then(c => c.put(request, clone));
+          }
+          return response;
+        });
+      })
+    );
+    return;
+  }
+
+  // Stale-while-revalidate for HTML/navigation
+  event.respondWith(
+    caches.match(request).then(cached => {
+      const fetched = fetch(request).then(response => {
+        if (response.ok) {
+          const clone = response.clone();
+          caches.open(CACHE_NAME).then(c => c.put(request, clone));
+        }
+        return response;
+      }).catch(() => cached || new Response('Offline', { status: 503 }));
+      return cached || fetched;
+    })
   );
+});
+
+self.addEventListener('push', event => {
+  const data = event.data ? event.data.json() : {};
+  event.waitUntil(
+    self.registration.showNotification(data.title || 'DETOMSITE', {
+      body: data.body || '',
+      icon: '/icon-192.png',
+      badge: '/icon-192.png',
+    })
+  );
+});
+
+self.addEventListener('notificationclick', event => {
+  event.notification.close();
+  event.waitUntil(clients.openWindow('/'));
 });

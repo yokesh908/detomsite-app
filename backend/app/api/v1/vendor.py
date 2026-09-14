@@ -1,7 +1,7 @@
 """
 Vendor Portal API — Shopkeeper registration, shop management, orders
 """
-from fastapi import APIRouter, HTTPException, Depends, Header, Query
+from fastapi import APIRouter, HTTPException, Depends, Header, Query, Request
 from pydantic import BaseModel, Field, EmailStr
 from typing import Optional, Any
 from datetime import datetime, timedelta, timezone
@@ -9,8 +9,10 @@ import logging
 import traceback
 
 from app.core.config import settings
+from app.core.rate_limit import allow as rate_allow, reset as rate_reset, client_ip as rate_ip
 from app.core.store import store as db
 from app.core.security import hash_password, verify_password, create_access_token, create_refresh_token, decode_token
+from app.services import push_service
 from app.services import push_service
 
 logger = logging.getLogger(__name__)
@@ -60,6 +62,7 @@ class ShopStatusUpdate(BaseModel):
     upi_id: str | None = None
     upi_enabled: bool | None = None
     cod_enabled: bool | None = None
+    category: str | None = None
 
 
 class AdminDuesPayment(BaseModel):
@@ -102,11 +105,50 @@ def _my_shop(current_vendor: dict) -> dict:
     return shop
 
 
+def _sub_order_shape(sub: dict) -> dict:
+    """Render a multi-shop sub-order as an order-shaped dict so the vendor
+    dashboard/flows treat single and multi orders the same way."""
+    items = sub.get("items") or []
+    parent = sub.get("parent") or {}
+    return {
+        "id": sub.get("id", ""),
+        "token": sub.get("token"),
+        "student_name": parent.get("student_name", ""),
+        "student_phone": parent.get("student_phone", ""),
+        "shop_id": sub.get("shop_id", ""),
+        "shop_name": sub.get("shop_name", ""),
+        "items": ", ".join(f"{int(i['quantity'])}x {i['product_name']}" for i in items),
+        "total": int(sub.get("subtotal", 0)),
+        "delivery_location": parent.get("delivery_location", ""),
+        "delivery_slot": sub.get("batch_type") or parent.get("delivery_slot", ""),
+        "status": sub.get("status", "Pending"),
+        "payment_method": parent.get("payment_method", ""),
+        "created_at": sub.get("created_at", ""),
+        "parent_order_id": sub.get("parent_order_id", ""),
+        "is_sub_order": True,
+    }
+
+
+def _shop_orders_merged(shop_id: str, limit: int | None = None) -> list[dict]:
+    """Single orders + multi-shop sub-orders for ONE shop, newest first.
+    Multi orders live in ``shop_sub_orders`` (not ``orders``) — without this
+    merge the vendor never saw them, so multi-basket orders were invisible."""
+    single = db.list_orders_by_shop(shop_id)
+    subs = db.get_shop_sub_orders(shop_id)
+    merged = list(single) + [_sub_order_shape(s) for s in subs]
+    merged.sort(key=lambda o: str(o.get("created_at") or ""), reverse=True)
+    if limit:
+        return merged[:limit]
+    return merged
+
+
 # ─── Endpoints ───
 
 @router.post("/register", status_code=201)
-def register(data: VendorRegisterRequest):
+def register(data: VendorRegisterRequest, request: Request):
     """Register a new shopkeeper and auto-create their shop (Pending Approval)."""
+    if not rate_allow("vendor_register", rate_ip(request), max_attempts=20, window_sec=3600):
+        raise HTTPException(status_code=429, detail="Too many shop registrations from this network — try again later.")
     password_hash = hash_password(data.password)
     user, conflict = db.register_user(
         username=data.username,
@@ -153,6 +195,12 @@ def register(data: VendorRegisterRequest):
             message=f"{data.name} registered '{data.shop_name}' — pending admin approval.",
             target_role="admin",
         )
+        # Ring the admin's phone too (best-effort, fire-and-forget).
+        push_service.notify_admin_async(
+            "New vendor registration",
+            f"{data.name} registered '{data.shop_name}' — pending approval in Admin Center.",
+            {"url": "/admin-dashboard", "tag": "vendor-reg"},
+        )
     except Exception as e:
         logger.warning(f"Could not notify admin of vendor registration: {e}")
 
@@ -164,8 +212,11 @@ def register(data: VendorRegisterRequest):
 
 
 @router.post("/login")
-def login(data: VendorLoginRequest):
+def login(data: VendorLoginRequest, request: Request):
     """Login as a shopkeeper."""
+    ip = rate_ip(request)
+    if not rate_allow("vendor_login", f"{data.username}:{ip}", max_attempts=40, window_sec=300):
+        raise HTTPException(status_code=429, detail="Too many sign-in attempts — please wait a few minutes and try again.")
     user = db.get_user_by_username(data.username)
     if not user:
         raise HTTPException(status_code=401, detail="No account found with this username. Check the spelling or register first.")
@@ -173,6 +224,7 @@ def login(data: VendorLoginRequest):
         raise HTTPException(status_code=403, detail=f"This account is a {user['role']} account — please sign in from the {user['role']} portal instead.")
     if not verify_password(data.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Incorrect password. Please try again.")
+    rate_reset("vendor_login", f"{data.username}:{ip}")
 
     token_data = {
         "sub": str(user["id"]),
@@ -195,7 +247,7 @@ def login(data: VendorLoginRequest):
 
 @router.get("/dashboard")
 def dashboard(current_vendor: dict = Depends(get_current_vendor)):
-    """Get vendor dashboard with shop details, orders, and admin dues (5%)."""
+    """Get vendor dashboard with shop details, orders, and admin dues (₹10 per order)."""
     my_shop = db.get_shop_by_shopkeeper_email(f"{current_vendor['username']}@campus.local")
 
     if not my_shop:
@@ -209,9 +261,10 @@ def dashboard(current_vendor: dict = Depends(get_current_vendor)):
     # Full order history feeds the stats below; the LIVE feed shipped to the
     # app is capped to the most recent orders so the 30s auto-refresh never
     # drags the shop's entire history across the network (the payload grew
-    # with every order and made the vendor app feel slow).
-    shop_orders = db.list_orders_by_shop(my_shop["id"])
-    feed_orders = db.list_recent_orders_by_shop(my_shop["id"], limit=250)
+    # with every order and made the vendor app feel slow). Multi-shop
+    # sub-orders are merged in so they appear too. One DB read, sliced twice.
+    shop_orders = _shop_orders_merged(my_shop["id"])
+    feed_orders = shop_orders[:250]
     pending = [o for o in shop_orders if o["status"] in ("Pending Payment", "Pending Acceptance")]
     active = [o for o in shop_orders if o["status"] in ("Confirmed", "Preparing", "Ready")]
     accepted = [o for o in shop_orders if o["status"] == "Accepted"]
@@ -228,17 +281,17 @@ def dashboard(current_vendor: dict = Depends(get_current_vendor)):
     today_orders = [o for o in earned_orders if _ist_date(o.get("created_at")) == today_key]
     today_revenue = sum(o["total"] for o in today_orders)
 
-    # ─── Admin share: 5% of the vendor's MONTHLY earnings ───
+    # ─── Admin share: flat ₹10 per order ───
     # The share cycle is one calendar month (IST): on the 1st of each month
     # the counters reset automatically because they are computed from order
     # timestamps. The student is never charged a service fee; instead the
-    # vendor pays the admin 5% of what they earned this month through the app.
+    # vendor pays the admin ₹10 for each order they earned this month.
     month_key = datetime.now(_KOLKATA_TZ).strftime("%Y-%m")
     month_orders = [o for o in earned_orders if _ist_date(o.get("created_at"))[:7] == month_key]
     month_revenue = sum(o["total"] for o in month_orders)
-    platform_fee_due = round(month_revenue * 0.05)
+    platform_fee_due = len(month_orders) * 10
     net_earnings = max(0, revenue - platform_fee_due)
-    today_fee_due = round(today_revenue * 0.05)
+    today_fee_due = len(today_orders) * 10
 
     # Admin's UPI ID — the vendor's "Pay" button opens this to settle the share.
     payment_settings = {}
@@ -315,7 +368,7 @@ def update_shop(data: ShopStatusUpdate, current_vendor: dict = Depends(get_curre
 
 @router.post("/dues/pay")
 def pay_admin_dues(data: AdminDuesPayment, current_vendor: dict = Depends(get_current_vendor)):
-    """Vendor pays their 5% share to the admin.
+    """Vendor pays their flat ₹10-per-order share to the admin.
 
     Opens a UPI payment to the admin (handled in the app UI). This endpoint
     records a Pending share payment that the admin marks as Received once the
@@ -323,14 +376,14 @@ def pay_admin_dues(data: AdminDuesPayment, current_vendor: dict = Depends(get_cu
     my_shop = _my_shop(current_vendor)
     shop_id = my_shop["id"]
 
-    # Default to this month's 5% share when no amount is supplied
+    # Default to this month's ₹10-per-order share when no amount is supplied
     amount = data.amount
     if amount is None:
         shop_orders = [o for o in db.list_orders_by_shop(shop_id) if o["status"] not in ("Cancelled", "Failed")]
         # IST month, matching the vendor dashboard and the admin share monitor.
         month_key = datetime.now(_KOLKATA_TZ).strftime("%Y-%m")
         month_orders = [o for o in shop_orders if _ist_date(o.get("created_at"))[:7] == month_key]
-        amount = round(sum(o["total"] for o in month_orders) * 0.05)
+        amount = len(month_orders) * 10
 
     payment = db.record_share_payment(shop_id, amount)
     if not payment:
@@ -343,15 +396,17 @@ def pay_admin_dues(data: AdminDuesPayment, current_vendor: dict = Depends(get_cu
 
 @router.get("/orders")
 def get_orders(current_vendor: dict = Depends(get_current_vendor)):
-    """Get all orders for this vendor's shop."""
+    """Get all orders for this vendor's shop (single + multi-shop sub-orders)."""
     my_shop = db.get_shop_by_shopkeeper_email(f"{current_vendor['username']}@campus.local")
     if not my_shop:
         return []
-    orders = db.list_orders_by_shop(my_shop["id"])
+    orders = _shop_orders_merged(my_shop["id"])
     # Enrich each order with its payment record (UTR + uploaded screenshot)
     # so the shop can verify payment screenshots right from the order card.
+    # Multi sub-orders pay on the PARENT order id, so resolve that one.
     for o in orders:
-        payment = db.get_payment_by_order_id(o["id"])
+        pay_key = o.get("parent_order_id") if o.get("is_sub_order") else o["id"]
+        payment = db.get_payment_by_order_id(pay_key)
         if payment:
             o["payment"] = {
                 "id": payment.get("id"),
@@ -470,10 +525,36 @@ def vendor_history(
 
 @router.patch("/orders/{order_id}/status")
 def update_order_status(order_id: str, data: dict, current_vendor: dict = Depends(get_current_vendor)):
-    """Update order status (accept, prepare, complete, cancel)."""
+    """Update order status (accept, prepare, complete, cancel). Works for single
+    orders AND multi-shop sub-orders."""
     new_status = data.get("status")
     if not new_status:
         raise HTTPException(status_code=400, detail="Status is required")
+
+    order = db.get_order(order_id)
+    is_sub = False
+    if not order:
+        order = db.get_sub_order(order_id)
+        is_sub = bool(order)
+
+    my_shop = db.get_shop_by_shopkeeper_email(f"{current_vendor['username']}@campus.local")
+    if not order or not my_shop or order["shop_id"] != my_shop["id"]:
+        raise HTTPException(status_code=403, detail="You don't own this order")
+
+    if is_sub:
+        order = db.update_sub_order_status(order_id, new_status)
+        if not order:
+            raise HTTPException(status_code=404, detail="Order not found")
+        # Keep the parent status in step with its last sub-order so the
+        # student's OrderResult reflects the newest state.
+        try:
+            sub = db.get_sub_order(order_id)
+            parent_id = (sub or {}).get("parent_order_id")
+            if parent_id:
+                db.update_parent_order_status(parent_id, new_status)
+        except Exception as e:
+            logger.warning(f"vendor update — parent status sync error: {e}")
+        return order
 
     order = db.update_order_status(order_id, new_status)
     if not order:
@@ -508,11 +589,50 @@ def confirm_payment_received(order_id: str, current_vendor: dict = Depends(get_c
         raise HTTPException(status_code=400, detail="Could not confirm payment")
     # Payment received → the order is completed in one step (no prep/ready/done).
     order_after = db.update_order_status(order_id, "Completed")
+    # Payment verified → auto-fire the shopkeeper's own WhatsApp notification
+    # reminder (confirmation SMS → admin's number → shop) so the shop has an
+    # auditable trail. Runs fire-and-forget on a daemon thread; never blocks
+    # the confirm response (this is a sync endpoint in a thread-pool worker,
+    # so there is no event loop to schedule a coroutine on).
+    try:
+        import threading
+        threading.Thread(
+            target=_notify_shop_whatsapp_verified,
+            args=(order_after or order,),
+            daemon=True,
+        ).start()
+    except Exception as e:
+        logger.warning(f"WhatsApp notify after payment-confirm error: {e}")
     return {
         "message": "Payment received — order completed!",
         "payment": updated,
         "order": order_after or db.get_order(order_id),
     }
+
+
+def _notify_shop_whatsapp_verified(order: dict | None) -> None:
+    """Fire-and-forget (daemon thread): build the wa.me link for a
+    payment-verified order and log it as a Pending WhatsApp notification for
+    the admin centre. Sync on purpose — the vendor API is thread-pool based."""
+    if not order:
+        return
+    try:
+        from urllib.parse import quote
+        from app.services.sms_service import compose_order_wa
+        shop = db.get_shop(order.get("shop_id") or "")
+        number = str((shop or {}).get("whatsapp_number") or "").strip() or str((shop or {}).get("phone") or "").strip()
+        if not (shop and number):
+            return
+        digits = "".join(ch for ch in number if ch.isdigit())
+        if len(digits) == 10:
+            digits = "91" + digits
+        url = f"https://wa.me/{digits}?text={quote(compose_order_wa(order))}"
+        db.log_whatsapp(
+            sub_order_id=order["id"], phone=number,
+            message=compose_order_wa(order), url=url, status="Pending",
+        )
+    except Exception as e:
+        logger.warning(f"WhatsApp verified-notify error for {order.get('id')}: {e}")
 
 
 # ─── Product CRUD ───

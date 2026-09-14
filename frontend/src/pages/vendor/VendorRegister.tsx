@@ -17,7 +17,7 @@ export function VendorRegister() {
   const [loading, setLoading] = useState(false)
   const [registered, setRegistered] = useState(false)
   const [approvalStatus, setApprovalStatus] = useState<'pending' | 'approved' | null>(null)
-  const categories = ['Italian', 'Chinese', 'Indian', 'Fast Food', 'Cafe', 'Bakery', 'Desserts', 'Beverages', 'Vegan', 'Japanese', 'Mexican', 'Continental']
+  const categories = ['Italian', 'Chinese', 'Indian', 'Fast Food', 'Biryani', 'Cafe', 'Bakery', 'Desserts', 'Beverages', 'Vegan', 'Japanese', 'Mexican', 'Continental']
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()

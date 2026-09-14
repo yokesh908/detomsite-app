@@ -23,7 +23,11 @@ export function getCart(): StoredCartItem[] {
   try {
     const rawCart = localStorage.getItem(CART_KEY)
     if (!rawCart) return []
-    return JSON.parse(rawCart) as StoredCartItem[]
+    const parsed = JSON.parse(rawCart)
+    // A corrupted value (object, string, …) used to hard-crash every page that
+    // renders the cart — accept only a real array of items.
+    if (!Array.isArray(parsed)) return []
+    return parsed.filter(item => item && typeof item === 'object' && !Number.isNaN(Number(item.price)) && Number(item.quantity) > 0)
   } catch {
     return []
   }

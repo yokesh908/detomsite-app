@@ -1,0 +1,288 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:fillViewport="true"
+    android:background="#0f766e"
+    tools:context=".MainActivity">
+
+    <androidx.constraintlayout.widget.ConstraintLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:padding="24dp">
+
+        <TextView
+            android:id="@+id/tvTitle"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="DETOMSITE WhatsApp Bot"
+            android:textSize="22sp"
+            android:textStyle="bold"
+            android:textColor="#FFFFFF"
+            app:layout_constraintTop_toTopOf="parent" />
+
+        <TextView
+            android:id="@+id/tvSubtitle"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="Auto-sends every new order to your shop on WhatsApp and confirms payments from bank SMS."
+            android:textSize="13sp"
+            android:textColor="#BBF7D0"
+            app:layout_constraintTop_toBottomOf="@id/tvTitle" />
+
+        <!-- ─── WhatsApp bot section (primary) ─── -->
+        <TextView
+            android:id="@+id/tvWABotHeader"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:text="WHATSAPP BOT — auto-sends orders"
+            android:textSize="14sp"
+            android:textStyle="bold"
+            android:textColor="#6EE7B7"
+            app:layout_constraintTop_toBottomOf="@id/tvSubtitle" />
+
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/swWABot"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:checked="false"
+            android:text="WhatsApp bot ON — shops get order updates automatically"
+            android:textColor="#FFFFFF"
+            app:thumbTint="#22C55E"
+            app:trackTint="#164E63"
+            app:layout_constraintTop_toBottomOf="@id/tvWABotHeader" />
+
+        <TextView
+            android:id="@+id/tvWABotStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:text="Toggle ON to auto-send order WhatsApps"
+            android:textSize="14sp"
+            android:textStyle="bold"
+            android:textColor="#FBBF24"
+            app:layout_constraintTop_toBottomOf="@id/swWABot" />
+
+        <Button
+            android:id="@+id/btnGrantAccessibility"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:layout_marginTop="8dp"
+            android:text="Enable Accessibility (auto-Send)"
+            android:textSize="14sp"
+            app:layout_constraintTop_toBottomOf="@id/tvWABotStatus" />
+
+        <Button
+            android:id="@+id/btnGrantOverlay"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:layout_marginTop="8dp"
+            android:text="Allow auto-open WhatsApp"
+            android:textSize="14sp"
+            app:layout_constraintTop_toBottomOf="@id/btnGrantAccessibility" />
+
+        <!-- ─── Privacy section ─── -->
+        <TextView
+            android:id="@+id/tvPrivacyHeader"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:text="PRIVACY — what stays on your phone"
+            android:textSize="12sp"
+            android:textAllCaps="true"
+            android:textStyle="bold"
+            android:textColor="#6EE7B7"
+            app:layout_constraintTop_toBottomOf="@id/btnGrantOverlay" />
+
+        <TextView
+            android:id="@+id/tvPrivacyBullet1"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:text="✓ Bank SMS stays on your phone"
+            android:textSize="14sp"
+            android:textColor="#D1FAE5"
+            app:layout_constraintTop_toBottomOf="@id/tvPrivacyHeader" />
+
+        <TextView
+            android:id="@+id/tvPrivacyBullet2"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="✓ Only UTR + amount are sent"
+            android:textSize="14sp"
+            android:textColor="#D1FAE5"
+            app:layout_constraintTop_toBottomOf="@id/tvPrivacyBullet1" />
+
+        <TextView
+            android:id="@+id/tvPrivacyBullet3"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="✓ Order auto-confirmed instantly"
+            android:textSize="14sp"
+            android:textColor="#D1FAE5"
+            app:layout_constraintTop_toBottomOf="@id/tvPrivacyBullet2" />
+
+        <TextView
+            android:id="@+id/tvPrivacyBullet4"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="✓ WhatsApp bot sends the order message all by itself"
+            android:textSize="14sp"
+            android:textColor="#D1FAE5"
+            app:layout_constraintTop_toBottomOf="@id/tvPrivacyBullet3" />
+
+        <!-- ─── SMS permission section ─── -->
+        <TextView
+            android:id="@+id/tvPermHeader"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="24dp"
+            android:text="SMS ACCESS"
+            android:textSize="12sp"
+            android:textAllCaps="true"
+            android:textStyle="bold"
+            android:textColor="#6EE7B7"
+            app:layout_constraintTop_toBottomOf="@id/tvPrivacyBullet4" />
+
+        <TextView
+            android:id="@+id/tvPermStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:text="SMS access: NOT YET GRANTED"
+            android:textSize="14sp"
+            android:textStyle="bold"
+            android:textColor="#F87171"
+            app:layout_constraintTop_toBottomOf="@id/tvPermHeader" />
+
+        <Button
+            android:id="@+id/btnGrantSms"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:layout_marginTop="8dp"
+            android:text="Grant SMS permission"
+            android:textSize="14sp"
+            app:layout_constraintTop_toBottomOf="@id/tvPermStatus" />
+
+        <!-- ─── Backend connection ─── -->
+        <TextView
+            android:id="@+id/lblUrl"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:text="Backend API URL"
+            android:textColor="#BBF7D0"
+            android:textSize="12sp"
+            android:textAllCaps="true"
+            android:textStyle="bold"
+            app:layout_constraintTop_toBottomOf="@id/btnGrantSms" />
+
+        <EditText
+            android:id="@+id/etBaseUrl"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:layout_marginTop="4dp"
+            android:background="#FFFFFF"
+            android:paddingStart="12dp"
+            android:paddingEnd="12dp"
+            android:hint="https://detomsite-backend.vercel.app"
+            android:textSize="14sp"
+            android:inputType="textUri"
+            app:layout_constraintTop_toBottomOf="@id/lblUrl" />
+
+        <TextView
+            android:id="@+id/lblKey"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="Agent key (same as SMS_FORWARD_KEY on server)"
+            android:textColor="#BBF7D0"
+            android:textSize="12sp"
+            android:textAllCaps="true"
+            android:textStyle="bold"
+            app:layout_constraintTop_toBottomOf="@id/etBaseUrl" />
+
+        <EditText
+            android:id="@+id/etAgentKey"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:layout_marginTop="4dp"
+            android:background="#FFFFFF"
+            android:paddingStart="12dp"
+            android:paddingEnd="12dp"
+            android:hint="secret agent key"
+            android:textSize="14sp"
+            android:inputType="textPassword"
+            app:layout_constraintTop_toBottomOf="@id/lblKey" />
+
+        <TextView
+            android:id="@+id/lblPhone"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="Shop phone (bank-linked number, with +91). Leave blank to auto-detect."
+            android:textColor="#BBF7D0"
+            android:textSize="12sp"
+            android:textAllCaps="true"
+            android:textStyle="bold"
+            app:layout_constraintTop_toBottomOf="@id/etAgentKey" />
+
+        <EditText
+            android:id="@+id/etPhone"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:layout_marginTop="4dp"
+            android:background="#FFFFFF"
+            android:paddingStart="12dp"
+            android:paddingEnd="12dp"
+            android:hint="+919876543210"
+            android:textSize="14sp"
+            android:inputType="phone"
+            app:layout_constraintTop_toBottomOf="@id/lblPhone" />
+
+        <com.google.android.material.materialswitch.MaterialSwitch
+            android:id="@+id/swEnabled"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:checked="true"
+            android:text="Auto-forwarding enabled"
+            android:textColor="#FFFFFF"
+            app:thumbTint="#34D399"
+            app:trackTint="#0f766e"
+            app:layout_constraintTop_toBottomOf="@id/etPhone" />
+
+        <Button
+            android:id="@+id/btnSave"
+            android:layout_width="match_parent"
+            android:layout_height="52dp"
+            android:layout_marginTop="16dp"
+            android:text="SAVE"
+            android:textSize="16sp"
+            android:textStyle="bold"
+            app:layout_constraintTop_toBottomOf="@id/swEnabled" />
+
+        <TextView
+            android:id="@+id/tvWABotNote"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="14dp"
+            android:layout_marginBottom="12dp"
+            android:text="The bot opens WhatsApp with the order text ready and taps Send itself (no gateway needed). Drafts marked “awaiting payment” wait until the payment is verified, so the shop receives exactly one clean message."
+            android:textSize="12sp"
+            android:textColor="#A7F3D0"
+            app:layout_constraintTop_toBottomOf="@id/btnSave"
+            app:layout_constraintBottom_toBottomOf="parent" />
+
+    </androidx.constraintlayout.widget.ConstraintLayout>
+
+</ScrollView>

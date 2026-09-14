@@ -13,8 +13,10 @@ using this store.
 """
 from __future__ import annotations
 
+import functools
 import logging
 import secrets
+import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -44,16 +46,51 @@ def _connection_string() -> str:
     )
 
 
-# ─── Connection pool ────────────────────────────────────────────────────
+def _secondary_connection_string() -> str:
+    if settings.SUPABASE_SECONDARY_DATABASE_URL:
+        return settings.SUPABASE_SECONDARY_DATABASE_URL
+    return (
+        f"postgresql://{settings.SUPABASE_SECONDARY_DB_USER}:{settings.SUPABASE_SECONDARY_DB_PASSWORD}"
+        f"@{settings.SUPABASE_SECONDARY_DB_HOST}:{settings.SUPABASE_SECONDARY_DB_PORT}/{settings.SUPABASE_SECONDARY_DB_NAME}"
+    )
+
+
+def _secondary_configured() -> bool:
+    """True when a second Supabase database is configured for dual-read."""
+    if settings.SUPABASE_SECONDARY_DATABASE_URL:
+        return True
+    return bool(settings.SUPABASE_SECONDARY_DB_HOST and settings.SUPABASE_SECONDARY_DB_PASSWORD)
+
+
+# ─── Connection pools ────────────────────────────────────────────────────
 # Opening a brand-new Postgres connection for every request is slow (each one
 # needs a TCP + TLS handshake across regions). We keep a small pool of warm
 # connections and reuse them, which makes the site feel much snappier.
+#
+# Two pools may exist: the PRIMARY (writes + reads) and an optional SECONDARY
+# (read-only fallback for dual-read). Which pool ``_connect()`` draws from is
+# decided per-thread via ``_active_db.upstream``, so a single request can read
+# from the primary and, on a miss, transparently re-run against the secondary.
 _pool: Any = None
+_secondary_pool: Any = None
+
+_active_db = threading.local()
 
 
-def _get_pool() -> Any:
-    """Lazily create the shared connection pool (thread-safe)."""
-    global _pool
+def _current_upstream() -> str:
+    return getattr(_active_db, "upstream", "primary")
+
+
+def _get_pool_for(upstream: str) -> Any:
+    """Lazily create the shared connection pool (thread-safe) for an upstream."""
+    global _pool, _secondary_pool
+    if upstream == "secondary":
+        if _secondary_pool is None:
+            _secondary_pool = _pg_pool.ThreadedConnectionPool(
+                1, 5, _secondary_connection_string(),
+                cursor_factory=psycopg2.extras.RealDictCursor,
+            )
+        return _secondary_pool
     if _pool is None:
         _pool = _pg_pool.ThreadedConnectionPool(
             1, 15, _connection_string(),
@@ -63,43 +100,50 @@ def _get_pool() -> Any:
 
 
 def _connect() -> Any:
-    """Get a pooled Postgres connection with dict-row support."""
-    conn = _get_pool().getconn()
+    """Get a pooled Postgres connection with dict-row support. Draws from the
+    secondary pool when the current thread is in dual-read fallback mode."""
+    upstream = _current_upstream()
+    conn = _get_pool_for(upstream).getconn()
     if getattr(conn, "closed", 0) != 0:
         # Stale pooled connection — return its slot (rebuilds the pool) and
         # ask for a fresh one, so the slot is never leaked.
         _release(conn, discard=True)
-        conn = _get_pool().getconn()
+        conn = _get_pool_for(upstream).getconn()
     return conn
 
 
 def _release(conn: Any, discard: bool = False) -> None:
-    """Return a connection to the pool. If it broke (or ``discard=True``),
+    """Return a connection to its pool. If it broke (or ``discard=True``),
     rebuild the pool so the next connections are healthy."""
-    global _pool
+    upstream = _current_upstream()
+    pool = _get_pool_for(upstream)
     if discard:
         try:
             conn.close()
         except Exception:
             pass
-        _rebuild_pool()
+        _rebuild_pool(upstream)
         return
     try:
         if getattr(conn, "closed", 1) == 0:
-            _get_pool().putconn(conn)
+            pool.putconn(conn)
             return
     except Exception:
         pass
     # Connection is dead — rebuild the pool so new connections are healthy.
-    _rebuild_pool()
+    _rebuild_pool(upstream)
 
 
-def _rebuild_pool() -> None:
-    """Close and drop the current pool (if any). New connections will be
-    created lazily by the next ``_get_pool()`` call."""
-    global _pool
-    old_pool = _pool
-    _pool = None  # clear first so concurrent callers build a fresh pool
+def _rebuild_pool(upstream: str = "primary") -> None:
+    """Close and drop the current pool for an upstream (if any). New connections
+    will be created lazily by the next ``_get_pool()`` call."""
+    global _pool, _secondary_pool
+    if upstream == "secondary":
+        old_pool = _secondary_pool
+        _secondary_pool = None  # clear first so concurrent callers build a fresh pool
+    else:
+        old_pool = _pool
+        _pool = None  # clear first so concurrent callers build a fresh pool
     try:
         if old_pool is not None:
             old_pool.closeall()
@@ -130,6 +174,56 @@ class _DBContext:
             # the pool rebuilds with healthy connections.
             _release(self._connection, discard=True)
         return False
+
+
+# ─── Dual-read (primary → secondary fallback) ─────────────────────────────
+# When a SECOND Supabase database is configured, read-only lookups run against
+# the PRIMARY first; if the primary returns nothing, the same read is re-run
+# against the SECONDARY and its result is returned. Writes, migrations and
+# mutations are never routed to the secondary — only reads, only on a primary
+# miss.
+
+
+def _is_empty_result(result: Any) -> bool:
+    """A result counts as a 'miss' (eligible for dual-read fallback) when it is
+    None, an empty list, or an empty dict (e.g. an empty stats payload).
+    Integers/booleans/rows are never empty for our purposes, so writes are
+    never accidentally re-run against the secondary."""
+    if result is None:
+        return True
+    if isinstance(result, (list, dict)):
+        return not result
+    return False
+
+
+def _dual_read(method):
+    """Decorator for read-only store functions. Runs the method against the
+    primary database and, when the primary returns nothing OR fails (e.g. the
+    table only exists in the secondary), re-runs it against the secondary
+    (primary-first fallback)."""
+
+    @functools.wraps(method)
+    def wrapper(*args, **kwargs):
+        if not _secondary_configured():
+            return method(*args, **kwargs)
+        try:
+            result = method(*args, **kwargs)
+            if not _is_empty_result(result):
+                return result
+        except Exception as primary_error:
+            # Primary missing the table/column (or down) — serve from secondary.
+            logger.debug(f"Dual-read: primary failed ({method.__name__}), trying secondary: {primary_error}")
+        previous = _current_upstream()
+        _active_db.upstream = "secondary"
+        try:
+            return method(*args, **kwargs)
+        except Exception as error:
+            logger.warning(f"Dual-read fallback failed ({method.__name__}): {error}")
+            raise
+        finally:
+            _active_db.upstream = previous
+
+    return wrapper
 
 
 def _rows_to_dicts(rows: list) -> list[dict[str, Any]]:
@@ -174,13 +268,21 @@ _MIGRATIONS = [
     "ALTER TABLE shops ADD COLUMN IF NOT EXISTS admin_dues_last_paid_at timestamptz",
     "ALTER TABLE shops ADD COLUMN IF NOT EXISTS upi_enabled boolean NOT NULL DEFAULT true",
     "ALTER TABLE shops ADD COLUMN IF NOT EXISTS cod_enabled boolean NOT NULL DEFAULT true",
+    # Multi-shop parent payments: payments.order_id still references `orders`
+    # (FK), so a parent order's ONE bill is anchored on its first sub-order id
+    # and the parent id is kept in this column for verification flows.
+    "ALTER TABLE payments ADD COLUMN IF NOT EXISTS parent_order_id text",
+    # Parent (multi-shop) orders keep their ONE payment proof here (the
+    # `payments` table's order_id FK only accepts `orders` rows).
+    "ALTER TABLE parent_orders ADD COLUMN IF NOT EXISTS utr_number text",
+    "ALTER TABLE parent_orders ADD COLUMN IF NOT EXISTS screenshot_name text",
     # Older product tables may be missing the pending_price column — without this
     # the vendor's "Add Product" fails in production (500) while local SQLite
     # works (local auto-creates the schema on startup).
     "ALTER TABLE products ADD COLUMN IF NOT EXISTS pending_price integer",
     "ALTER TABLE products ADD COLUMN IF NOT EXISTS prep_time integer NOT NULL DEFAULT 10",
     "ALTER TABLE products ADD COLUMN IF NOT EXISTS available boolean NOT NULL DEFAULT true",
-    # Track the 5% shares vendors pay to the admin (UPI → recorded as Pending,
+    # Track the ₹10-per-order shares vendors pay to the admin (UPI → recorded as Pending,
     # admin marks Received once the money lands in their bank account).
     """
     CREATE TABLE IF NOT EXISTS share_payments (
@@ -302,7 +404,10 @@ def init_supabase_db() -> bool:
     """Verify connectivity and auto-apply any missing columns (idempotent).
     Returns True when reachable. The full schema lives in backend/supabase/schema.sql,
     but the small ALTERs below are re-run on every startup so the app never
-    breaks if a new column hasn't been applied to an existing database yet."""
+    breaks if a new column hasn't been applied to an existing database yet.
+    When a secondary Supabase database is configured it is also pinged, but a
+    secondary outage never blocks startup — dual-read merely falls back to the
+    primary's (possibly empty) result."""
     try:
         with _DBContext(_connect()) as connection:
             with connection.cursor() as cursor:
@@ -310,10 +415,54 @@ def init_supabase_db() -> bool:
                 cursor.fetchone()
         _apply_migrations()
         logger.info("Supabase Postgres connection verified (auto-migrations applied)")
+        if _secondary_configured():
+            previous = _current_upstream()
+            _active_db.upstream = "secondary"
+            try:
+                with _DBContext(_connect()) as connection:
+                    with connection.cursor() as cursor:
+                        cursor.execute("SELECT 1")
+                        cursor.fetchone()
+                logger.info("Supabase secondary database verified (dual-read enabled)")
+            except Exception as secondary_error:
+                logger.warning(f"Supabase secondary database check failed: {secondary_error}")
+            finally:
+                _active_db.upstream = previous
         return True
     except Exception as e:  # pragma: no cover - network dependent
         logger.error(f"Supabase Postgres connection failed: {e}")
         return False
+
+
+def ensure_admin_user() -> None:
+    """Seed the super admin as a real DB user (role='admin') so the admin
+    portal login AND forgot-password flow work end-to-end. The DB email is a
+    unique placeholder because DEFAULT_SUPER_ADMIN_EMAIL is often already
+    claimed by a shopkeeper/student account (one email = one account) — the
+    reset OTP is delivered to DEFAULT_SUPER_ADMIN_EMAIL instead (see
+    users.py)._send_reset_otp). Idempotent: an existing account is left
+    untouched so a password reset or role change is never overwritten on boot."""
+    email = (settings.DEFAULT_SUPER_ADMIN_EMAIL or "").strip()
+    password = settings.DEFAULT_SUPER_ADMIN_PASSWORD or ""
+    if not email or not password:
+        logger.info("ensure_admin_user: DEFAULT_SUPER_ADMIN_EMAIL/PASSWORD not set — skipping")
+        return
+    username = email.split("@")[0].lower() or "admin"
+    if get_user_by_username(username):
+        logger.info(f"ensure_admin_user: admin user already exists ({username}) — skipping")
+        return
+    from app.core.security import hash_password
+    user, conflict = register_user(
+        username=username,
+        password_hash=hash_password(password),
+        name="Administrator",
+        role="admin",
+        email="admin@detomsite.local",
+    )
+    if user:
+        logger.info(f"ensure_admin_user: created admin '{username}' — reset OTP goes to {email}")
+    else:
+        logger.warning(f"ensure_admin_user: could not create admin ({conflict}) — {username} may be in use")
 
 
 # ─── Users ───
@@ -376,6 +525,7 @@ def register_user(
             return (dict(row) if row else None), None
 
 
+@_dual_read
 def get_user_by_username(username: str) -> dict[str, Any] | None:
     """Get full user record (including password_hash) by username."""
     with _DBContext(_connect()) as connection:
@@ -385,6 +535,7 @@ def get_user_by_username(username: str) -> dict[str, Any] | None:
             return dict(row) if row else None
 
 
+@_dual_read
 def get_user_by_id(user_id: int) -> dict[str, Any] | None:
     """Get user by id (without password_hash)."""
     with _DBContext(_connect()) as connection:
@@ -423,6 +574,7 @@ def save_session(email: str, name: str, role: str) -> dict[str, Any]:
 # ─── Shops ───
 
 
+@_dual_read
 def list_shops(public_only: bool = False) -> list[dict[str, Any]]:
     with _DBContext(_connect()) as connection:
         with connection.cursor() as cursor:
@@ -436,6 +588,7 @@ def list_shops(public_only: bool = False) -> list[dict[str, Any]]:
         return shops
 
 
+@_dual_read
 def get_shop(shop_id: str) -> dict[str, Any] | None:
     with _DBContext(_connect()) as connection:
         with connection.cursor() as cursor:
@@ -444,6 +597,30 @@ def get_shop(shop_id: str) -> dict[str, Any] | None:
             return dict(row) if row else None
 
 
+@_dual_read
+def get_shop_by_phone(phone: str) -> dict[str, Any] | None:
+    """Find a shop by its phone number (the bank-linked number whose SMS the
+    agent forwards). Matches on digits only so '+919876543210' == '9876543210'."""
+    import re as _re
+    digits = _re.sub(r'\D', '', phone or '')
+    if not digits:
+        return None
+    if len(digits) == 10:
+        digits = '91' + digits
+    with _DBContext(_connect()) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT * FROM shops WHERE approval_status = 'Approved'")
+            for row in cursor.fetchall():
+                shop = dict(row)
+                shop_digits = _re.sub(r'\D', '', shop.get('phone') or '')
+                if len(shop_digits) == 10:
+                    shop_digits = '91' + shop_digits
+                if shop_digits == digits:
+                    return shop
+    return None
+
+
+@_dual_read
 def get_shop_by_shopkeeper_email(email: str) -> dict[str, Any] | None:
     """Get a vendor's shop by shopkeeper email (used by every vendor endpoint —
     avoids scanning the whole shops table on each request)."""
@@ -469,9 +646,9 @@ def create_shop(values: dict[str, Any]) -> dict[str, Any]:
                     id, name, category, description, rating, opening_time,
                     closing_time, present, status, approval_status, shopkeeper_email,
                     shopkeeper_name, phone, upi_id, orders_today, revenue_today, current_token,
-                upi_enabled, cod_enabled
+                    upi_enabled, cod_enabled, whatsapp_number
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     shop_id,
@@ -493,6 +670,7 @@ def create_shop(values: dict[str, Any]) -> dict[str, Any]:
                     18,
                     values.get("upi_enabled", True),
                     values.get("cod_enabled", True),
+                    values.get("whatsapp_number", ""),
                 ),
             )
             cursor.execute("SELECT * FROM shops WHERE id = %s", (shop_id,))
@@ -564,6 +742,7 @@ def _update_shop_impl(shop_id: str, values: dict[str, Any]) -> dict[str, Any] | 
 # ─── Products ───
 
 
+@_dual_read
 def list_products(shop_id: str | None = None) -> list[dict[str, Any]]:
     with _DBContext(_connect()) as connection:
         with connection.cursor() as cursor:
@@ -656,6 +835,7 @@ def update_product(product_id: str, values: dict[str, Any]) -> dict[str, Any] | 
             return dict(row) if row else None
 
 
+@_dual_read
 def get_product(product_id: str) -> dict[str, Any] | None:
     with _DBContext(_connect()) as connection:
         with connection.cursor() as cursor:
@@ -697,7 +877,7 @@ def pay_admin_dues(shop_id: str, amount: int | None = None) -> dict[str, Any] | 
     )
 
 
-# ─── Admin share payments (5% of vendor daily earnings → admin) ───
+# ─── Admin share payments (₹10 per order → admin) ───
 
 
 def record_share_payment(shop_id: str, amount: int) -> dict[str, Any] | None:
@@ -751,6 +931,7 @@ def _record_share_payment_impl(shop_id: str, amount: int) -> dict[str, Any] | No
             return dict(row) if row else None
 
 
+@_dual_read
 def list_share_payments() -> list[dict[str, Any]]:
     """All vendor→admin share payments, newest first."""
     try:
@@ -760,6 +941,7 @@ def list_share_payments() -> list[dict[str, Any]]:
         return _list_share_payments_impl()
 
 
+@_dual_read
 def list_share_payments_by_shop(shop_id: str) -> list[dict[str, Any]]:
     """Share payments for one shop only (vendor dashboard hot path)."""
     try:
@@ -818,6 +1000,7 @@ def _update_share_payment_status_impl(payment_id: str, status: str) -> dict[str,
 # ─── Orders ───
 
 
+@_dual_read
 def list_orders(limit: int | None = None) -> list[dict[str, Any]]:
     """All orders, newest first. ``limit`` bounds the payload — callers that
     only need the latest rows (admin dashboard, orders page) pass it so the
@@ -835,6 +1018,7 @@ def list_orders(limit: int | None = None) -> list[dict[str, Any]]:
             return _rows_to_dicts(cursor.fetchall())
 
 
+@_dual_read
 def list_orders_by_shop(shop_id: str) -> list[dict[str, Any]]:
     """Orders for one shop only — the vendor dashboard/history hot path. Uses
     the ``idx_orders_shop_id`` index instead of shipping every order to Python."""
@@ -847,6 +1031,7 @@ def list_orders_by_shop(shop_id: str) -> list[dict[str, Any]]:
             return _rows_to_dicts(cursor.fetchall())
 
 
+@_dual_read
 def list_recent_orders_by_shop(shop_id: str, limit: int = 250) -> list[dict[str, Any]]:
     """Latest orders for one shop (newest first) — the live feed shown in the
     vendor app. Bounded so the 30s auto-refresh never ships the shop's entire
@@ -862,6 +1047,7 @@ def list_recent_orders_by_shop(shop_id: str, limit: int = 250) -> list[dict[str,
             return _rows_to_dicts(cursor.fetchall())
 
 
+@_dual_read
 def get_order(order_id: str) -> dict[str, Any] | None:
     with _DBContext(_connect()) as connection:
         with connection.cursor() as cursor:
@@ -941,7 +1127,7 @@ def _create_order_impl(values: dict[str, Any]) -> dict[str, Any] | None:
             if not item_labels:
                 return None
 
-            # ─── Fees: the customer pays only the subtotal. The admin's 5% is
+            # ─── Fees: the customer pays only the subtotal. The admin's ₹10 per order is
             # taken from the vendor's single-day earnings, never added to the
             # student's bill. ───
             service_fee = 0
@@ -1060,13 +1246,18 @@ def create_payment(
     method: str,
     utr_number: str | None = None,
     screenshot_name: str | None = None,
+    allow_unknown_order: bool = False,
 ) -> dict[str, Any] | None:
+    """Record a payment. ``order_id`` is normally a row in ``orders`` — multi-
+    shop parents are recorded via ``record_parent_payment`` instead (the
+    ``payments.order_id`` FK only accepts ``orders`` rows, so parent orders can
+    never live here)."""
     with _DBContext(_connect()) as connection:
         with connection.cursor() as cursor:
-            cursor.execute("SELECT * FROM orders WHERE id = %s", (order_id,))
-            order = cursor.fetchone()
-            if not order:
-                return None
+            if not allow_unknown_order:
+                cursor.execute("SELECT * FROM orders WHERE id = %s", (order_id,))
+                if not cursor.fetchone():
+                    return None
             # COUNT(*)+1 read-then-insert is not atomic under concurrency — if
             # another payment claimed the same id a moment ago, retry with a
             # freshly computed one instead of failing with a duplicate key.
@@ -1094,11 +1285,121 @@ def create_payment(
             return dict(row) if row else None
 
 
+@_dual_read
 def list_payments() -> list[dict[str, Any]]:
     with _DBContext(_connect()) as connection:
         with connection.cursor() as cursor:
             cursor.execute("SELECT * FROM payments ORDER BY created_at DESC")
             return _rows_to_dicts(cursor.fetchall())
+
+
+@_dual_read
+def get_payment_by_id(payment_id: str) -> dict[str, Any] | None:
+    with _DBContext(_connect()) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT * FROM payments WHERE id = %s", (payment_id,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+
+# ─── Parent (multi-shop) payments ────────────────────────────────────
+# A multi-shop parent pays ONE bill as a group. The ``payments`` table's
+# ``order_id`` FK only accepts ``orders`` rows (sub-order ids belong to
+# ``shop_sub_orders``), so parent payments live directly on the
+# ``parent_orders`` row — these helpers read/write them there.
+
+
+def _parent_payment_shape(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "order_id": row["id"],
+        "amount": row["total"],
+        "method": row["payment_method"],
+        "status": "Success" if str(row.get("payment_status") or "").upper() == "PAID" else row.get("payment_status", "Pending"),
+        "utr_number": row.get("utr_number"),
+        "screenshot_name": row.get("screenshot_name"),
+        "created_at": str(row.get("created_at") or ""),
+        "is_parent": True,
+    }
+
+
+def record_parent_payment(
+    parent_order_id: str,
+    amount: int,
+    method: str,
+    utr_number: str | None = None,
+    screenshot_name: str | None = None,
+) -> dict[str, Any] | None:
+    """Create/refresh the payment proof (UTR + screenshot) for a parent order."""
+    with _DBContext(_connect()) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT * FROM parent_orders WHERE id = %s", (parent_order_id,))
+            parent = cursor_row(cursor)
+            if not parent:
+                return None
+            cursor.execute(
+                """UPDATE parent_orders
+                   SET payment_method = COALESCE(%s, payment_method),
+                       utr_number = COALESCE(%s, utr_number),
+                       screenshot_name = COALESCE(%s, screenshot_name)
+                   WHERE id = %s""",
+                (method, utr_number, screenshot_name, parent_order_id),
+            )
+            cursor.execute("SELECT * FROM parent_orders WHERE id = %s", (parent_order_id,))
+            parent = cursor_row(cursor)
+            return _parent_payment_shape(parent) if parent else None
+
+
+@_dual_read
+def get_parent_payment(parent_order_id: str) -> dict[str, Any] | None:
+    with _DBContext(_connect()) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT * FROM parent_orders WHERE id = %s", (parent_order_id,))
+            row = cursor_row(cursor)
+            return _parent_payment_shape(row) if row else None
+
+
+@_dual_read
+def list_parent_payments() -> list[dict[str, Any]]:
+    with _DBContext(_connect()) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT * FROM parent_orders ORDER BY created_at DESC")
+            return [_parent_payment_shape(dict(r)) for r in cursor.fetchall()]
+
+
+def verify_parent_payment(parent_order_id: str, status: str) -> dict[str, Any] | None:
+    """Verify/reject a parent group's UPI/UTR proof. On success the whole group
+    moves to Pending Acceptance and every pending sub-order is Accepted."""
+    with _DBContext(_connect()) as connection:
+        with connection.cursor() as cursor:
+            if str(status).lower() in ("success", "verified", "received"):
+                cursor.execute("SELECT token, status FROM parent_orders WHERE id = %s", (parent_order_id,))
+                prow = cursor_row(cursor)
+                if not prow:
+                    return None
+                cursor.execute("UPDATE parent_orders SET payment_status = 'Paid' WHERE id = %s", (parent_order_id,))
+                if prow["status"] == "Pending":
+                    cursor.execute("UPDATE parent_orders SET status = 'Pending Acceptance' WHERE id = %s", (parent_order_id,))
+                cursor.execute(
+                    "UPDATE shop_sub_orders SET status = 'Accepted' WHERE parent_order_id = %s AND status = 'Pending'",
+                    (parent_order_id,),
+                )
+                create_notification(
+                    title="Payment confirmed",
+                    message=f"Payment for token {prow['token']} confirmed — the shops will accept your order soon.",
+                    order_id=None,  # notifications.order_id FK only accepts `orders` ids
+                    status="Pending Acceptance",
+                    target_role="student",
+                    connection=connection,
+                )
+            else:
+                cursor.execute("SELECT id FROM parent_orders WHERE id = %s", (parent_order_id,))
+                if not cursor_row(cursor):
+                    return None
+                cursor.execute("UPDATE parent_orders SET payment_status = 'Failed' WHERE id = %s", (parent_order_id,))
+            cursor.execute("SELECT * FROM parent_orders WHERE id = %s", (parent_order_id,))
+            row = cursor_row(cursor)
+            return _parent_payment_shape(row) if row else None
 
 
 def update_payment_status(payment_id: str, status: str) -> dict[str, Any] | None:
@@ -1107,26 +1408,65 @@ def update_payment_status(payment_id: str, status: str) -> dict[str, Any] | None
             cursor.execute("UPDATE payments SET status = %s WHERE id = %s", (status, payment_id))
             cursor.execute("SELECT * FROM payments WHERE id = %s", (payment_id,))
             row = cursor.fetchone()
-            if row and status == "Success":
-                cursor.execute("UPDATE orders SET status = %s WHERE id = %s", ("Pending Acceptance", row["order_id"]))
-                cursor.execute("SELECT * FROM orders WHERE id = %s", (row["order_id"],))
-                order_row = cursor.fetchone()
-                if order_row:
-                    create_notification(
-                        title="Payment confirmed",
-                        message=f"Payment for token {order_row['token']} confirmed — the shop will accept your order soon.",
-                        order_id=row["order_id"],
-                        status="Pending Acceptance",
-                        target_role="student",
-                        connection=connection,
-                    )
-            if row and status == "Failed":
-                cursor.execute("UPDATE orders SET status = %s WHERE id = %s", ("Failed", row["order_id"]))
+            if row and status in ("Success", "Failed"):
+                is_parent = bool(row.get("parent_order_id"))
+                if is_parent:
+                    # Multi-shop: ONE bill → entire group moves together.
+                    parent_id = row["parent_order_id"]
+                    if status == "Success":
+                        cursor.execute(
+                            "UPDATE parent_orders SET payment_status = 'Paid' WHERE id = %s",
+                            (parent_id,),
+                        )
+                        cursor.execute("SELECT token, status FROM parent_orders WHERE id = %s", (parent_id,))
+                        p_row = cursor.fetchone()
+                        if p_row and p_row["status"] == "Pending":
+                            cursor.execute(
+                                "UPDATE parent_orders SET status = 'Pending Acceptance' WHERE id = %s",
+                                (parent_id,),
+                            )
+                        cursor.execute(
+                            "UPDATE shop_sub_orders SET status = 'Accepted' WHERE parent_order_id = %s AND status = 'Pending'",
+                            (parent_id,),
+                        )
+                        create_notification(
+                            title="Payment confirmed",
+                            message=f"Payment for token {p_row['token'] if p_row else parent_id} confirmed — the shops will accept your order soon.",
+                            order_id=None,  # notifications.order_id FK only accepts `orders` ids
+                            status="Pending Acceptance",
+                            target_role="student",
+                            connection=connection,
+                        )
+                    else:
+                        cursor.execute(
+                            "UPDATE parent_orders SET payment_status = 'Failed' WHERE id = %s",
+                            (parent_id,),
+                        )
+                else:
+                    order_id = row["order_id"]
+                    cursor.execute("SELECT * FROM orders WHERE id = %s", (order_id,))
+                    order_row = cursor.fetchone()
+                    if order_row:
+                        if status == "Success":
+                            cursor.execute("UPDATE orders SET status = %s WHERE id = %s", ("Pending Acceptance", order_row["id"]))
+                            create_notification(
+                                title="Payment confirmed",
+                                message=f"Payment for token {order_row['token']} confirmed — the shop will accept your order soon.",
+                                order_id=order_row["id"],
+                                status="Pending Acceptance",
+                                target_role="student",
+                                connection=connection,
+                            )
+                        else:
+                            cursor.execute("UPDATE orders SET status = %s WHERE id = %s", ("Failed", order_row["id"]))
             return dict(row) if row else None
 
 
+@_dual_read
 def get_payment_by_order_id(order_id: str) -> dict[str, Any] | None:
-    """Get the most recent payment record for an order."""
+    """Get the most recent payment record for an order. For multi-shop parents
+    the payment is anchored on a sub-order id but keeps ``parent_order_id`` —
+    so lookups by the parent id match too."""
     with _DBContext(_connect()) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
@@ -1157,6 +1497,27 @@ def set_payment_utr(order_id: str, utr_number: str) -> dict[str, Any] | None:
             return dict(updated) if updated else None
 
 
+def update_payment_record(order_id: str, screenshot_name: str, utr_number: str | None = None) -> dict[str, Any] | None:
+    """Attach a payment screenshot (and optional UTR) to the latest payment for an order."""
+    with _DBContext(_connect()) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT * FROM payments WHERE order_id = %s ORDER BY created_at DESC, id DESC LIMIT 1",
+                (order_id,),
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+            cursor.execute(
+                "UPDATE payments SET screenshot_name = %s, utr_number = COALESCE(%s, utr_number) WHERE id = %s",
+                (screenshot_name, utr_number, row["id"]),
+            )
+            cursor.execute("SELECT * FROM payments WHERE id = %s", (row["id"],))
+            updated = cursor.fetchone()
+            return dict(updated) if updated else None
+
+
+@_dual_read
 def get_payment_by_utr(utr_number: str) -> dict[str, Any] | None:
     """Find the most recent payment record carrying this UTR (student-entered)."""
     if not utr_number:
@@ -1171,6 +1532,7 @@ def get_payment_by_utr(utr_number: str) -> dict[str, Any] | None:
             return dict(row) if row else None
 
 
+@_dual_read
 def get_payment_settings() -> dict[str, Any]:
     defaults = {
         "manual_enabled": False,
@@ -1243,6 +1605,7 @@ def create_ticket(values: dict[str, Any]) -> dict[str, Any]:
             return dict(row)
 
 
+@_dual_read
 def list_tickets() -> list[dict[str, Any]]:
     with _DBContext(_connect()) as connection:
         with connection.cursor() as cursor:
@@ -1291,6 +1654,7 @@ def create_notification(
             _release(active_connection)
 
 
+@_dual_read
 def list_notifications(role: str | None = None) -> list[dict[str, Any]]:
     """List notifications. When ``role`` is given, only notifications targeted at
     that exact role are returned (strict role separation)."""
@@ -1352,6 +1716,7 @@ def _save_push_subscription_impl(
             return dict(row) if row else None
 
 
+@_dual_read
 def list_push_subscriptions(shop_id: str) -> list[dict[str, Any]]:
     """All push subscriptions registered for a shop (used to deliver pushes)."""
     try:
@@ -1385,6 +1750,7 @@ def remove_push_subscription(shop_id: str, endpoint: str) -> bool:
 # ─── Admin helpers ───
 
 
+@_dual_read
 def list_users() -> list[dict[str, Any]]:
     """List all registered users (without password_hash)."""
     with _DBContext(_connect()) as connection:
@@ -1395,6 +1761,7 @@ def list_users() -> list[dict[str, Any]]:
             return _rows_to_dicts(cursor.fetchall())
 
 
+@_dual_read
 def list_users_by_role(role: str) -> list[dict[str, Any]]:
     """List users filtered by role."""
     with _DBContext(_connect()) as connection:
@@ -1416,6 +1783,7 @@ def record_registration(user: dict[str, Any]) -> None:
             )
 
 
+@_dual_read
 def list_registrations() -> list[dict[str, Any]]:
     """List all user registrations for admin."""
     with _DBContext(_connect()) as connection:
@@ -1427,6 +1795,7 @@ def list_registrations() -> list[dict[str, Any]]:
 # ─── Forgot password (double email OTP verification) ───
 
 
+@_dual_read
 def get_user_by_email(email: str) -> dict[str, Any] | None:
     """Find a user by their registered email (case-insensitive)."""
     with _DBContext(_connect()) as connection:
@@ -1457,6 +1826,7 @@ def create_password_reset(username: str, otp: str, step: int) -> dict[str, Any] 
             return dict(row) if row else None
 
 
+@_dual_read
 def get_password_reset(username: str, otp: str, step: int) -> dict[str, Any] | None:
     """Return the valid, unused, unexpired reset code for this user/step.
     Codes are locked out after 5 wrong attempts (brute-force protection)."""
@@ -1565,6 +1935,7 @@ def _create_site_feedback_impl(values: dict[str, Any]) -> dict[str, Any] | None:
             return dict(row) if row else None
 
 
+@_dual_read
 def list_site_feedback(source: str | None = None) -> list[dict[str, Any]]:
     """All site feedback, newest first (admin Feedback page).
     Pass ``source`` = 'User' or 'ATS' to see only real students or only
@@ -1589,6 +1960,7 @@ def _list_site_feedback_impl(source: str | None = None) -> list[dict[str, Any]]:
             return _rows_to_dicts(cursor.fetchall())
 
 
+@_dual_read
 def list_site_feedback_by_user(user_id: int) -> list[dict[str, Any]]:
     """A student's own submissions (student portal "my contributions")."""
     try:
@@ -1704,6 +2076,7 @@ def _create_review_impl(values: dict[str, Any]) -> dict[str, Any] | None:
             return dict(row) if row else None
 
 
+@_dual_read
 def list_reviews(shop_id: str | None = None) -> list[dict[str, Any]]:
     try:
         return _list_reviews_impl(shop_id)
@@ -1722,6 +2095,7 @@ def _list_reviews_impl(shop_id: str | None = None) -> list[dict[str, Any]]:
             return _rows_to_dicts(cursor.fetchall())
 
 
+@_dual_read
 def list_reviews_by_user(user_id: int) -> list[dict[str, Any]]:
     try:
         return _list_reviews_by_user_impl(user_id)
@@ -1789,6 +2163,7 @@ def delete_user(user_id: int) -> bool:
             return cursor.rowcount > 0
 
 
+@_dual_read
 def get_admin_dashboard_stats(today: str) -> dict[str, Any]:
     """Admin dashboard numbers computed in SQL (COUNT/SUM subqueries) instead
     of loading every row into Python. The old approach pulled the entire
@@ -1817,19 +2192,21 @@ def get_admin_dashboard_stats(today: str) -> dict[str, Any]:
             return dict(row) if row else {}
 
 
+@_dual_read
 def get_orders_grouped_by_date() -> list[dict[str, Any]]:
     """Get orders grouped by date for revenue tracking."""
     with _DBContext(_connect()) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 "SELECT created_at::date::text AS created_at, COUNT(*) AS count, SUM(total) AS revenue, "
-                "SUM(subtotal) AS subtotal, ROUND(SUM(total) * 0.05) AS service_fee, "
+                "SUM(subtotal) AS subtotal, COUNT(*) * 10 AS service_fee, "
                 "SUM(tax) AS tax, SUM(delivery_fee) AS delivery_fee, "
                 "STRING_AGG(id, ',') AS ids FROM orders GROUP BY created_at::date ORDER BY created_at::date DESC"
             )
             return _rows_to_dicts(cursor.fetchall())
 
 
+@_dual_read
 def get_orders_by_date(date_key: str) -> list[dict[str, Any]]:
     """Get orders for a specific date (YYYY-MM-DD) for daily log filtering."""
     with _DBContext(_connect()) as connection:
@@ -1841,6 +2218,7 @@ def get_orders_by_date(date_key: str) -> list[dict[str, Any]]:
             return _rows_to_dicts(cursor.fetchall())
 
 
+@_dual_read
 def get_payments_by_date(date_key: str) -> list[dict[str, Any]]:
     """Get payments for a specific date (YYYY-MM-DD) for daily log filtering."""
     with _DBContext(_connect()) as connection:
@@ -1852,13 +2230,14 @@ def get_payments_by_date(date_key: str) -> list[dict[str, Any]]:
             return _rows_to_dicts(cursor.fetchall())
 
 
+@_dual_read
 def get_daily_stats() -> dict[str, Any]:
     """Get today's statistics."""
     with _DBContext(_connect()) as connection:
         with connection.cursor() as cursor:
             cursor.execute(
                 "SELECT COUNT(*) AS count, COALESCE(SUM(total), 0) AS revenue, "
-                "ROUND(COALESCE(SUM(total), 0) * 0.05) AS service_fee FROM orders WHERE created_at::date = CURRENT_DATE"
+                "COUNT(*) * 10 AS service_fee FROM orders WHERE created_at::date = CURRENT_DATE"
             )
             today_orders = cursor.fetchone()
             cursor.execute("SELECT COUNT(*) AS count FROM users")
@@ -1867,7 +2246,7 @@ def get_daily_stats() -> dict[str, Any]:
             total_shops = cursor.fetchone()
             cursor.execute("SELECT COUNT(*) AS count FROM orders")
             total_orders = cursor.fetchone()
-            cursor.execute("SELECT ROUND(COALESCE(SUM(total), 0) * 0.05) AS total FROM orders")
+            cursor.execute("SELECT COUNT(*) * 10 AS total FROM orders")
             total_service_fee = cursor.fetchone()
             return {
                 "today_orders": dict(today_orders) if today_orders else {"count": 0, "revenue": 0, "service_fee": 0},
@@ -1878,6 +2257,7 @@ def get_daily_stats() -> dict[str, Any]:
             }
 
 
+@_dual_read
 def get_vendor_daily_logs(shop_id: str) -> list[dict[str, Any]]:
     """Per-day earnings + order counts for one shop (admin vendor logs)."""
     with _DBContext(_connect()) as connection:
@@ -1885,7 +2265,7 @@ def get_vendor_daily_logs(shop_id: str) -> list[dict[str, Any]]:
             cursor.execute(
                 """
                 SELECT created_at::date::text AS created_at, COUNT(*) AS count,
-                       SUM(total) AS revenue, ROUND(SUM(total) * 0.05) AS admin_fee
+                       SUM(total) AS revenue, COUNT(*) * 10 AS admin_fee
                 FROM orders WHERE shop_id = %s
                 GROUP BY created_at::date ORDER BY created_at::date DESC
                 """,
@@ -1894,6 +2274,7 @@ def get_vendor_daily_logs(shop_id: str) -> list[dict[str, Any]]:
             return _rows_to_dicts(cursor.fetchall())
 
 
+@_dual_read
 def get_vendor_orders(shop_id: str) -> list[dict[str, Any]]:
     """All orders for one shop (admin vendor logs)."""
     with _DBContext(_connect()) as connection:
@@ -1905,6 +2286,7 @@ def get_vendor_orders(shop_id: str) -> list[dict[str, Any]]:
             return _rows_to_dicts(cursor.fetchall())
 
 
+@_dual_read
 def get_summary() -> dict[str, Any]:
     shops = list_shops()
     orders = list_orders()
@@ -2073,7 +2455,7 @@ def create_parent_order(
     Returns the parent order dict (with nested ``sub_orders``) or raises
     ``ValueError`` when no valid sub-order can be created. One token is shared
     across ALL sub-orders. The student pays ONE bill (sum of sub-order
-    subtotals); each shop's 5% commission is recorded per sub-order but never
+    subtotals); each shop's flat ₹10-per-order commission is recorded per sub-order but never
     charged to the student.
     """
     token = consume_token()
@@ -2083,6 +2465,7 @@ def create_parent_order(
 
     sub_orders: list[dict[str, Any]] = []
     grand_total = 0
+    pending_subs: list[tuple[dict[str, Any], list[tuple], int, int, str, str]] = []
     connection = _connect()
     try:
         with connection.cursor() as cur:
@@ -2125,10 +2508,39 @@ def create_parent_order(
                 if not order_item_rows:
                     continue
 
-                commission = round(subtotal * 0.05)
-                sub_order_id = f"{parent_id}-{len(sub_orders) + 1}"
+                commission = 10  # flat ₹10 per order (admin's cut)
                 shop_whatsapp = str(shop.get("whatsapp_number") or "").strip()
                 shop_phone = str(shop.get("phone") or "").strip()
+                grand_total += subtotal
+                pending_subs.append((dict(shop), order_item_rows, subtotal, commission, shop_phone, shop_whatsapp))
+
+            if not pending_subs:
+                raise ValueError("No valid shops or items in order")
+
+            # The parent row MUST exist before its sub-orders (FK constraint in
+            # PostgreSQL is checked immediately, not at commit).
+            cur.execute(
+                """INSERT INTO parent_orders (
+                       id, token, date_key, student_name, student_phone, student_email,
+                       student_id, total, payment_method, payment_status,
+                       delivery_location, status, created_at)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'Pending', %s, 'Pending', NOW())""",
+                (
+                    parent_id,
+                    token,
+                    _day_key(),
+                    student_name,
+                    student_phone,
+                    student_email,
+                    student_id,
+                    grand_total,
+                    payment_method,
+                    delivery_location,
+                ),
+            )
+
+            for idx, (shop, order_item_rows, subtotal, commission, shop_phone, shop_whatsapp) in enumerate(pending_subs, start=1):
+                sub_order_id = f"{parent_id}-{idx}"
 
                 cur.execute(
                     """INSERT INTO shop_sub_orders (
@@ -2157,7 +2569,6 @@ def create_parent_order(
                     )
 
                 item_labels = [f"{q}x {n}" for _, n, _, q, _ in order_item_rows]
-                grand_total += subtotal
 
                 sub_orders.append({
                     "id": sub_order_id,
@@ -2180,28 +2591,6 @@ def create_parent_order(
                     (subtotal, token, shop["id"]),
                 )
 
-            if not sub_orders:
-                raise ValueError("No valid shops or items in order")
-
-            cur.execute(
-                """INSERT INTO parent_orders (
-                       id, token, date_key, student_name, student_phone, student_email,
-                       student_id, total, payment_method, payment_status,
-                       delivery_location, status, created_at)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'Pending', %s, 'Pending', NOW())""",
-                (
-                    parent_id,
-                    token,
-                    _day_key(),
-                    student_name,
-                    student_phone,
-                    student_email,
-                    student_id,
-                    grand_total,
-                    payment_method,
-                    delivery_location,
-                ),
-            )
             connection.commit()
 
             cur.execute("SELECT * FROM parent_orders WHERE id = %s", (parent_id,))
@@ -2216,8 +2605,15 @@ def create_parent_order(
         _release(connection)
 
 
+# ─── Parent (multi-shop) orders ────────────────────────────────────
+
+
+@_dual_read
 def get_parent_order(parent_order_id: str, with_items: bool = True) -> dict[str, Any] | None:
-    """Parent order with its shop sub-orders and their items."""
+    """Parent order with its shop sub-orders and their items.
+
+    Batched: the old loop ran one ``order_items`` query per sub-order; we now
+    pull all items + parents in two queries total (1 + 2N → 3 round trips)."""
     connection = _connect()
     try:
         with connection.cursor() as cur:
@@ -2229,22 +2625,31 @@ def get_parent_order(parent_order_id: str, with_items: bool = True) -> dict[str,
                 "SELECT * FROM shop_sub_orders WHERE parent_order_id = %s ORDER BY id",
                 (parent_order_id,),
             )
-            sub_orders: list[dict[str, Any]] = []
-            for raw in cur.fetchall():
-                sub = dict(raw)
-                if with_items:
-                    cur.execute(
-                        "SELECT * FROM order_items WHERE sub_order_id = %s",
-                        (sub["id"],),
-                    )
-                    sub["items"] = _rows_to_dicts(cur.fetchall())
-                sub_orders.append(sub)
-            parent["sub_orders"] = sub_orders
+            subs = [dict(row) for row in cur.fetchall()]
+            if not subs:
+                parent["sub_orders"] = []
+                return parent
+            sub_ids = [s["id"] for s in subs]
+            if with_items:
+                cur.execute(
+                    "SELECT * FROM order_items WHERE sub_order_id = ANY(%s) ORDER BY id",
+                    (sub_ids,),
+                )
+                items: dict[str, list[dict[str, Any]]] = {}
+                for row in cur.fetchall():
+                    items.setdefault(row["sub_order_id"], []).append(dict(row))
+            for sub in subs:
+                sub["items"] = (items or {}).get(sub["id"], [])
+                sub["items_summary"] = ", ".join(
+                    f"{int(i['quantity'])}x {i['product_name']}" for i in sub["items"]
+                )
+            parent["sub_orders"] = subs
             return parent
     finally:
         _release(connection)
 
 
+@_dual_read
 def list_parent_orders(limit: int = 200, status: str | None = None) -> list[dict[str, Any]]:
     """List parent orders, newest first, optional status filter."""
     connection = _connect()
@@ -2262,8 +2667,12 @@ def list_parent_orders(limit: int = 200, status: str | None = None) -> list[dict
         _release(connection)
 
 
+@_dual_read
 def get_shop_sub_orders(shop_id: str, status: str | None = None) -> list[dict[str, Any]]:
-    """All sub-orders for a shop (shopkeeper portal). Only this shop's items."""
+    """All sub-orders for a shop (shopkeeper portal). Only this shop's items.
+
+    Batched: items + parent rows are pulled in two queries for ALL sub-orders
+    instead of two queries per sub-order (1 + 2N → 3 round trips)."""
     connection = _connect()
     try:
         with connection.cursor() as cur:
@@ -2277,22 +2686,62 @@ def get_shop_sub_orders(shop_id: str, status: str | None = None) -> list[dict[st
                     "SELECT * FROM shop_sub_orders WHERE shop_id = %s ORDER BY id",
                     (shop_id,),
                 )
-            sub_orders: list[dict[str, Any]] = []
+            subs = [dict(row) for row in cur.fetchall()]
+            if not subs:
+                return []
+            sub_ids = [s["id"] for s in subs]
+            parent_ids = list({s["parent_order_id"] for s in subs if s.get("parent_order_id")})
+            cur.execute(
+                "SELECT * FROM order_items WHERE sub_order_id = ANY(%s) ORDER BY id",
+                (sub_ids,),
+            )
+            items: dict[str, list[dict[str, Any]]] = {}
             for row in cur.fetchall():
-                sub = dict(row)
+                items.setdefault(row["sub_order_id"], []).append(dict(row))
+            parents: dict[str, dict[str, Any]] = {}
+            if parent_ids:
                 cur.execute(
-                    "SELECT * FROM order_items WHERE sub_order_id = %s",
-                    (sub["id"],),
+                    "SELECT id, student_name, student_phone, delivery_location, total, payment_method, created_at FROM parent_orders WHERE id = ANY(%s)",
+                    (parent_ids,),
                 )
-                sub["items"] = _rows_to_dicts(cur.fetchall())
-                cur.execute(
-                    "SELECT student_name, student_phone, delivery_location, total, payment_method, created_at FROM parent_orders WHERE id = %s",
-                    (sub["parent_order_id"],),
-                )
-                parent = cursor_row(cur)
-                sub["parent"] = parent or {}
-                sub_orders.append(sub)
-            return sub_orders
+                parents = {row["id"]: dict(row) for row in cur.fetchall()}
+            for s in subs:
+                s["items"] = items.get(s["id"], [])
+                s["parent"] = parents.get(s.get("parent_order_id", "")) or {}
+            return subs
+    finally:
+        _release(connection)
+
+
+@_dual_read
+def get_sub_order(sub_order_id: str) -> dict[str, Any] | None:
+    """Find one shop sub-order with its parent + shop context attached.
+
+    Used to enrich WhatsApp logs whose ``sub_order_id`` is a multi-shop
+    sub-order id (those don't live in the plain ``orders`` table). Returns the
+    sub-order dict plus ``parent`` (student/phone/location/total/payment) and
+    ``shop`` context, or ``None`` when it's not a sub-order id at all.
+    """
+    connection = _connect()
+    try:
+        with connection.cursor() as cur:
+            cur.execute("SELECT * FROM shop_sub_orders WHERE id = %s", (sub_order_id,))
+            sub = cursor_row(cur)
+            if not sub:
+                return None
+            cur.execute(
+                "SELECT student_name, student_phone, delivery_location, total, payment_method, created_at FROM parent_orders WHERE id = %s",
+                (sub["parent_order_id"],),
+            )
+            parent = cursor_row(cur)
+            sub["parent"] = parent or {}
+            cur.execute(
+                "SELECT id, name, phone, whatsapp_number FROM shops WHERE id = %s",
+                (sub["shop_id"],),
+            )
+            shop = cursor_row(cur)
+            sub["shop"] = shop or {}
+            return sub
     finally:
         _release(connection)
 
@@ -2329,6 +2778,48 @@ def update_sub_order_status(
         _release(connection)
 
 
+def update_parent_order_status(parent_order_id: str, status: str) -> dict[str, Any] | None:
+    """Update a parent (multi-shop) order's status (Accepted/Preparing/…/Cancelled)."""
+    connection = _connect()
+    try:
+        with connection.cursor() as cur:
+            cur.execute(
+                "UPDATE parent_orders SET status = %s WHERE id = %s RETURNING *",
+                (status, parent_order_id),
+            )
+            connection.commit()
+            return cursor_row(cur)
+    except Exception:
+        connection.rollback()
+        return None
+    finally:
+        _release(connection)
+
+
+def cancel_parent_order(parent_order_id: str) -> dict[str, Any] | None:
+    """Cancel a parent order and every sub-order that is still open."""
+    connection = _connect()
+    try:
+        with connection.cursor() as cur:
+            cur.execute(
+                "UPDATE shop_sub_orders SET status = 'Cancelled' "
+                "WHERE parent_order_id = %s AND status NOT IN ('Completed', 'Delivered', 'Cancelled')",
+                (parent_order_id,),
+            )
+            cur.execute(
+                "UPDATE parent_orders SET status = 'Cancelled' WHERE id = %s RETURNING *",
+                (parent_order_id,),
+            )
+            connection.commit()
+            return cursor_row(cur)
+    except Exception:
+        connection.rollback()
+        return None
+    finally:
+        _release(connection)
+
+
+@_dual_read
 def get_daily_token_count(date_key: str | None = None) -> int:
     """Number of parent orders today."""
     dk = date_key or _day_key()
@@ -2422,6 +2913,7 @@ def create_shop_announcement(shop_id: str, message: str) -> dict[str, Any] | Non
         _release(connection)
 
 
+@_dual_read
 def list_shop_announcements(shop_id: str | None = None, active_only: bool = True) -> list[dict[str, Any]]:
     """All active (or shop-filtered) announcements."""
     connection = _connect()
@@ -2499,6 +2991,7 @@ def create_complaint(
         _release(connection)
 
 
+@_dual_read
 def list_complaints(status: str | None = None) -> list[dict[str, Any]]:
     """All complaints (optional status filter)."""
     connection = _connect()
@@ -2569,6 +3062,7 @@ def create_refund(
         _release(connection)
 
 
+@_dual_read
 def list_refunds(status: str | None = None) -> list[dict[str, Any]]:
     """All refunds (optional status filter)."""
     connection = _connect()
@@ -2610,6 +3104,7 @@ def update_refund(
 #  SETTLEMENTS
 # ═══════════════════════════════════════════════════════════════════════
 
+@_dual_read
 def list_settlements(status: str | None = None) -> list[dict[str, Any]]:
     """All settlements (optional status filter)."""
     connection = _connect()
@@ -2639,11 +3134,12 @@ def run_daily_settlements() -> list[dict[str, Any]]:
             for shop in shop_rows:
                 sid = shop["shop_id"]
                 cur.execute(
-                    "SELECT COALESCE(SUM(subtotal), 0) AS gross FROM shop_sub_orders WHERE shop_id = %s AND status IN ('Delivered', 'Completed') AND created_at::date = %s::date",
+                    "SELECT COALESCE(SUM(subtotal), 0) AS gross, COUNT(*) AS cnt FROM shop_sub_orders WHERE shop_id = %s AND status IN ('Delivered', 'Completed') AND created_at::date = %s::date",
                     (sid, dk),
                 )
-                gross = int(cursor_row(cur)["gross"])
-                commission = round(gross * 0.05)
+                _row = cursor_row(cur)
+                gross = int(_row["gross"])
+                commission = int(_row["cnt"] or 0) * 10
                 settlement_id = f"set_{sid}_{dk}"
                 cur.execute(
                     """INSERT INTO settlements (
@@ -2699,6 +3195,7 @@ def create_menu_change_request(
         _release(connection)
 
 
+@_dual_read
 def list_menu_change_requests(status: str | None = None) -> list[dict[str, Any]]:
     """Menu change requests (optional status filter)."""
     connection = _connect()
@@ -2758,6 +3255,7 @@ def add_audit_log(
         _release(connection)
 
 
+@_dual_read
 def list_audit_logs(limit: int = 200) -> list[dict[str, Any]]:
     connection = _connect()
     try:
@@ -2768,12 +3266,74 @@ def list_audit_logs(limit: int = 200) -> list[dict[str, Any]]:
         _release(connection)
 
 
+@_dual_read
 def list_whatsapp_logs(limit: int = 100) -> list[dict[str, Any]]:
     connection = _connect()
     try:
         with connection.cursor() as cur:
             cur.execute("SELECT * FROM whatsapp_logs ORDER BY created_at DESC LIMIT %s", (limit,))
             return _rows_to_dicts(cur.fetchall())
+    finally:
+        _release(connection)
+
+
+def log_whatsapp(
+    sub_order_id: str = "",
+    phone: str = "",
+    message: str = "",
+    url: str = "",
+    status: str = "Pending",
+) -> dict[str, Any] | None:
+    """Persist one WhatsApp notification (link generated, ready to send).
+
+    Note: the Supabase ``whatsapp_logs`` table stores the order reference in
+    ``order_id`` (there is no ``sub_order_id``/``url`` column there), so the
+    ``url`` is dropped at rest and rebuilt by the API when serving it."""
+    connection = _connect()
+    try:
+        with connection.cursor() as cur:
+            cur.execute(
+                """INSERT INTO whatsapp_logs (order_id, phone, message, message_type, status)
+                   VALUES (%s, %s, %s, %s, %s) RETURNING *""",
+                (sub_order_id or "", phone or "", message or "", "shop_order", status),
+            )
+            row = _rows_to_dicts(cur.fetchall())[0]
+            connection.commit()  # without this the RETURNING row is rolled back
+            return row
+    finally:
+        _release(connection)
+
+
+def mark_whatsapp_sent(whatsapp_id: str) -> dict[str, Any] | None:
+    """Mark a WhatsApp notification as sent."""
+    connection = _connect()
+    try:
+        with connection.cursor() as cur:
+            cur.execute(
+                "UPDATE whatsapp_logs SET status = 'Sent' WHERE id = %s RETURNING *",
+                (whatsapp_id,),
+            )
+            row = _rows_to_dicts(cur.fetchall())[0]
+            connection.commit()  # without this the update is rolled back
+            return row
+    finally:
+        _release(connection)
+
+
+def update_whatsapp_message(whatsapp_id: str, message: str, url: str = "") -> dict[str, Any] | None:
+    """Refresh a pending WhatsApp notification (e.g. payment flipped to paid)."""
+    connection = _connect()
+    try:
+        with connection.cursor() as cur:
+            cur.execute(
+                "UPDATE whatsapp_logs SET message = %s WHERE id = %s RETURNING *",
+                (message or "", whatsapp_id),
+            )
+            row = cur.fetchall()
+            result = _rows_to_dicts(row)[0] if row else None
+            if result:
+                connection.commit()  # freshness only lands when committed
+            return result
     finally:
         _release(connection)
 
@@ -2794,11 +3354,14 @@ def log_sms(
                    VALUES (%s, %s, %s, %s, %s) RETURNING *""",
                 (sub_order_id, phone or "", message or "", direction, status),
             )
-            return _rows_to_dicts(cur.fetchall())[0]
+            row = _rows_to_dicts(cur.fetchall())[0]
+            connection.commit()  # without this the RETURNING row is rolled back
+            return row
     finally:
         _release(connection)
 
 
+@_dual_read
 def list_sms_logs(limit: int = 100) -> list[dict[str, Any]]:
     connection = _connect()
     try:

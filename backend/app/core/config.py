@@ -56,9 +56,34 @@ class Settings(BaseSettings):
     SUPABASE_DB_USER: str = "postgres"
     SUPABASE_DB_PASSWORD: str = ""
     SUPABASE_DB_NAME: str = "postgres"
+    # Optional SECOND Supabase Postgres database (dual-read). When set, read-
+    # only lookups fall back to this database whenever the primary returns
+    # nothing, so the app can read historical data that lives in another
+    # Supabase project while all writes/migrations stay on the primary.
+    SUPABASE_SECONDARY_DATABASE_URL: str = ""
+    SUPABASE_SECONDARY_DB_HOST: str = ""
+    SUPABASE_SECONDARY_DB_PORT: int = 5432
+    SUPABASE_SECONDARY_DB_USER: str = "postgres"
+    SUPABASE_SECONDARY_DB_PASSWORD: str = ""
+    SUPABASE_SECONDARY_DB_NAME: str = "postgres"
     MONGODB_URL: str = "mongodb://localhost:27017"
     DATABASE_NAME: str = "detomsite"
     SEED_DEMO_DATA: bool = False
+
+    # SMS-forwarder agent auth. The Android app posts bank credit SMS to
+    # ``/sms/incoming``; it must send ``X-Agent-Key: <SMS_FORWARD_KEY>`` so a
+    # stranger can't feed fake "credits" and confirm orders they didn't pay.
+    SMS_FORWARD_KEY: str = ""
+
+    # WhatsApp automatic delivery. When a provider is configured, shopkeeper
+    # WhatsApp messages (e.g. the paid-verified notification) are SENT
+    # automatically instead of just queued as a Pending wa.me link for the
+    # admin to tap. Supported providers: ``wassenger``, ``meta``, ``webhook``.
+    WA_PROVIDER: str = ""
+    WA_API_TOKEN: str = ""
+    WA_API_URL: str = ""
+    WA_META_TOKEN: str = ""
+    WA_META_PHONE_ID: str = ""
     
     # Redis
     REDIS_URL: str = "redis://localhost:6379"

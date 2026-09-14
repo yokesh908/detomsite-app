@@ -1,7 +1,9 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import api from '../services/api'
 import { LocalParentOrder } from '../types/localApi'
+import { usePolling } from '../hooks/usePolling'
+import { same } from '../utils/same'
 
 const statusStyles: Record<string, { bg: string; color: string; border: string }> = {
   Completed: { bg: '#ECFDF5', color: '#065F46', border: '#A7F3D0' },
@@ -25,16 +27,23 @@ export function OrderResultPage() {
   const { orderId = '' } = useParams()
   const [order, setOrder] = useState<LocalParentOrder | null>(null)
   const [loading, setLoading] = useState(true)
+  const [paymentPending, setPaymentPending] = useState(false)
 
   useEffect(() => {
-    const load = () => {
-      api.get<LocalParentOrder>(`/local/orders/parent/${orderId}`)
-        .then(r => setOrder(r.data))
-        .catch(() => setOrder(null))
-        .finally(() => setLoading(false))
-    }
-    load(); const t = window.setInterval(load, 5000); return () => window.clearInterval(t)
+    const flag = sessionStorage.getItem('payment_pending')
+    if (flag) { sessionStorage.removeItem('payment_pending'); setPaymentPending(true) }
+  }, [])
+
+  const load = useCallback(() => {
+    api.get<LocalParentOrder>(`/local/orders/parent/${orderId}`)
+      .then(r => setOrder(cur => same(cur, r.data) ? cur : r.data))
+      .catch(() => setOrder(null))
+      .finally(() => setLoading(false))
   }, [orderId])
+
+  // Poll every 5s while this tab is visible so the student sees the order get
+  // auto-accepted; background tabs pause and refresh instantly on switch-back.
+  usePolling(load, 5000, [orderId])
 
   const parentStyle = order ? statusStyles[order.status] || statusStyles.Pending : statusStyles.Pending
 
@@ -45,6 +54,12 @@ export function OrderResultPage() {
           <div className="flex items-center justify-center py-12 text-gray-400 font-medium">Loading...</div>
         ) : order ? (
           <div className="rounded-btn bg-white p-6 shadow-gold-lg text-center">
+            {paymentPending && (
+              <div className="mb-5 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-left text-sm text-amber-700">
+                <p className="font-bold">⚠️ Payment proof received but the record didn't save.</p>
+                <p className="mt-1">Your order <b>was placed</b> — contact support with your token <b>#{order.token}</b> to submit your UTR and screenshot.</p>
+              </div>
+            )}
             <p className="text-xs font-bold uppercase tracking-wider text-gray-500">Order Result</p>
             <h1 className="mt-3 text-5xl font-black text-primary-dark">Token {order.token}</h1>
             <p className="mt-2 text-lg font-semibold text-gray-600">{order.student_name}</p>

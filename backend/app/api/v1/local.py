@@ -1,16 +1,20 @@
 """
 Local runnable API routes backed by SQLite / Supabase.
 """
-from fastapi import APIRouter, HTTPException, Depends, Header, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, Depends, Header, UploadFile, File, Form, Request
 from pydantic import BaseModel, EmailStr, Field
 from datetime import datetime
 import asyncio
 import os
 import re
+import secrets
 import shutil
 
 from app.core.config import settings
 from app.core import local_mongo_db
+from app.core import ttl_cache
+from app.core import shared_cache
+from app.core.rate_limit import allow as rate_allow, reset as rate_reset, client_ip as rate_ip
 from app.core.uploads import ensure_uploads_dir
 from app.core.store import store as db
 from app.core.user_store import persist_user_profile
@@ -41,6 +45,42 @@ async def _db(fn, *args, **kwargs):
     feel in production. Running the call in a thread keeps the loop free.
     """
     return await asyncio.to_thread(fn, *args, **kwargs)
+
+
+def _push_admin(title: str, message: str, tag: str = "admin-alert") -> None:
+    """Fire a web push to the admin's phone (fire-and-forget, never raises).
+
+    Used at every spot that creates a `target_role="admin"` notification so
+    the Admin Centre rings the admin's phone instead of only filling the bell.
+    """
+    try:
+        push_service.notify_admin_async(title, message, {"url": "/admin-dashboard", "tag": tag})
+    except Exception as e:
+        logger.warning(f"Admin push '{title}' failed: {e}")
+
+
+async def _cached_read(ttl: float, key: str, loader, *args, **kwargs):
+    """Serve ``loader()`` from a short TTL cache when possible. ``key`` must
+    vary per query params so filtered results never cross wires. The global
+    cache is cleared by the app-level middleware after every successful write.
+
+    Two layers: the in-process cache (fast when a request reuses the same
+    serverless instance) and the optional shared Redis cache (Vercel KV) so
+    every instance serves warm data at single-digit-ms latency. Falls back to
+    recompute whenever the shared store is unavailable."""
+    cache_key = f"{key}:{args}:{sorted(kwargs.items())}"
+    hit = ttl_cache.get(cache_key)
+    if hit is None and shared_cache.enabled():
+        hit = await asyncio.to_thread(shared_cache.get, cache_key)
+        if hit is not None:
+            ttl_cache.set(cache_key, hit, ttl)
+    if hit is not None:
+        return hit
+    value = await _db(loader, *args, **kwargs)
+    ttl_cache.set(cache_key, value, ttl)
+    if shared_cache.enabled():
+        await asyncio.to_thread(shared_cache.set_pair, cache_key, value, ttl)
+    return value
 
 
 _last_auto_confirm_run = 0.0
@@ -140,6 +180,7 @@ class LocalShopUpdate(BaseModel):
     shopkeeper_email: str | None = None
     shopkeeper_name: str | None = None
     phone: str | None = None
+    whatsapp_number: str | None = None
     upi_id: str | None = None
 
 
@@ -325,6 +366,16 @@ class LocalAuthLogin(BaseModel):
     password: str
 
 
+class LocalPhoneOnboarding(BaseModel):
+    """Students joining from the student portal phone gate — name + mobile.
+    A real account (and its JWT) is created behind the scenes so the rest of
+    the order/payment flow works exactly like a password-login account."""
+    name: str = Field(..., min_length=1, max_length=100)
+    phone: str = Field(..., min_length=7, max_length=20)
+    campus: str = Field(default="", max_length=100)
+    default_delivery_location: str = Field(default="", max_length=300)
+
+
 class LocalAuthUser(BaseModel):
     id: int
     username: str
@@ -362,14 +413,46 @@ async def get_current_local_user(authorization: Optional[str] = Header(None)) ->
     return user
 
 
+async def _require_admin(authorization: Optional[str] = Header(None)) -> dict:
+    """Require a valid token whose role is ``admin`` (mirrors local_admin.verify_admin)."""
+    if not authorization:
+        raise HTTPException(status_code=401, detail="Authorization header required")
+    scheme, _, token = authorization.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        raise HTTPException(status_code=401, detail="Invalid authorization scheme")
+    payload = decode_token(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    if payload.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return payload
+
+
+def _same_student(user: dict, order: dict) -> bool:
+    """True when the authenticated user owns the order (name or phone match)."""
+    user_name = str(user.get("name") or "").strip().lower()
+    order_name = str(order.get("student_name") or "").strip().lower()
+    user_phone = "".join(ch for ch in str(user.get("phone") or "") if ch.isdigit())
+    order_phone = "".join(ch for ch in str(order.get("student_phone") or "") if ch.isdigit())
+    return (bool(user_name) and user_name == order_name) or (
+        bool(user_phone) and bool(order_phone) and user_phone[-10:] == order_phone[-10:]
+    )
+
+
 # ─── Auth endpoints ───
 
 
 @router.post("/auth/register", status_code=201)
-async def local_register(data: LocalAuthRegister):
+async def local_register(data: LocalAuthRegister, request: Request):
     """Register a new user in the local database."""
     if _use_mongo():
         raise HTTPException(status_code=501, detail="Use the /auth/register endpoint for Mongo mode")
+    # A whole campus shares one public IP behind the college NAT, so a tight
+    # per-IP cap would lock out every student after the first handful of
+    # sign-ups. 40/hour still throttles mass bot registration while letting a
+    # real onboarding rush through.
+    if not rate_allow("register", rate_ip(request), max_attempts=40, window_sec=3600):
+        raise HTTPException(status_code=429, detail="Too many sign-up attempts from this network — try again later.")
 
     password_hash_value = await asyncio.to_thread(hash_password, data.password)
     user, conflict = await _db(
@@ -408,10 +491,14 @@ async def local_register(data: LocalAuthRegister):
 
 
 @router.post("/auth/login")
-async def local_login(data: LocalAuthLogin):
+async def local_login(data: LocalAuthLogin, request: Request):
     """Authenticate user and return JWT tokens."""
     if _use_mongo():
         raise HTTPException(status_code=501, detail="Use the /auth/login endpoint for Mongo mode")
+
+    ip = rate_ip(request)
+    if not rate_allow("login", f"{data.username}:{ip}", max_attempts=40, window_sec=300):
+        raise HTTPException(status_code=429, detail="Too many sign-in attempts — please wait a few minutes and try again.")
 
     user = await _db(db.get_user_by_username, data.username)
     if not user:
@@ -419,6 +506,8 @@ async def local_login(data: LocalAuthLogin):
 
     if not await asyncio.to_thread(verify_password, data.password, user["password_hash"]):
         raise HTTPException(status_code=401, detail="Incorrect password. Please try again.")
+
+    rate_reset("login", f"{data.username}:{ip}")
 
     # Generate JWT tokens
     token_data = {
@@ -444,6 +533,74 @@ async def local_login(data: LocalAuthLogin):
     )
 
 
+@router.post("/auth/phone")
+async def local_phone_onboarding(data: LocalPhoneOnboarding, request: Request):
+    """Phone-first student onboarding (the student portal RoleGate).
+
+    Creates or re-uses a ``student`` account keyed by phone and returns a real
+    JWT, so payments/order APIs that need an authenticated user keep working —
+    the student never has to remember a password.
+    """
+    if _use_mongo():
+        raise HTTPException(status_code=501, detail="Use the /auth/register endpoint for Mongo mode")
+
+    ip = rate_ip(request)
+    if not rate_allow("phone_onboard", f"{data.phone}:{ip}", max_attempts=30, window_sec=300):
+        raise HTTPException(status_code=429, detail="Too many attempts from this device — please wait a few minutes.")
+
+    phone = _normalize_phone(data.phone.strip())
+    digits = "".join(ch for ch in phone if ch.isdigit())
+    if len(digits) < 10:
+        raise HTTPException(status_code=400, detail="Please enter a valid 10-digit mobile number")
+
+    username = f"stu_{digits[-10:]}"
+    name = (data.name or "").strip() or "Student"
+
+    user = await _db(db.get_user_by_username, username)
+    if user:
+        # Returning phone student — just re-issue a fresh token for them.
+        pass
+    else:
+        pick_name = name or phone
+        random_pw = secrets.token_urlsafe(16)
+        password_hash_value = await asyncio.to_thread(hash_password, random_pw)
+        new_user, conflict = await _db(
+            db.register_user,
+            username=username,
+            password_hash=password_hash_value,
+            name=pick_name,
+            role="student",
+            email="",
+            phone=phone,
+        )
+        if conflict or not new_user:
+            raise HTTPException(status_code=409, detail="Could not create your student account — please try again.")
+        user = new_user
+        logger.info(f"Phone-onboarding created student account {username}")
+
+    token_data = {
+        "sub": str(user["id"]),
+        "username": user["username"],
+        "name": user["name"],
+        "role": "student",
+    }
+    access_token = create_access_token(token_data)
+    refresh_token = create_refresh_token(token_data)
+
+    return LocalAuthResponse(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        token_type="bearer",
+        user=LocalAuthUser(
+            id=user["id"],
+            username=user["username"],
+            name=user["name"],
+            role="student",
+            created_at=user["created_at"],
+        ),
+    )
+
+
 @router.get("/auth/me")
 async def local_me(current_user: dict = Depends(get_current_local_user)):
     """Get the current authenticated user's profile."""
@@ -451,14 +608,14 @@ async def local_me(current_user: dict = Depends(get_current_local_user)):
 
 
 @router.get("/summary")
-async def summary():
+async def summary(_user: dict = Depends(get_current_local_user)):
     if _use_mongo():
         return await local_mongo_db.get_summary()
-    return await _db(db.get_summary)
+    return await _cached_read(15, "summary", db.get_summary)
 
 
 @router.post("/sessions")
-async def create_session(data: LocalSessionCreate):
+async def create_session(data: LocalSessionCreate, _user: dict = Depends(get_current_local_user)):
     if _use_mongo():
         return await local_mongo_db.save_session(data.email, data.name, data.role)
     return await _db(persist_user_profile, data.email, data.name, data.role)
@@ -468,18 +625,18 @@ async def create_session(data: LocalSessionCreate):
 async def shops(public_only: bool = False):
     if _use_mongo():
         return await local_mongo_db.list_shops()
-    return await _db(db.list_shops, public_only=public_only)
+    return await _cached_read(10, "shops", db.list_shops, public_only=public_only)
 
 
 @router.post("/shops")
-async def create_shop(data: LocalShopCreate):
+async def create_shop(data: LocalShopCreate, _admin: dict = Depends(_require_admin)):
     if _use_mongo():
         raise HTTPException(status_code=501, detail="Shop registration is not available for Mongo mode")
     return await _db(db.create_shop, data.model_dump())
 
 
 @router.patch("/shops/{shop_id}")
-async def patch_shop(shop_id: str, data: LocalShopUpdate):
+async def patch_shop(shop_id: str, data: LocalShopUpdate, _admin: dict = Depends(_require_admin)):
     if _use_mongo():
         shop = await local_mongo_db.update_shop(shop_id, data.model_dump(exclude_unset=True))
     else:
@@ -501,18 +658,20 @@ async def shop(shop_id: str):
 async def products(shop_id: str | None = None):
     if _use_mongo():
         return await local_mongo_db.list_products(shop_id)
-    return await _db(db.list_products, shop_id)
+    if shop_id:
+        return await _cached_read(10, "products", db.list_products, shop_id)
+    return await _cached_read(10, "products", db.list_products)
 
 
 @router.post("/products")
-async def add_product(data: LocalProductCreate):
+async def add_product(data: LocalProductCreate, _admin: dict = Depends(_require_admin)):
     if _use_mongo():
         return await local_mongo_db.create_product(data.model_dump())
     return await _db(db.create_product, data.model_dump())
 
 
 @router.patch("/products/{product_id}")
-async def patch_product(product_id: str, data: LocalProductUpdate):
+async def patch_product(product_id: str, data: LocalProductUpdate, _admin: dict = Depends(_require_admin)):
     if _use_mongo():
         product = await local_mongo_db.update_product(product_id, data.model_dump(exclude_unset=True))
     else:
@@ -523,22 +682,56 @@ async def patch_product(product_id: str, data: LocalProductUpdate):
 
 
 @router.get("/orders")
-async def orders():
+async def orders(current_user: dict = Depends(get_current_local_user)):
+    """List orders. Students only ever see their own orders (matched by name or
+    phone); admins may list everything. A valid token is always required — the
+    same-identity rule the student app already applies client-side is now also
+    enforced server-side so an account holder can't enumerate other students'
+    names, phones and delivery locations."""
     if _use_mongo():
-        return await local_mongo_db.list_orders()
-    return await _db(db.list_orders)
+        all_orders = await local_mongo_db.list_orders()
+    else:
+        all_orders = await _db(db.list_orders)
+    if current_user.get("role") == "admin":
+        return all_orders
+    return [o for o in all_orders if _same_student(current_user, o)]
+
+
+@router.get("/orders/parent")
+async def parent_orders_list(status: str | None = None, current_user: dict = Depends(get_current_local_user)):
+    """List parent (multi-shop) orders. Logged-in students only ever receive
+    THEIR OWN parent orders (name or phone match); admins may list everything.
+    Declared before ``/orders/{order_id}`` so it can't be shadowed by the
+    dynamic route (GET /orders/parent previously fell through to the dynamic
+    segment with ``order_id="parent"`` and 404'd)."""
+    all_orders = await _db(db.list_parent_orders, status=status)
+    if current_user.get("role") == "admin":
+        return all_orders
+    return [o for o in all_orders if _same_student(current_user, o)]
+
+
+@router.get("/orders/parent/{parent_order_id}")
+async def parent_order_detail(parent_order_id: str, current_user: dict = Depends(get_current_local_user)):
+    result = await _db(db.get_parent_order, parent_order_id)
+    if not result:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if current_user.get("role") != "admin" and not _same_student(current_user, result):
+        raise HTTPException(status_code=403, detail="You can only view your own orders")
+    return result
 
 
 @router.get("/orders/{order_id}")
-async def order(order_id: str):
+async def order(order_id: str, current_user: dict = Depends(get_current_local_user)):
     result = await local_mongo_db.get_order(order_id) if _use_mongo() else await _db(db.get_order, order_id)
     if not result:
         raise HTTPException(status_code=404, detail="Order not found")
+    if current_user.get("role") != "admin" and not _same_student(current_user, result):
+        raise HTTPException(status_code=403, detail="You can only view your own orders")
     return result
 
 
 @router.post("/orders")
-async def add_order(data: LocalOrderCreate):
+async def add_order(data: LocalOrderCreate, current_user: dict = Depends(get_current_local_user)):
     payload = data.model_dump()
     # The student's mobile is always stored as E.164 (+91 + 10 digits) so the
     # shopkeeper/order views never see a bare 10-digit number.
@@ -595,18 +788,22 @@ async def add_order(data: LocalOrderCreate):
         except Exception as e:
             logger.warning(f"Could not schedule order push notification: {e}")
 
-    # SMS the shopkeeper (and a copy to the admin) so the order can be
-    # CONFIRMED by replying "YES <token>" — see sms_service + /sms/incoming.
+    # SMS the shopkeeper (and a copy to the admin) + queue the shopkeeper's
+    # WhatsApp. This MUST be awaited, not fired-and-forgotten: on the serverless
+    # platform the request's background tasks are killed the moment the response
+    # returns, so a create_task here would silently drop the order's WhatsApp
+    # notification (which the phone bot then never receives). Awaiting keeps
+    # the ordering latency at ~SMS-log cost and guarantees the notification.
     try:
-        asyncio.get_running_loop().create_task(_notify_order_via_sms(order))
+        await _notify_order_via_sms(order)
     except Exception as e:
-        logger.warning(f"Could not schedule order SMS: {e}")
+        logger.warning(f"Could not send order notifications: {e}")
 
     return order
 
 
 @router.patch("/orders/{order_id}/status")
-async def patch_order_status(order_id: str, data: LocalOrderStatusUpdate):
+async def patch_order_status(order_id: str, data: LocalOrderStatusUpdate, _admin: dict = Depends(_require_admin)):
     if _use_mongo():
         order = await local_mongo_db.update_order_status(order_id, data.status)
     else:
@@ -616,16 +813,23 @@ async def patch_order_status(order_id: str, data: LocalOrderStatusUpdate):
     return order
 
 
+@router.patch("/orders/{order_id}/cancel")
 @router.post("/orders/{order_id}/cancel")
 async def cancel_own_order(order_id: str, current_user: dict = Depends(get_current_local_user)):
     """Let a student cancel their own order within its delivery window.
 
-    Orders placed inside a delivery window (morning → 12:30 PM, afternoon →
-    6:00 PM) are auto-accepted; the student can cancel them until the window
-    closes. Once the window closes or the order is completed, cancellation
-    is locked.
+    Accepts both POST (native app) and PATCH (student portal) so old and new
+    clients both work. Orders placed inside a delivery window (morning →
+    12:30 PM, afternoon → 6:00 PM) are auto-accepted; the student can cancel
+    them until the window closes. Once the window closes or the order is
+    completed, cancellation is locked.
     """
     order = await _db(db.get_order, order_id)
+    is_parent = False
+    if not order:
+        # Multi-shop parent order — cancel every still-open sub-order + parent.
+        order = await _db(db.get_parent_order, order_id)
+        is_parent = bool(order)
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
 
@@ -646,7 +850,9 @@ async def cancel_own_order(order_id: str, current_user: dict = Depends(get_curre
     # afternoon → 6:00 PM). Orders placed inside a window are auto-accepted;
     # the student can still cancel them until that window closes. Orders
     # outside the windows (after 6:00 PM) and terminal orders are locked.
-    if order["status"] not in CANCELLABLE_STATUSES:
+    # "Pending" (fresh UTR/UPI order before payment is verified) is cancellable
+    # too — most placed orders are in this state, not just Accepted.
+    if order["status"] not in CANCELLABLE_STATUSES and order["status"] != "Pending":
         raise HTTPException(
             status_code=400,
             detail="This order can no longer be cancelled.",
@@ -665,6 +871,8 @@ async def cancel_own_order(order_id: str, current_user: dict = Depends(get_curre
 
     if _use_mongo():
         updated = await local_mongo_db.update_order_status(order_id, "Cancelled")
+    elif is_parent:
+        updated = await _db(db.cancel_parent_order, order_id)
     else:
         updated = await _db(db.update_order_status, order_id, "Cancelled")
 
@@ -692,11 +900,16 @@ async def _notify_order_via_sms(order: dict) -> None:
     The message ends with "REPLY: YES <token> = CONFIRM | NO <token> = REJECT".
     A real gateway replaces the ``log_sms`` calls in ``send_sms_async``; the
     rest of the flow (webhook → Confirmed) is gateway-independent.
+
+    WhatsApp for UPI orders is NOT fired here — it fires only after the
+    payment amount is verified (see ``_confirm_order_via_utr``). COD orders
+    have nothing to verify, so their WhatsApp notification goes out now.
     """
     try:
         if not order or not order.get("id"):
             return
         message = sms_service.compose_order_sms(order)
+        shop = None
         if not _use_mongo():
             shop = await _db(db.get_shop, order["shop_id"])
             shop_phone = str((shop or {}).get("phone") or "").strip()
@@ -730,8 +943,109 @@ async def _notify_order_via_sms(order: dict) -> None:
                     status="Sent",
                     direction="out",
                 )
+        # WhatsApp the shopkeeper for EVERY new order. UPI is labelled
+        # "awaiting payment" here (it flips to "paid ✓" via the bank-SMS /
+        # UTR / screenshot verification paths — which dedupe against this row).
+        if shop:
+            whatsapp_phone = str((shop or {}).get("whatsapp_number") or "").strip() or str((shop or {}).get("phone") or "").strip()
+            if whatsapp_phone:
+                await _notify_shop_via_whatsapp(order, shop, whatsapp_phone, paid=False)
     except Exception as e:
         logger.warning(f"SMS notify error for order {order.get('id')}: {e}")
+
+
+async def _whatsapp_link_for_order(order: dict, shop: dict, paid: bool | None = None) -> str:
+    """Build the free ``wa.me`` deep-link that sends the order message from the
+    admin's number to the shop's WhatsApp. No gateway, no cost — the admin taps
+    it and WhatsApp opens with the order pre-filled."""
+    from urllib.parse import quote
+    from app.services.sms_service import compose_order_wa
+
+    number = str(shop.get("whatsapp_number") or "").strip() or str(shop.get("phone") or "").strip()
+    if not number:
+        return ""
+    digits = "".join(ch for ch in number if ch.isdigit())
+    if len(digits) == 10:
+        digits = "91" + digits
+    text = compose_order_wa(order, paid=paid)
+    return f"https://wa.me/{digits}?text={quote(text)}"
+
+
+async def _notify_shop_via_whatsapp(order: dict, shop: dict, phone: str, paid: bool | None = None) -> None:
+    """Notify the shopkeeper of an order on WhatsApp.
+
+    EVERY order is notified at placement (UPI labelled "awaiting payment"). The
+    payment-verification paths re-call this with ``paid=True``, which refreshes
+    that same row to "paid ✓" — the shopkeeper sees one clean message and the
+    money status is never stale.
+
+    Delivery: when a WhatsApp provider is configured (``WA_PROVIDER``), the
+    message is sent **automatically** right away — UPI immediately after the
+    payment is verified, COD at placement — and the row flips to ``Sent``.
+    With no provider it stays a ``Pending`` wa.me link for the admin to tap
+    from their own number (zero-cost fallback). Either way the send path is
+    best-effort and never raises.
+    """
+    try:
+        from app.services.sms_service import compose_order_wa
+        from app.services import whatsapp_service
+
+        message = compose_order_wa(order, paid=paid)
+        url = await _whatsapp_link_for_order(order, shop, paid=paid)
+        if not url:
+            return
+
+        # UPI → auto-send once the payment is proven. COD → nothing to verify,
+        # so auto-send at placement.
+        auto = (paid is True) or str(order.get("payment_method") or order.get("pay_method") or "").upper() == "COD"
+        row_id = None
+
+        # Dedupe: if a Pending notification already exists for this order,
+        # refresh its message (paid → "paid ✓") instead of stacking duplicates.
+        if _use_mongo():
+            existing = await local_mongo_db.list_whatsapp_logs(limit=200)
+        else:
+            existing = await _db(db.list_whatsapp_logs, 200)
+        for row in existing or []:
+            ref = str(row.get("sub_order_id") or row.get("order_id") or "")
+            if ref == str(order["id"]) and str(row.get("status") or "") == "Pending":
+                row_id = row.get("id")
+                if paid is True and not _use_mongo():
+                    await _db(db.update_whatsapp_message, row["id"], message, url)
+                break
+
+        if row_id is None:
+            if _use_mongo():
+                created = await local_mongo_db.log_whatsapp(
+                    sub_order_id=order["id"],
+                    phone=phone,
+                    message=message,
+                    url=url,
+                    status="Pending",
+                )
+            else:
+                created = await _db(
+                    db.log_whatsapp,
+                    sub_order_id=order["id"],
+                    phone=phone,
+                    message=message,
+                    url=url,
+                    status="Pending",
+                )
+            row_id = (created or {}).get("id") or row_id
+
+        # Automatic delivery when a gateway is configured.
+        if auto and row_id and whatsapp_service.provider_configured():
+            ok = await asyncio.to_thread(
+                whatsapp_service.send_whatsapp, phone, message, None, order["id"]
+            )
+            if ok:
+                if _use_mongo():
+                    await local_mongo_db.mark_whatsapp_sent(row_id)
+                else:
+                    await _db(db.mark_whatsapp_sent, row_id)
+    except Exception as e:
+        logger.warning(f"WhatsApp notify error for order {order.get('id')}: {e}")
 
 
 def _sms_log_fn(sub_order_id: str, phone: str, message: str, status: str) -> dict | None:
@@ -793,6 +1107,23 @@ def _extract_utr(text: str) -> str:
         if m:
             return m.group(1).upper()
     return ""
+
+
+def _extract_amount(text: str) -> float | None:
+    """Parse the payment amount out of a bank credit SMS.
+
+    Returns the amount in rupees (e.g. 80.0) or ``None`` when no recognisable
+    amount is found.
+    """
+    if not text:
+        return None
+    import re as _re
+    for m in _re.finditer(r'(?:Rs\.?|INR|₹)\s*([\d,]+(?:\.\d{1,2})?)', text, _re.IGNORECASE):
+        try:
+            return float(m.group(1).replace(',', ''))
+        except ValueError:
+            continue
+    return None
 
 
 async def _get_payment_by_utr(utr: str):
@@ -877,8 +1208,13 @@ async def _confirm_order_via_utr(utr: str, phone: str = "", raw_text: str = "", 
                 )
             except Exception as e:
                 logger.warning(f"Admin UTR-match notification error: {e}")
+            _push_admin(
+                "Order confirmed via UTR match",
+                f"Token #{order.get('token')} — the bank SMS UTR matched the student's UTR.",
+                tag="order-confirm",
+            )
             if raw_text:
-                await _log_sms_inbound(order["id"], phone, raw_text, "UTR Matched")
+                await _log_sms_inbound(order["id"], phone, f"UTR:{utr}", "UTR Matched")
             student_phone = str(order.get("student_phone") or "").strip()
             if student_phone:
                 await sms_service.send_sms_async(
@@ -887,6 +1223,15 @@ async def _confirm_order_via_utr(utr: str, phone: str = "", raw_text: str = "", 
                     _sms_log_fn,
                     sub_order_id=order["id"],
                 )
+        # SMS amount verified → auto-fire the shopkeeper's WhatsApp notification
+        # (link generated from the admin's number, ready in Admin → WhatsApp).
+        try:
+            shop = await (local_mongo_db.get_shop(order["shop_id"]) if _use_mongo() else _db(db.get_shop, order["shop_id"]))
+            wa_phone = str((shop or {}).get("whatsapp_number") or "").strip() or str((shop or {}).get("phone") or "").strip()
+            if shop and wa_phone:
+                await _notify_shop_via_whatsapp(order, shop, wa_phone, paid=True)
+        except Exception as e:
+            logger.warning(f"UTR confirmed — WhatsApp notify error for {order.get('id')}: {e}")
         return updated or order
     except Exception as e:
         logger.warning(f"UTR auto-confirm error for {utr}: {e}")
@@ -899,7 +1244,7 @@ class LocalPaymentUtr(BaseModel):
 
 
 @router.post("/payments/utr")
-async def submit_payment_utr(data: LocalPaymentUtr):
+async def submit_payment_utr(data: LocalPaymentUtr, current_user: dict = Depends(get_current_local_user)):
     """The student pastes the UPI transaction UTR after paying.
 
     It is stored against the order's payment record. When the shopkeeper's
@@ -910,6 +1255,8 @@ async def submit_payment_utr(data: LocalPaymentUtr):
     order = await local_mongo_db.get_order(data.order_id) if _use_mongo() else await _db(db.get_order, data.order_id)
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
+    if current_user.get("role") != "admin" and not _same_student(current_user, order):
+        raise HTTPException(status_code=403, detail="You can only confirm payment for your own orders")
 
     utr = (data.utr_number or "").strip().upper()
     if _use_mongo():
@@ -931,7 +1278,7 @@ async def submit_payment_utr(data: LocalPaymentUtr):
 
 
 @router.post("/sms/incoming")
-async def sms_incoming(data: LocalIncomingSms):
+async def sms_incoming(data: LocalIncomingSms, x_agent_key: Optional[str] = Header(None)):
     """Receive an inbound SMS reply and act on it.
 
     Two flows are supported:
@@ -949,18 +1296,104 @@ async def sms_incoming(data: LocalIncomingSms):
     if not text:
         raise HTTPException(status_code=400, detail="No SMS text provided")
 
+    # Agent auth: when a forward key is configured, only the Android agent
+    # (which holds the key) may submit bank SMS. With no key configured (dev /
+    # demo), the endpoint stays open so flows can be tested manually.
+    if settings.SMS_FORWARD_KEY and (x_agent_key or "") != settings.SMS_FORWARD_KEY:
+        raise HTTPException(status_code=401, detail="Invalid agent key")
+
     report = {"received": True, "phone": phone, "text": text, "order": None}
 
     # Flow 1 — the bank's credit SMS: extract the UTR and auto-confirm when it
     # matches the student's UTR on a pending payment.
     utr = _extract_utr(text)
     if utr:
-        await _log_sms_inbound("", phone, text, "UTR Received")
+        await _log_sms_inbound("", phone, f"UTR:{utr}", "UTR Received")
         matched = await _confirm_order_via_utr(utr, phone=phone, raw_text=text, bank_sms_arrived=True)
         if matched:
             report["order"] = matched
             report["matched"] = {"utr": utr}
             return report
+
+    # Flow 1b — ZERO-INPUT auto-confirm: the bank SMS carries an amount
+    # (credited to the shop's account) plus a UTR. No student typed anything.
+    # Find the shop whose phone received this SMS, match the amount to a
+    # pending UPI order at that shop, store the UTR on the payment record,
+    # and confirm the order fully automatically.
+    amount = _extract_amount(text)
+    if utr and amount:
+        try:
+            shop = None
+            if _use_mongo():
+                # Mongo doesn't support phone lookup; skip gracefully.
+                pass
+            else:
+                shop = await _db(db.get_shop_by_phone, phone)
+            if shop:
+                orders = await _db(db.list_orders_by_shop, shop["id"])
+                pending = [o for o in orders
+                           if o.get("status") == "Pending Payment"
+                           and abs((o.get("total") or 0) - amount) < 0.01]
+                pending.sort(key=lambda o: o.get("created_at") or "", reverse=True)
+                if pending:
+                    order = pending[0]
+                    # Create or update the payment record with the bank's UTR.
+                    payment = await _db(db.get_payment_by_order_id, order["id"])
+                    if not payment:
+                        payment = await _db(
+                            db.create_payment,
+                            order_id=order["id"],
+                            amount=order["total"],
+                            method="UPI",
+                            utr_number=utr,
+                            screenshot_name="",
+                        )
+                        await _db(db.update_payment_status, payment["id"], "Success")
+                    else:
+                        await _db(db.set_payment_utr, order["id"], utr)
+                        await _db(db.update_payment_status, payment["id"], "Success")
+                    # Mark order as Confirmed — payment provably received.
+                    if _use_mongo():
+                        updated = await local_mongo_db.update_order_status(order["id"], "Confirmed")
+                    else:
+                        updated = await _db(db.update_order_status, order["id"], "Confirmed")
+                    await _log_sms_inbound(order["id"], phone, f"UTR:{utr} Amt:{int(amount)}", "Amount Match")
+                    try:
+                        await _db(
+                            db.create_notification,
+                            title="Auto-confirmed via bank SMS",
+                            message=f"Bank SMS credit of ₹{int(amount)} — token #{order.get('token')} auto-confirmed.",
+                            order_id=order["id"],
+                            status="Confirmed",
+                            target_role="student",
+                        )
+                        await _db(
+                            db.create_notification,
+                            title="Auto-confirmed via bank SMS",
+                            message=f"Bank SMS credit of ₹{int(amount)} — token #{order.get('token')} auto-confirmed.",
+                            order_id=order["id"],
+                            status="Confirmed",
+                            target_role="admin",
+                        )
+                    except Exception as e:
+                        logger.warning(f"Amount-match notification error: {e}")
+                    _push_admin(
+                        "Order auto-confirmed via bank SMS",
+                        f"Bank SMS credit of ₹{int(amount)} — token #{order.get('token')} auto-confirmed.",
+                        tag="order-confirm",
+                    )
+                    # WhatsApp notification to shopkeeper (same rule: payment verified).
+                    try:
+                        wa_phone = str((shop.get("whatsapp_number") or "")).strip() or str((shop.get("phone") or "")).strip()
+                        if wa_phone:
+                            await _notify_shop_via_whatsapp(order, shop, wa_phone, paid=True)
+                    except Exception as e:
+                        logger.warning(f"Amount-match WhatsApp error for {order.get('id')}: {e}")
+                    report["order"] = updated or order
+                    report["matched"] = {"utr": utr, "amount": amount, "shop": shop.get("id")}
+                    return report
+        except Exception as e:
+            logger.warning(f"Amount+shop auto-confirm error: {e}")
 
     # Flow 2 — "YES 123" / "NO 123" — token may carry a leading #.
     lowered = text.lower().replace("#", " ")
@@ -979,7 +1412,7 @@ async def sms_incoming(data: LocalIncomingSms):
                 token = words[i + 1]
             break
     if not action:
-        await _log_sms_inbound("", phone, text, "Unknown")
+        await _log_sms_inbound("", phone, "", "Unknown")
         raise HTTPException(status_code=400, detail="Unrecognised SMS — send a UTR to auto-confirm, or reply YES <token> / NO <token>.")
 
     # Find the order by token (matches today's/latest order with that token).
@@ -988,7 +1421,7 @@ async def sms_incoming(data: LocalIncomingSms):
     else:
         order = await _db(db.find_order_by_token, token)
     if not order:
-        await _log_sms_inbound("", phone, text, "No Match")
+        await _log_sms_inbound("", phone, f"token:{token or '?'}", "No Match")
         raise HTTPException(status_code=404, detail=f"No order with token #{token} found.")
 
     if action == "Confirmed":
@@ -1009,6 +1442,11 @@ async def sms_incoming(data: LocalIncomingSms):
                 )
             except Exception as e:
                 logger.warning(f"Admin SMS-confirm notification error: {e}")
+            _push_admin(
+                "Order confirmed via SMS",
+                f"Token #{token} confirmed — {order.get('shop_name', 'a shop')} accepted the order.",
+                tag="order-confirm",
+            )
         if not updated:
             raise HTTPException(status_code=400, detail="Could not confirm the order.")
     else:
@@ -1020,7 +1458,7 @@ async def sms_incoming(data: LocalIncomingSms):
             raise HTTPException(status_code=400, detail="Could not cancel the order.")
 
     # Log the inbound reply and the confirmation SMS to the student.
-    await _log_sms_inbound(order["id"], phone, text, "Processed")
+    await _log_sms_inbound(order["id"], phone, f"{action} #{token}", "Processed")
     if not _use_mongo():
         try:
             student_phone = str(order.get("student_phone") or "").strip()
@@ -1038,8 +1476,179 @@ async def sms_incoming(data: LocalIncomingSms):
     return report
 
 
+class LocalSmsMatch(BaseModel):
+    """Privacy-first payment proof: only the UTR + amount extracted on-device.
+
+    The raw bank SMS text never touches this server. The Android agent reads the
+    SMS on the shopkeeper's phone, pulls out the UTR and credited amount locally,
+    and sends only these two fields plus the receiving phone number.
+    """
+    phone: str = ""
+    utr: str
+    amount: float
+
+
+@router.post("/sms/match")
+async def sms_match(data: LocalSmsMatch, x_agent_key: Optional[str] = Header(None)):
+    """Privacy-first auto-confirm: the shop's Android agent extracts the UTR
+    and amount **on-device** and sends only the minimal proof here — the raw
+    bank SMS text never leaves the phone.
+
+    Matches a pending UPI order at the shop identified by ``phone`` whose total
+    equals ``amount``, stores the UTR on its payment record, marks it
+    **Confirmed**, and fires the shopkeeper's WhatsApp notification.
+    """
+    if settings.SMS_FORWARD_KEY and (x_agent_key or "") != settings.SMS_FORWARD_KEY:
+        raise HTTPException(status_code=401, detail="Invalid agent key")
+
+    utr = (data.utr or "").strip().upper()
+    if not utr:
+        raise HTTPException(status_code=400, detail="UTR is required")
+    amount = data.amount
+    if amount <= 0:
+        raise HTTPException(status_code=400, detail="Amount must be > 0")
+
+    try:
+        shop = None
+        if not _use_mongo():
+            shop = await _db(db.get_shop_by_phone, data.phone)
+        if not shop:
+            raise HTTPException(status_code=404, detail="No shop found matching this phone number")
+
+        orders = await _db(db.list_orders_by_shop, shop["id"])
+        # Match the credited amount exactly (tolerance for float rounding) and
+        # always pick the NEWEST pending order — tokens restart daily, so
+        # ordering by token can resurrect a stale order.
+        pending = [
+            o for o in orders
+            if o.get("status") == "Pending Payment"
+            and abs((o.get("total") or 0) - amount) < 0.01
+        ]
+        pending.sort(key=lambda o: o.get("created_at") or "", reverse=True)
+        if not pending:
+            raise HTTPException(status_code=404, detail="No pending order matching amount for this shop")
+
+        order = pending[0]
+
+        # Create or update the payment record with the on-device UTR.
+        payment = await _db(db.get_payment_by_order_id, order["id"])
+        if not payment:
+            payment = await _db(
+                db.create_payment,
+                order_id=order["id"],
+                amount=order["total"],
+                method="UPI",
+                utr_number=utr,
+                screenshot_name="",
+            )
+            await _db(db.update_payment_status, payment["id"], "Success")
+        else:
+            await _db(db.set_payment_utr, order["id"], utr)
+            await _db(db.update_payment_status, payment["id"], "Success")
+
+        if _use_mongo():
+            await local_mongo_db.update_order_status(order["id"], "Confirmed")
+        else:
+            await _db(db.update_order_status, order["id"], "Confirmed")
+
+        await _log_sms_inbound(order["id"], data.phone, f"UTR:{utr} Amt:{int(order.get('total', 0))}", "Auto-Confirmed")
+
+        # Student + admin notifications.
+        try:
+            await _db(
+                db.create_notification,
+                title="Auto-confirmed via bank UTR",
+                message=f"UTR {utr} — ₹{order.get('total')} credit confirmed. Token #{order.get('token')}.",
+                order_id=order["id"],
+                status="Confirmed",
+                target_role="student",
+            )
+            await _db(
+                db.create_notification,
+                title="Auto-confirmed via bank UTR",
+                message=f"UTR {utr} — ₹{order.get('total')} credit confirmed. Token #{order.get('token')}.",
+                order_id=order["id"],
+                status="Confirmed",
+                target_role="admin",
+            )
+        except Exception as e:
+            logger.warning(f"sms/match notification error: {e}")
+        _push_admin(
+            "Order auto-confirmed via bank UTR",
+            f"UTR {utr} — ₹{order.get('total')} credit confirmed. Token #{order.get('token')}.",
+            tag="order-confirm",
+        )
+
+        # WhatsApp fire.
+        try:
+            wa_phone = str((shop.get("whatsapp_number") or "")).strip() or str((shop.get("phone") or "")).strip()
+            if wa_phone:
+                await _notify_shop_via_whatsapp(order, shop, wa_phone, paid=True)
+        except Exception as e:
+            logger.warning(f"sms/match WhatsApp error for {order.get('id')}: {e}")
+
+        return {
+            "matched": True,
+            "utr": utr,
+            "amount": int(amount),
+            "shop": shop.get("id"),
+            "order_id": order["id"],
+            "order_status": "Confirmed",
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.warning(f"sms/match error: {e}")
+        raise HTTPException(status_code=500, detail="Internal error")
+
+
+@router.get("/whatsapp/pending")
+async def whatsapp_pending_agent(x_agent_key: Optional[str] = Header(None)):
+    """Pending WhatsApp notifications for the on-phone auto-send bot (same
+    ``X-Agent-Key`` as the SMS agent).
+
+    Returns rows that are already **ready to deliver** — COD messages and
+    paid-verified UPI messages. Drafts still labelled "awaiting payment" are
+    skipped so the bot waits for the payment verification to refresh them to
+    "paid ✓" and then sends exactly ONE clean message (never a stale
+    "awaiting payment" followed by a final one).
+    """
+    if settings.SMS_FORWARD_KEY and (x_agent_key or "") != settings.SMS_FORWARD_KEY:
+        raise HTTPException(status_code=401, detail="Invalid agent key")
+
+    logs = await _db(db.list_whatsapp_logs, 100)
+    pending = []
+    for log in logs or []:
+        if str(log.get("status") or "").lower() == "sent":
+            continue
+        message = str(log.get("message") or "").strip()
+        if "awaiting payment" in message.lower():
+            continue
+        pending.append(
+            {
+                "id": log.get("id"),
+                "sub_order_id": log.get("sub_order_id") or log.get("order_id") or "",
+                "phone": str(log.get("phone") or "").strip(),
+                "message": message,
+            }
+        )
+    return pending
+
+
+@router.post("/whatsapp/{whatsapp_id}/mark-sent")
+async def whatsapp_mark_sent_agent(whatsapp_id: str, x_agent_key: Optional[str] = Header(None)):
+    """Mark a WhatsApp notification as sent once the phone bot delivered it."""
+    if settings.SMS_FORWARD_KEY and (x_agent_key or "") != settings.SMS_FORWARD_KEY:
+        raise HTTPException(status_code=401, detail="Invalid agent key")
+    doc = await _db(db.mark_whatsapp_sent, whatsapp_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="WhatsApp notification not found")
+    return doc
+
+
 @router.get("/sms-logs")
-async def sms_logs(limit: int = 100):
+async def sms_logs(limit: int = 100, _admin: dict = Depends(_require_admin)):
     """Admin view of all SMS messages (out-bound orders + inbound replies)."""
     if _use_mongo():
         return await local_mongo_db.list_sms_logs(limit)
@@ -1047,16 +1656,53 @@ async def sms_logs(limit: int = 100):
 
 
 @router.get("/payments")
-async def payments():
+async def payments(_admin: dict = Depends(_require_admin)):
+    """Payment records (with bank UTRs) are admin-only — students never read them."""
     if _use_mongo():
         return await local_mongo_db.list_payments()
-    return await _db(db.list_payments)
+    return await _cached_read(10, "payments", db.list_payments)
 
 
 @router.post("/payments")
-async def add_payment(data: LocalPaymentCreate):
-    if not _use_mongo():
-        if data.method == "Manual UTR":
+async def add_payment(data: LocalPaymentCreate, current_user: dict = Depends(get_current_local_user)):
+    # Resolve the target across single orders AND multi-shop parent orders — a
+    # multi order's id lives in `parent_orders`, not `orders`, so the old
+    # orders-only lookup made every UPI/UTR payment for the student's multi
+    # cart 404 ("Order not found").
+    if _use_mongo():
+        order = await local_mongo_db.get_order(data.order_id)
+        if not order:
+            raise HTTPException(status_code=404, detail="Order not found")
+        if current_user.get("role") != "admin" and not _same_student(current_user, order):
+            raise HTTPException(status_code=403, detail="You can only pay for your own orders")
+        payment = await local_mongo_db.create_payment(
+            data.order_id,
+            data.amount,
+            data.method,
+            data.utr_number,
+            data.screenshot_name,
+        )
+        if not payment:
+            raise HTTPException(status_code=400, detail="Unable to create payment")
+        return payment
+    order = await _db(db.get_order, data.order_id)
+    is_parent = False
+    if not order:
+        order = await _db(db.get_parent_order, data.order_id)
+        is_parent = bool(order)
+        if not order:
+            raise HTTPException(status_code=404, detail="Order not found")
+    # A student may only record payment for an order they own.
+    if current_user.get("role") != "admin" and not _same_student(current_user, order):
+        raise HTTPException(status_code=403, detail="You can only pay for your own orders")
+    if data.method == "Manual UTR":
+        if is_parent:
+            # Multi-shop: the student pays ONE bill to the platform UPI id
+            # (the one shown at checkout). No per-shop UTR token exists yet.
+            payment_settings = await _db(db.get_payment_settings)
+            if not payment_settings["manual_enabled"] or not payment_settings["upi_id"]:
+                raise HTTPException(status_code=400, detail="No UPI payment configured for this order")
+        else:
             # Resolve the UPI target: the shop's own UPI ID first, then the
             # global (admin) UPI ID as a fallback. Money goes to the shop.
             order = await _db(db.get_order, data.order_id)
@@ -1073,15 +1719,7 @@ async def add_payment(data: LocalPaymentCreate):
                 raise HTTPException(status_code=400, detail="This shop has turned off UPI payments.")
         # Razorpay method is validated in the create-razorpay-order endpoint
 
-    if _use_mongo():
-        payment = await local_mongo_db.create_payment(
-            data.order_id,
-            data.amount,
-            data.method,
-            data.utr_number,
-            data.screenshot_name,
-        )
-    else:
+    if not is_parent:
         payment = await _db(
             db.create_payment,
             data.order_id,
@@ -1090,8 +1728,39 @@ async def add_payment(data: LocalPaymentCreate):
             data.utr_number,
             data.screenshot_name,
         )
+    else:
+        payment = await _db(
+            db.record_parent_payment,
+            data.order_id,
+            data.amount,
+            data.method,
+            data.utr_number,
+            data.screenshot_name,
+        )
     if not payment:
         raise HTTPException(status_code=400, detail="Unable to create payment")
+
+    # UTR-first: the student's UTR is asked at checkout. The order is only
+    # accepted once the bank credit SMS carrying this UTR arrives (security
+    # anchor inside _confirm_order_via_utr) — if the SMS already landed before
+    # the student paid, it is accepted right now.
+    matched = None
+    utr = (data.utr_number or "").strip().upper()
+    # Multi-shop parents have no single bank-SMS hook yet — their proof is
+    # verified by the admin from the uploaded screenshot/UTR instead.
+    if not is_parent and data.method == "Manual UTR" and utr:
+        matched = await _confirm_order_via_utr(utr, raw_text=f"UTR:{utr} Paid")
+    if matched:
+        return {**payment, "order": matched, "matched": {"utr": utr}}
+    # A manual payment that did not auto-match the bank SMS needs the admin to
+    # verify the proof — ring the admin's phone (web push, best-effort).
+    if str(data.method or "").upper() != "COD":
+        _push_admin(
+            "New payment to verify",
+            f"{current_user.get('name') or current_user.get('username')} submitted {'a multi-shop' if is_parent else 'a'} payment proof "
+            f"(₹{data.amount}) — verify in Admin Center → Payments.",
+            tag="payment-verify",
+        )
     return payment
 
 
@@ -1100,6 +1769,7 @@ async def upload_payment_screenshot(
     file: UploadFile = File(...),
     order_id: str = Form(...),
     utr_number: str = Form(""),
+    current_user: dict = Depends(get_current_local_user),
 ):
     """Accept a payment screenshot for an order and attach it to the payment record.
 
@@ -1110,13 +1780,21 @@ async def upload_payment_screenshot(
     if not order_id:
         raise HTTPException(status_code=400, detail="order_id is required")
 
-    # The order must exist before we accept an image for it.
+    # The order must exist before we accept an image for it. Multi-shop parents
+    # live in `parent_orders`, so look there too.
     if _use_mongo():
         order = await local_mongo_db.get_order(order_id)
+        is_parent = False
     else:
         order = await _db(db.get_order, order_id)
+        is_parent = False
+        if not order:
+            order = await _db(db.get_parent_order, order_id)
+            is_parent = bool(order)
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
+    if current_user.get("role") != "admin" and not _same_student(current_user, order):
+        raise HTTPException(status_code=403, detail="You can only upload proof for your own orders")
 
     # Validate the file is an image.
     filename = (file.filename or "").split("/")[-1].split("\\")[-1]
@@ -1151,11 +1829,22 @@ async def upload_payment_screenshot(
         else:
             payment = await local_mongo_db.create_payment(order_id, int(order.get("total", 0)), "Manual UTR", utr, stored_name)
     else:
-        payment = await _db(db.get_payment_by_order_id, order_id)
-        if payment:
-            payment = await _db(db.update_payment_record, order_id, stored_name, utr)
+        if is_parent:
+            # Multi-shop parent: the ONE-bill payment lives on the parent row.
+            payment = await _db(
+                db.record_parent_payment,
+                order_id,
+                int(order.get("total", 0)),
+                "Manual UTR",
+                utr,
+                stored_name,
+            )
         else:
-            payment = await _db(db.create_payment, order_id, int(order.get("total", 0)), "Manual UTR", utr, stored_name)
+            payment = await _db(db.get_payment_by_order_id, order_id)
+            if payment:
+                payment = await _db(db.update_payment_record, order_id, stored_name, utr)
+            else:
+                payment = await _db(db.create_payment, order_id, int(order.get("total", 0)), "Manual UTR", utr, stored_name)
 
     # If the UTR was attached with the screenshot, try the UTR auto-match too —
     # the bank SMS may already have arrived (this only confirms when it did).
@@ -1170,6 +1859,15 @@ async def upload_payment_screenshot(
                 "screenshot_url": f"/uploads/payments/{stored_name}",
                 "matched": {"utr": utr},
             }
+
+    # Screenshot uploaded but not auto-matched — the proof needs eyeballing.
+    if payment and not matched:
+        _push_admin(
+            "New payment proof to verify",
+            f"{current_user.get('name') or current_user.get('username')} uploaded a payment screenshot"
+            f"{f' (UTR {utr})' if utr else ''} — verify in Admin Center → Payments.",
+            tag="payment-verify",
+        )
 
     return {
         "message": "Payment screenshot uploaded — the shop will verify your payment.",
@@ -1298,7 +1996,7 @@ async def payment_settings():
             "instructions": "",
             "razorpay_enabled": False,
         }
-    return await _db(db.get_payment_settings)
+    return await _cached_read(30, "payment-settings", db.get_payment_settings)
 
 
 @router.patch("/payment-settings")
@@ -1315,7 +2013,7 @@ async def patch_payment_settings(data: LocalPaymentSettings, authorization: Opti
 
 
 @router.patch("/payments/{payment_id}/status")
-async def patch_payment_status(payment_id: str, data: LocalPaymentStatusUpdate):
+async def patch_payment_status(payment_id: str, data: LocalPaymentStatusUpdate, _admin: dict = Depends(_require_admin)):
     if _use_mongo():
         payment = await local_mongo_db.update_payment_status(payment_id, data.status)
     else:
@@ -1326,21 +2024,21 @@ async def patch_payment_status(payment_id: str, data: LocalPaymentStatusUpdate):
 
 
 @router.get("/tickets")
-async def tickets():
+async def tickets(_admin: dict = Depends(_require_admin)):
     if _use_mongo():
         return await local_mongo_db.list_tickets()
     return await _db(db.list_tickets)
 
 
 @router.post("/tickets")
-async def add_ticket(data: LocalTicketCreate):
+async def add_ticket(data: LocalTicketCreate, current_user: dict = Depends(get_current_local_user)):
     if _use_mongo():
         return await local_mongo_db.create_ticket(data.model_dump())
     return await _db(db.create_ticket, data.model_dump())
 
 
 @router.get("/notifications")
-async def notifications(role: str | None = None):
+async def notifications(role: str | None = None, current_user: dict = Depends(get_current_local_user)):
     """List notifications, optionally filtered to a target role
     (e.g. ?role=student so vendor/admin alerts never reach students)."""
     if _use_mongo():
@@ -1380,6 +2078,11 @@ async def add_feedback(data: LocalFeedbackCreate, authorization: Optional[str] =
     if not feedback:
         raise HTTPException(status_code=400, detail="Could not submit feedback. Please try again.")
     logger.info(f"Site feedback submitted by {values.get('name') or values.get('email') or 'guest'}: {values.get('subject')}")
+    _push_admin(
+        "New feedback",
+        f"[{feedback.get('category') or 'Bug'}] {feedback.get('subject') or feedback.get('message', '')[:80]} — by {values.get('name') or values.get('username') or 'guest'}",
+        tag="feedback",
+    )
     return feedback
 
 
@@ -1401,9 +2104,16 @@ async def my_feedback(authorization: Optional[str] = Header(None)):
 @router.get("/batch")
 async def current_batch():
     """Which delivery batch is accepting orders right now + stock info."""
+    hit = ttl_cache.get("batch")
+    if hit is None and shared_cache.enabled():
+        hit = await asyncio.to_thread(shared_cache.get, "batch")
+        if hit is not None:
+            ttl_cache.set("batch", hit, 5)
+    if hit is not None:
+        return hit
     _process_due_auto_confirm()
     batch_type = db.get_current_batch()
-    return {
+    value = {
         "batch_type": batch_type,
         "token_starts_at": 18,
         "next_token": db.get_next_token(),
@@ -1411,22 +2121,36 @@ async def current_batch():
         "accepted_until": "12:30" if batch_type == "Afternoon" else "18:00",
         "delivery_window": "13:00-13:30" if batch_type == "Afternoon" else "19:30-19:45",
     }
+    ttl_cache.set("batch", value, 5)
+    if shared_cache.enabled():
+        await asyncio.to_thread(shared_cache.set_pair, "batch", value, 5)
+    return value
 
 
 @router.get("/products/stock")
-async def products_with_stock():
+async def products_with_stock(_user: dict = Depends(get_current_local_user)):
     """Every product with its per-batch remaining stock."""
+    hit = ttl_cache.get("products-stock")
+    if hit is None and shared_cache.enabled():
+        hit = await asyncio.to_thread(shared_cache.get, "products-stock")
+        if hit is not None:
+            ttl_cache.set("products-stock", hit, 5)
+    if hit is not None:
+        return hit
     batch_type = db.get_current_batch()
     products = await _db(db.list_products)
     date_key = db._day_key()
     for p in products:
         p["batch_type"] = batch_type
         p["stock_left"] = db.get_product_stock(p["id"], batch_type, date_key)
+    ttl_cache.set("products-stock", products, 5)
+    if shared_cache.enabled():
+        await asyncio.to_thread(shared_cache.set_pair, "products-stock", products, 5)
     return products
 
 
 @router.post("/orders/multi")
-async def create_multi_shop_order(data: LocalMultiShopOrder):
+async def create_multi_shop_order(data: LocalMultiShopOrder, current_user: dict = Depends(get_current_local_user)):
     """Place a multi-shop order (combo). Creates one parent order + per-shop
     sub-orders sharing a single token. The student pays ONE bill."""
     if not data.shops:
@@ -1479,31 +2203,41 @@ async def create_multi_shop_order(data: LocalMultiShopOrder):
         except Exception as e:
             logger.warning(f"Could not schedule sub-order push for {sub['id']}: {e}")
 
+    # COD multi-shop: money is on delivery, so each shopkeeper's WhatsApp
+    # notification fires right away — exactly the COD rule from the single-shop
+    # flow. (UPI/UTR parents stay Pending until proof arrives; multi-shop has no
+    # per-shop gateway hook, so the verified trigger does not exist yet there.)
+    if str(parent.get("payment_method") or "").upper() == "COD":
+        for sub in parent.get("sub_orders", []):
+            try:
+                shop = await _db(db.get_shop, sub["shop_id"])
+                wa_phone = str((shop or {}).get("whatsapp_number") or "").strip() or str((shop or {}).get("phone") or "").strip()
+                if shop and wa_phone:
+                    wa_order = {
+                        "id": sub["id"],
+                        "token": sub["token"],
+                        "items": sub["items_summary"],
+                        "student_name": parent.get("student_name", ""),
+                        "student_phone": parent.get("student_phone", ""),
+                        "delivery_location": parent.get("delivery_location", ""),
+                        "total": sub["subtotal"],
+                        "payment_method": "COD",
+                    }
+                    await _notify_shop_via_whatsapp(wa_order, shop, wa_phone)
+            except Exception as e:
+                logger.warning(f"Could not schedule sub-order WhatsApp for {sub.get('id')}: {e}")
+
     return parent
 
 
-@router.get("/orders/parent")
-async def parent_orders(status: str | None = None):
-    """List parent (multi-shop) orders. Student portal uses this for My Orders."""
-    return await _db(db.list_parent_orders, status=status)
-
-
-@router.get("/orders/parent/{parent_order_id}")
-async def parent_order(parent_order_id: str):
-    result = await _db(db.get_parent_order, parent_order_id)
-    if not result:
-        raise HTTPException(status_code=404, detail="Order not found")
-    return result
-
-
 @router.get("/shop-orders/{shop_id}")
-async def shop_sub_orders(shop_id: str, status: str | None = None):
+async def shop_sub_orders(shop_id: str, status: str | None = None, _admin: dict = Depends(_require_admin)):
     """A shop's own sub-orders (only THIS shop's items, never other shops')."""
     return await _db(db.get_shop_sub_orders, shop_id, status)
 
 
 @router.patch("/shop-orders/{sub_order_id}/status")
-async def patch_sub_order_status(sub_order_id: str, data: LocalSubOrderStatusUpdate):
+async def patch_sub_order_status(sub_order_id: str, data: LocalSubOrderStatusUpdate, _admin: dict = Depends(_require_admin)):
     updated = await _db(db.update_sub_order_status, sub_order_id, data.status, data.notes)
     if not updated:
         raise HTTPException(status_code=404, detail="Sub-order not found")
@@ -1517,7 +2251,7 @@ async def announcements(shop_id: str | None = None, active_only: bool = True):
 
 
 @router.post("/announcements")
-async def add_announcement(data: LocalAnnouncementCreate):
+async def add_announcement(data: LocalAnnouncementCreate, _admin: dict = Depends(_require_admin)):
     ann = await _db(db.create_shop_announcement, data.shop_id, data.message)
     if not ann:
         raise HTTPException(status_code=400, detail="Could not post announcement.")
@@ -1525,7 +2259,7 @@ async def add_announcement(data: LocalAnnouncementCreate):
 
 
 @router.patch("/announcements/{ann_id}")
-async def patch_announcement(ann_id: str, data: LocalAnnouncementToggle):
+async def patch_announcement(ann_id: str, data: LocalAnnouncementToggle, _admin: dict = Depends(_require_admin)):
     ann = await _db(db.toggle_shop_announcement, ann_id, bool(data.is_active))
     if not ann:
         raise HTTPException(status_code=404, detail="Announcement not found")
@@ -1536,12 +2270,14 @@ async def patch_announcement(ann_id: str, data: LocalAnnouncementToggle):
 
 
 @router.get("/complaints")
-async def complaints(status: str | None = None):
-    return await _db(db.list_complaints, status)
+async def complaints(status: str | None = None, _admin: dict = Depends(_require_admin)):
+    if status:
+        return await _cached_read(10, "complaints", db.list_complaints, status)
+    return await _cached_read(10, "complaints", db.list_complaints)
 
 
 @router.post("/complaints")
-async def add_complaint(data: LocalComplaintCreate):
+async def add_complaint(data: LocalComplaintCreate, current_user: dict = Depends(get_current_local_user)):
     complaint = await _db(
         db.create_complaint,
         parent_order_id=data.parent_order_id,
@@ -1558,7 +2294,7 @@ async def add_complaint(data: LocalComplaintCreate):
 
 
 @router.patch("/complaints/{complaint_id}")
-async def patch_complaint(complaint_id: str, data: LocalComplaintStatusUpdate):
+async def patch_complaint(complaint_id: str, data: LocalComplaintStatusUpdate, _admin: dict = Depends(_require_admin)):
     updated = await _db(db.update_complaint, complaint_id, data.status, data.admin_notes)
     if not updated:
         raise HTTPException(status_code=404, detail="Complaint not found")
@@ -1569,12 +2305,14 @@ async def patch_complaint(complaint_id: str, data: LocalComplaintStatusUpdate):
 
 
 @router.get("/refunds")
-async def refunds(status: str | None = None):
-    return await _db(db.list_refunds, status)
+async def refunds(status: str | None = None, _admin: dict = Depends(_require_admin)):
+    if status:
+        return await _cached_read(10, "refunds", db.list_refunds, status)
+    return await _cached_read(10, "refunds", db.list_refunds)
 
 
 @router.post("/refunds")
-async def add_refund(data: LocalRefundCreate):
+async def add_refund(data: LocalRefundCreate, _admin: dict = Depends(_require_admin)):
     refund = await _db(
         db.create_refund,
         parent_order_id=data.parent_order_id,
@@ -1591,7 +2329,7 @@ async def add_refund(data: LocalRefundCreate):
 
 
 @router.patch("/refunds/{refund_id}")
-async def patch_refund(refund_id: str, data: LocalRefundUpdate):
+async def patch_refund(refund_id: str, data: LocalRefundUpdate, _admin: dict = Depends(_require_admin)):
     updated = await _db(db.update_refund, refund_id, data.status, data.refund_utr, data.admin_notes)
     if not updated:
         raise HTTPException(status_code=404, detail="Refund not found")
@@ -1608,12 +2346,14 @@ class LocalRefundUpdate(BaseModel):
 
 
 @router.get("/settlements")
-async def settlements(status: str | None = None):
-    return await _db(db.list_settlements, status)
+async def settlements(status: str | None = None, _admin: dict = Depends(_require_admin)):
+    if status:
+        return await _cached_read(10, "settlements", db.list_settlements, status)
+    return await _cached_read(10, "settlements", db.list_settlements)
 
 
 @router.post("/settlements/run")
-async def run_settlements():
+async def run_settlements(_admin: dict = Depends(_require_admin)):
     """Trigger today's settlement run (admin or nightly job)."""
     rows = await _db(db.run_daily_settlements)
     return {"message": f"Settlement computed for {len(rows)} shops.", "settlements": rows}
@@ -1623,12 +2363,14 @@ async def run_settlements():
 
 
 @router.get("/menu-change-requests")
-async def menu_change_requests(status: str | None = None):
-    return await _db(db.list_menu_change_requests, status)
+async def menu_change_requests(status: str | None = None, _admin: dict = Depends(_require_admin)):
+    if status:
+        return await _cached_read(10, "menu-change-requests", db.list_menu_change_requests, status)
+    return await _cached_read(10, "menu-change-requests", db.list_menu_change_requests)
 
 
 @router.post("/menu-change-requests")
-async def add_menu_change_request(data: LocalMenuChangeCreate):
+async def add_menu_change_request(data: LocalMenuChangeCreate, current_user: dict = Depends(get_current_local_user)):
     req = await _db(
         db.create_menu_change_request,
         shop_id=data.shop_id,
@@ -1643,7 +2385,7 @@ async def add_menu_change_request(data: LocalMenuChangeCreate):
 
 
 @router.patch("/menu-change-requests/{req_id}")
-async def patch_menu_change_request(req_id: str, data: LocalMenuChangeApprove):
+async def patch_menu_change_request(req_id: str, data: LocalMenuChangeApprove, _admin: dict = Depends(_require_admin)):
     req = await _db(db.update_menu_change_request, req_id, data.status, data.admin_notes)
     if not req:
         raise HTTPException(status_code=404, detail="Request not found")
@@ -1659,10 +2401,10 @@ class LocalMenuChangeApprove(BaseModel):
 
 
 @router.get("/audit-logs")
-async def audit_logs(limit: int = 200):
+async def audit_logs(limit: int = 200, _admin: dict = Depends(_require_admin)):
     return await _db(db.list_audit_logs, limit)
 
 
 @router.get("/whatsapp-logs")
-async def whatsapp_logs(limit: int = 100):
+async def whatsapp_logs(limit: int = 100, _admin: dict = Depends(_require_admin)):
     return await _db(db.list_whatsapp_logs, limit)

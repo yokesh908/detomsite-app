@@ -9,14 +9,29 @@ export function SupportPage() {
   const [tickets, setTickets] = useState<LocalTicket[]>([])
   const [form, setForm] = useState({ name: session?.name || '', email: session?.email || '', phone_number: '', category: 'order_issue', title: '', description: '' })
   const [message, setMessage] = useState('')
+  const [ticketError, setTicketError] = useState('')
+  const [submitting, setSubmitting] = useState(false)
 
-  useEffect(() => { api.get<LocalTicket[]>('/local/tickets').then(r => setTickets(r.data)).catch(() => setTickets([])) }, [])
+  useEffect(() => {
+    api.get<LocalTicket[]>('/local/tickets')
+      .then(r => setTickets(r.data || []))
+      .catch(() => setTicketError('Could not load your tickets'))
+  }, [])
 
   const submit = async (e: FormEvent) => {
     e.preventDefault()
-    const r = await api.post<LocalTicket>('/local/tickets', form)
-    setTickets(curr => [r.data, ...curr]); setMessage(`Ticket ${r.data.ticket_number} created`)
-    setForm(f => ({ ...f, phone_number: '', title: '', description: '' }))
+    setTicketError('')
+    setMessage('')
+    setSubmitting(true)
+    try {
+      const r = await api.post<LocalTicket>('/local/tickets', form)
+      setTickets(curr => [r.data, ...curr]); setMessage(`Ticket ${r.data.ticket_number} created`)
+      setForm(f => ({ ...f, phone_number: '', title: '', description: '' }))
+    } catch (err: any) {
+      setTicketError(err?.response?.data?.detail || 'Could not create the ticket — please try again.')
+    } finally {
+      setSubmitting(false)
+    }
   }
 
   return (
@@ -46,8 +61,9 @@ export function SupportPage() {
                 className="w-full rounded-btn border-2 border-gray-200 px-4 py-2.5 text-sm text-gray-900 placeholder-gray-400 outline-none focus:border-primary focus:shadow-emerald-sm" placeholder="Title" required />
               <textarea value={form.description} onChange={e => setForm({...form, description: e.target.value})}
                 className="min-h-[120px] w-full rounded-btn border-2 border-gray-200 px-4 py-2.5 text-sm text-gray-900 placeholder-gray-400 outline-none focus:border-primary focus:shadow-emerald-sm" placeholder="Describe your issue" required />
-              <button className="rounded-btn bg-primary px-5 py-2.5 text-sm font-bold text-white shadow-gold-sm hover:bg-primary-dark">Submit Ticket</button>
-              {message && <p className="rounded-lg bg-primary-light/30 border border-primary-light/50 px-4 py-2 text-sm font-medium text-primary">{message}</p>}
+              <button disabled={submitting} className="rounded-btn bg-primary px-5 py-2.5 text-sm font-bold text-white shadow-gold-sm hover:bg-primary-dark disabled:opacity-40">{submitting ? 'Submitting…' : 'Submit Ticket'}</button>
+              {message && <p className="rounded-lg bg-emerald-50 border border-emerald-200 px-4 py-2 text-sm font-medium text-emerald-700">{message}</p>}
+              {ticketError && <p className="rounded-lg bg-red-50 border border-red-200 px-4 py-2 text-sm font-medium text-red-600">{ticketError}</p>}
             </div>
           </form>
           <div className="rounded-btn bg-white p-6 shadow-card">

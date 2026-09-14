@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">DETOMSITE WhatsApp Bot</string>
+    <string name="wa_accessibility_label">DETOMSITE WhatsApp Bot</string>
+    <string name="wa_accessibility_desc">Auto-sends order WhatsApp messages: watches the WhatsApp conversation
+        opened by the bot, verifies the pre-filled order text is on screen, and
+        taps Send for you.</string>
+</resources>

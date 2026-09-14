@@ -2,7 +2,7 @@
 Admin Portal API — Admin login with username/password from DB,
 approve/reject shops, view all statistics
 """
-from fastapi import APIRouter, HTTPException, Depends, Header, Query, Body
+from fastapi import APIRouter, HTTPException, Depends, Header, Query, Body, Request
 from pydantic import BaseModel, Field
 from typing import Optional
 import asyncio
@@ -10,8 +10,12 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from app.core.config import settings
+from app.core.rate_limit import allow as rate_allow, reset as rate_reset, client_ip as rate_ip
 from app.core.store import store as db
 from app.core.security import hash_password, verify_password, create_access_token, create_refresh_token, decode_token
+from app.core import ttl_cache
+from app.core import shared_cache
+from app.services import push_service
 
 logger = logging.getLogger(__name__)
 
@@ -45,8 +49,11 @@ def _ist_date(value) -> str:
 
 # ─── Admin credentials (hardcoded or from env) ───
 # These are used for initial admin login. Once logged in, admin gets a JWT.
+# NOTE: no hardcoded fallback — an empty/dev default would silently weaken the
+# admin gate. The prod config validator already refuses to boot without
+# DEFAULT_SUPER_ADMIN_PASSWORD; dev setups must set it explicitly.
 ADMIN_USERNAME = settings.DEFAULT_SUPER_ADMIN_EMAIL.split("@")[0] if settings.DEFAULT_SUPER_ADMIN_EMAIL else "admin"
-ADMIN_PASSWORD = settings.DEFAULT_SUPER_ADMIN_PASSWORD or "admin123"
+ADMIN_PASSWORD = settings.DEFAULT_SUPER_ADMIN_PASSWORD
 
 
 # ─── Schemas ───
@@ -139,18 +146,28 @@ async def verify_admin(authorization: Optional[str] = Header(None)) -> dict:
 # ─── Endpoints ───
 
 @router.post("/login")
-async def login(data: AdminLoginRequest):
+async def login(data: AdminLoginRequest, request: Request):
     """Login as admin using username and password."""
-    # Try DB first
+    ip = rate_ip(request)
+    if not rate_allow("admin_login", f"{data.username}:{ip}", max_attempts=6, window_sec=300):
+        raise HTTPException(status_code=429, detail="Too many sign-in attempts — please wait a few minutes and try again.")
+
+    # Try DB first — the ONLY production path. The environment-credential
+    # fallback below is dev-only (DEBUG=True) so a misconfigured production
+    # deployment can never be silently administered by an anonymous virtual
+    # account.
     user = await _db(db.get_user_by_username, data.username)
 
     if user and user["role"] == "admin":
         if not verify_password(data.password, user["password_hash"]):
             raise HTTPException(status_code=401, detail="Incorrect admin password. Please try again.")
     else:
-        # Fallback to hardcoded admin credentials
+        if not settings.DEBUG:
+            raise HTTPException(status_code=401, detail="Invalid admin username or password")
+        # Dev-only fallback to environment-configured admin credentials.
         if data.username != ADMIN_USERNAME or data.password != ADMIN_PASSWORD:
             raise HTTPException(status_code=401, detail="Invalid admin username or password")
+        rate_reset("admin_login", f"{data.username}:{ip}")
         # Return a virtual admin user
         token_data = {
             "sub": "0",
@@ -170,6 +187,7 @@ async def login(data: AdminLoginRequest):
         )
 
     # DB admin login success
+    rate_reset("admin_login", f"{data.username}:{ip}")
     token_data = {
         "sub": str(user["id"]),
         "username": user["username"],
@@ -196,7 +214,7 @@ async def dashboard(admin: dict = Depends(verify_admin)):
     recent_orders = await _db(db.list_orders, limit=10)
 
     total_revenue = stats.get("total_revenue", 0)
-    total_service_fee = round(total_revenue * 0.05)
+    total_service_fee = stats.get("total_orders", 0) * 10  # flat ₹10 per order
     today_revenue = stats.get("today_revenue", 0)
 
     return {
@@ -211,7 +229,7 @@ async def dashboard(admin: dict = Depends(verify_admin)):
             "vendor_share": max(0, total_revenue - total_service_fee),
             "today_orders": stats.get("today_orders", 0),
             "today_revenue": today_revenue,
-            "today_service_fee": round(today_revenue * 0.05),
+            "today_service_fee": stats.get("today_orders", 0) * 10,
             "pending_payments": stats.get("pending_payments", 0),
             "total_products": stats.get("total_products", 0),
         },
@@ -321,14 +339,108 @@ async def shop_today_orders(shop_id: str, admin: dict = Depends(verify_admin)):
             o_date = _ist_date(o.get("created_at"))
             if o_date == today_key:
                 today_orders.append(o)
+    for sub in (await _db(db.get_shop_sub_orders, shop_id)) or []:
+        if _ist_date(sub.get("created_at")) == today_key:
+            today_orders.append(_sub_order_shape(sub))
+    today_orders.sort(key=lambda o: str(o.get("created_at") or ""), reverse=True)
     return {"shop": shop, "date": today_key, "orders": today_orders, "count": len(today_orders)}
 
 
 @router.get("/orders")
 async def list_all_orders(admin: dict = Depends(verify_admin)):
-    """List orders across all shops, newest first — capped at 1000."""
+    """List orders across all shops, newest first — capped at 1000.
+    Multi-shop sub-orders are merged in so they show in the admin centre too."""
     orders = await _db(db.list_orders, limit=1000)
-    return orders
+    merged = list(orders)
+    for shop in (await _db(db.list_shops)) or []:
+        for sub in (await _db(db.get_shop_sub_orders, shop["id"])) or []:
+            merged.append(_sub_order_shape(sub))
+    merged.sort(key=lambda o: str(o.get("created_at") or ""), reverse=True)
+    return merged[:1500]
+
+
+def _sub_order_shape(sub: dict) -> dict:
+    """Render a multi-shop sub-order as an order-shaped dict for admin views."""
+    items = sub.get("items") or []
+    parent = sub.get("parent") or {}
+    return {
+        "id": sub.get("id", ""),
+        "token": sub.get("token"),
+        "student_name": parent.get("student_name", ""),
+        "student_phone": parent.get("student_phone", ""),
+        "shop_id": sub.get("shop_id", ""),
+        "shop_name": sub.get("shop_name", ""),
+        "items": ", ".join(f"{int(i['quantity'])}x {i['product_name']}" for i in items),
+        "total": int(sub.get("subtotal", 0)),
+        "delivery_location": parent.get("delivery_location", ""),
+        "delivery_slot": sub.get("batch_type") or parent.get("delivery_slot", ""),
+        "status": sub.get("status", "Pending"),
+        "payment_method": parent.get("payment_method", ""),
+        "created_at": sub.get("created_at", ""),
+        "parent_order_id": sub.get("parent_order_id", ""),
+        "is_sub_order": True,
+    }
+
+
+async def _rebuild_wa_link(log: dict, sub_id: str) -> str:
+    """Rebuild the ``wa.me`` deep-link for a persisted WhatsApp log when the
+    store's table does not keep the url column (Supabase)."""
+    from urllib.parse import quote
+    number = str(log.get("phone") or "").strip()
+    if not number:
+        return ""
+    digits = "".join(ch for ch in number if ch.isdigit())
+    if len(digits) == 10:
+        digits = "91" + digits
+    text = str(log.get("message") or "").strip()
+    if not text:
+        order = await _db(db.get_order, sub_id) if sub_id else None
+        if order:
+            from app.services.sms_service import compose_order_wa
+            text = compose_order_wa(order)
+    if not text:
+        return ""
+    return f"https://wa.me/{digits}?text={quote(text)}"
+
+
+@router.get("/whatsapp-pending")
+async def whatsapp_pending(admin: dict = Depends(verify_admin)):
+    """Pending WhatsApp notifications — orders whose ``wa.me`` message to the
+    shop is generated and waiting for the admin to send from their number.
+
+    Each item carries the pre-built link, the target number, and the message
+    preview, so the admin centre can one-tap send (and bulk-send all).
+    """
+    logs = await _db(db.list_whatsapp_logs, limit=200)
+    pending = [l for l in (logs or []) if str(l.get("status") or "").lower() != "sent"]
+    enriched = []
+    for log in pending:
+        sub_id = log.get("order_id") or log.get("sub_order_id") or ""
+        order = await _db(db.get_order, sub_id)
+        if not order:
+            order = await _db(db.get_sub_order, sub_id) if hasattr(db, "get_sub_order") else None
+        shop = await _db(db.get_shop, (order or {}).get("shop_id") or "") if order else None
+        doc = dict(log)
+        doc["sub_order_id"] = sub_id
+        # The Supabase table has no url column — rebuild the same wa.me link
+        # that generated this log so the admin centre can one-tap send.
+        if not (doc.get("url") or "").strip():
+            doc["url"] = await _rebuild_wa_link(doc, sub_id)
+        doc["order_token"] = (order or {}).get("token") or (order or {}).get("id")
+        doc["student_name"] = (order or {}).get("student_name") or (order or {}).get("parent", {}).get("student_name")
+        doc["total"] = (order or {}).get("total") or (order or {}).get("subtotal")
+        doc["shop_name"] = (shop or {}).get("name") or (order or {}).get("shop_name")
+        enriched.append(doc)
+    return enriched
+
+
+@router.post("/whatsapp/{whatsapp_id}/mark-sent")
+async def whatsapp_mark_sent(whatsapp_id: str, admin: dict = Depends(verify_admin)):
+    """Mark a WhatsApp notification as sent (after the admin tapped the link)."""
+    doc = await _db(db.mark_whatsapp_sent, whatsapp_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="WhatsApp notification not found")
+    return doc
 
 
 @router.get("/orders/{order_id}/whatsapp-link")
@@ -509,7 +621,7 @@ async def vendor_logs(shop_id: str, admin: dict = Depends(verify_admin)):
         "summary": {
             "total_revenue": sum(o["total"] for o in orders),
             "total_orders": len(orders),
-            "total_admin_fee": sum(round((d.get("revenue") or 0) * 0.05) for d in daily),
+            "total_admin_fee": sum((d.get("count") or 0) * 10 for d in daily),
         },
     }
 
@@ -517,13 +629,28 @@ async def vendor_logs(shop_id: str, admin: dict = Depends(verify_admin)):
 @router.get("/notifications")
 async def admin_notifications(admin: dict = Depends(verify_admin)):
     """Get notifications targeted at admins."""
-    return await _db(db.list_notifications, role="admin")
+    key = "admin-notifications"
+    hit = ttl_cache.get(key)
+    if hit is None and shared_cache.enabled():
+        hit = await asyncio.to_thread(shared_cache.get, key)
+        if hit is not None:
+            ttl_cache.set(key, hit, 10)
+    if hit is not None:
+        return hit
+    value = await _db(db.list_notifications, role="admin")
+    ttl_cache.set(key, value, 10)
+    if shared_cache.enabled():
+        await asyncio.to_thread(shared_cache.set_pair, key, value, 10)
+    return value
 
 
 @router.get("/payments")
 async def list_all_payments(admin: dict = Depends(verify_admin)):
-    """List all payments."""
-    return await _db(db.list_payments)
+    """List all payments — single orders from the payments table plus multi-shop
+    parent orders (their ONE-bill payment lives on the parent_orders row)."""
+    single = await _db(db.list_payments)
+    parent = await _db(db.list_parent_payments)
+    return single + parent
 
 
 @router.get("/shares")
@@ -531,10 +658,10 @@ async def share_status(admin: dict = Depends(verify_admin)):
     """Live vendor-share monitoring — MONTHLY cycle.
 
     The share cycle runs per calendar month (Asia/Kolkata): every approved
-    vendor's share is 5% of what they earned THIS month through the app. The
-    counters reset automatically on the 1st of each month because they are
-    computed from order timestamps, never stored. Returns every vendor with
-    this month's earnings, this month's 5% share, and whether it has been
+    vendor's share is a flat ₹10 per order they earned THIS month through the
+    app. The counters reset automatically on the 1st of each month because they
+    are computed from order timestamps, never stored. Returns every vendor with
+    this month's earnings, this month's share (orders × ₹10), and whether it has been
     paid, plus the full share-payment history (Pending / Received) so the
     admin can see exactly how much was expected, done, and pending this month."""
     shops = await _db(db.list_shops)
@@ -560,7 +687,7 @@ async def share_status(admin: dict = Depends(verify_admin)):
         shop_orders = [o for o in orders if o["shop_id"] == shop["id"] and o["status"] not in ("Cancelled", "Failed")]
         month_orders = [o for o in shop_orders if _month_of(o.get("created_at")) == month_key]
         month_revenue = sum(o["total"] for o in month_orders)
-        month_fee = round(month_revenue * 0.05)
+        month_fee = len(month_orders) * 10
 
         my_payments = [p for p in share_payments if p.get("shop_id") == shop["id"]]
         paid_month = any(
@@ -628,12 +755,78 @@ async def update_share_payment(payment_id: str, data: dict, admin: dict = Depend
 
 @router.patch("/payments/{payment_id}/verify")
 async def verify_payment(payment_id: str, data: dict, admin: dict = Depends(verify_admin)):
-    """Verify or reject a manual payment."""
+    """Verify or reject a manual payment.
+
+    When approved, the payment is provably received, so the shopkeeper's
+    WhatsApp notification is auto-generated exactly as with the bank-SMS/UTR
+    path — the money has been verified either way.
+    """
     status = data.get("status", "Success")
+    payment = await _db(db.get_payment_by_id, payment_id)
+    if not payment:
+        # Multi-shop parent order — its payment proof is on the parent_orders row.
+        payment = await _db(db.verify_parent_payment, payment_id, status)
+        if not payment:
+            raise HTTPException(status_code=404, detail="Payment not found")
+        if str(status).lower() in ("success", "verified", "received"):
+            try:
+                parent = await _db(db.get_parent_order, payment_id)
+                if parent and parent.get("sub_orders"):
+                    for sub in parent["sub_orders"]:
+                        shop = await _db(db.get_shop, sub.get("shop_id") or "")
+                        wa_number = str((shop or {}).get("whatsapp_number") or "").strip() or str((shop or {}).get("phone") or "").strip()
+                        if shop and wa_number:
+                            await _notify_shop_whatsapp_verified(_sub_order_shape(sub), shop, wa_number)
+            except Exception as e:
+                logger.warning(f"Admin verify parent payment — WhatsApp notify error: {e}")
+        return {"message": f"Payment {status.lower()}", "payment": payment}
     payment = await _db(db.update_payment_status, payment_id, status)
     if not payment:
         raise HTTPException(status_code=404, detail="Payment not found")
+    if str(status).lower() in ("success", "verified", "received"):
+        try:
+            # Multi-shop orders pay on the PARENT order id (not in `orders`),
+            # so notify each shop involved through its sub-order.
+            parent = await _db(db.get_parent_order, payment.get("order_id") or "")
+            if parent and parent.get("sub_orders"):
+                for sub in parent["sub_orders"]:
+                    shop = await _db(db.get_shop, sub.get("shop_id") or "")
+                    wa_number = str((shop or {}).get("whatsapp_number") or "").strip() or str((shop or {}).get("phone") or "").strip()
+                    if shop and wa_number:
+                        await _notify_shop_whatsapp_verified(_sub_order_shape(sub), shop, wa_number)
+            else:
+                order = await _db(db.get_order, payment.get("order_id") or "")
+                if order:
+                    shop = await _db(db.get_shop, order.get("shop_id") or "")
+                    wa_number = str((shop or {}).get("whatsapp_number") or "").strip() or str((shop or {}).get("phone") or "").strip()
+                    if shop and wa_number:
+                        await _notify_shop_whatsapp_verified(order, shop, wa_number)
+        except Exception as e:
+            logger.warning(f"Admin verify payment — WhatsApp notify error: {e}")
     return {"message": f"Payment {status.lower()}", "payment": payment}
+
+
+async def _notify_shop_whatsapp_verified(order: dict, shop: dict, phone: str) -> None:
+    """Fire-and-forget: build the wa.me link for a payment-verified order and
+    log it as a Pending WhatsApp notification for the admin centre. Mirror of
+    the bank-SMS UTR path in ``local.py``."""
+    try:
+        from urllib.parse import quote
+        from app.services.sms_service import compose_order_wa
+        digits = "".join(ch for ch in phone if ch.isdigit())
+        if len(digits) == 10:
+            digits = "91" + digits
+        url = f"https://wa.me/{digits}?text={quote(compose_order_wa(order))}"
+        await _db(
+            db.log_whatsapp,
+            sub_order_id=order["id"],
+            phone=phone,
+            message=compose_order_wa(order),
+            url=url,
+            status="Pending",
+        )
+    except Exception as e:
+        logger.warning(f"Admin verify — WhatsApp build error for {order.get('id')}: {e}")
 
 
 @router.get("/feedback")
@@ -642,7 +835,19 @@ async def list_feedback(
     admin: dict = Depends(verify_admin),
 ):
     """All student bug reports / improvement contributions."""
-    return await _db(db.list_site_feedback, source=source or None)
+    key = f"admin-feedback:{source or ''}"
+    hit = ttl_cache.get(key)
+    if hit is None and shared_cache.enabled():
+        hit = await asyncio.to_thread(shared_cache.get, key)
+        if hit is not None:
+            ttl_cache.set(key, hit, 10)
+    if hit is not None:
+        return hit
+    value = await _db(db.list_site_feedback, source=source or None)
+    ttl_cache.set(key, value, 10)
+    if shared_cache.enabled():
+        await asyncio.to_thread(shared_cache.set_pair, key, value, 10)
+    return value
 
 
 @router.patch("/feedback/{feedback_id}")
@@ -680,3 +885,77 @@ async def delete_user(user_id: int, admin: dict = Depends(verify_admin)):
 async def list_all_reviews(admin: dict = Depends(verify_admin)):
     """All student reviews for shops."""
     return await _db(db.list_reviews)
+
+
+# ─── Admin push notifications (ring the admin's phone) ───
+# Mirror of the vendor app's web-push flow, but for the Admin Centre's own
+# devices. Subscriptions are stored in the same push_subscriptions table with
+# the sentinel shop_id="admin" — the admin channel is a single global bucket.
+
+
+class PushSubscriptionKeys(BaseModel):
+    p256dh: str = Field(..., min_length=1)
+    auth: str = Field(..., min_length=1)
+
+
+class PushSubscriptionCreate(BaseModel):
+    endpoint: str = Field(..., min_length=10)
+    keys: PushSubscriptionKeys
+
+
+@router.get("/push/config")
+async def admin_push_config(admin: dict = Depends(verify_admin)):
+    """Tell the admin app whether web push is configured and hand it the
+    public VAPID key needed to subscribe."""
+    keys = push_service.get_vapid_keys()
+    if keys:
+        return {"enabled": True, "vapid_public_key": keys["public_key"], "reason": ""}
+    return {
+        "enabled": False,
+        "vapid_public_key": "",
+        "reason": "VAPID keys are not configured on the server yet.",
+    }
+
+
+@router.post("/push/subscribe")
+async def admin_subscribe_push(data: PushSubscriptionCreate, admin: dict = Depends(verify_admin)):
+    """Register this device's push subscription so the admin gets phone alerts."""
+    endpoint = data.endpoint.strip()
+    if not endpoint.startswith("https://"):
+        raise HTTPException(status_code=400, detail="Invalid push endpoint")
+    try:
+        saved = await _db(
+            db.save_push_subscription,
+            # Sentinel bucket — the admin channel is not tied to any shop.
+            "admin",
+            endpoint,
+            data.keys.p256dh.strip(),
+            data.keys.auth.strip(),
+        )
+    except Exception as e:
+        logger.error(f"Could not save admin push subscription: {e}")
+        raise HTTPException(status_code=400, detail="Could not save the push subscription")
+    if not saved:
+        raise HTTPException(status_code=400, detail="Could not save the push subscription")
+    return {"ok": True, "message": "Admin notifications enabled 🔔", "subscription": saved}
+
+
+@router.delete("/push/subscribe")
+async def admin_unsubscribe_push(
+    admin: dict = Depends(verify_admin),
+    endpoint: str = Query(..., min_length=10, description="The push subscription endpoint URL to remove"),
+):
+    """Remove this device's push subscription. The endpoint is passed as a
+    query parameter — DELETE bodies are non-standard and may be stripped."""
+    try:
+        removed = await _db(db.remove_push_subscription, "admin", endpoint.strip())
+    except Exception as e:
+        logger.error(f"Could not remove admin push subscription: {e}")
+        raise HTTPException(status_code=400, detail="Could not remove the push subscription")
+    return {"ok": True, "removed": bool(removed)}
+
+
+@router.post("/push/test")
+async def admin_test_push(admin: dict = Depends(verify_admin)):
+    """Send a test push to every subscribed admin device (test button)."""
+    return await _db(push_service.send_admin_test_push)

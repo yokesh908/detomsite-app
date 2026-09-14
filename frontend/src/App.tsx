@@ -1,24 +1,37 @@
 import { BrowserRouter as Router, Routes, Route, Link } from 'react-router-dom'
+import { lazy, Suspense } from 'react'
 import './App.css'
-import { Home } from './pages/Home'
-import { Shops } from './pages/Shops'
-import { ShopDetail } from './pages/shop/ShopDetail'
-import { CustomerDashboard } from './pages/customer/CustomerDashboard'
-import { FeedbackPage } from './pages/customer/FeedbackPage'
-import { ShopkeeperDashboard } from './pages/shopkeeper/ShopkeeperDashboard'
-import { AdminDashboard } from './pages/admin/AdminDashboard'
-import { AuthPage } from './pages/AuthPage'
-import { RoleGate } from './components/RoleGate'
-import { MainLayout } from './components/Layout'
-import { CartPage } from './pages/CartPage'
-import { PaymentPage } from './pages/PaymentPage'
-import { OrderResultPage } from './pages/OrderResultPage'
-import { SupportPage } from './pages/SupportPage'
-import { InstallPwaCard } from './components/InstallPwaCard'
-import { VendorRegister } from './pages/vendor/VendorRegister'
-import { AdminLogin } from './pages/admin/AdminLogin'
 
-/* ─── Portal Landing Page ─── */
+const Home = lazy(() => import('./pages/Home').then(m => ({ default: m.Home })))
+const Shops = lazy(() => import('./pages/Shops').then(m => ({ default: m.Shops })))
+const ShopDetail = lazy(() => import('./pages/shop/ShopDetail').then(m => ({ default: m.ShopDetail })))
+const CustomerDashboard = lazy(() => import('./pages/customer/CustomerDashboard').then(m => ({ default: m.CustomerDashboard })))
+const FeedbackPage = lazy(() => import('./pages/customer/FeedbackPage').then(m => ({ default: m.FeedbackPage })))
+const ShopkeeperDashboard = lazy(() => import('./pages/shopkeeper/ShopkeeperDashboard').then(m => ({ default: m.ShopkeeperDashboard })))
+const AdminDashboard = lazy(() => import('./pages/admin/AdminDashboard').then(m => ({ default: m.AdminDashboard })))
+const AuthPage = lazy(() => import('./pages/AuthPage').then(m => ({ default: m.AuthPage })))
+const RoleGate = lazy(() => import('./components/RoleGate').then(m => ({ default: m.RoleGate })))
+const MainLayout = lazy(() => import('./components/Layout').then(m => ({ default: m.MainLayout })))
+const CartPage = lazy(() => import('./pages/CartPage').then(m => ({ default: m.CartPage })))
+const PaymentPage = lazy(() => import('./pages/PaymentPage').then(m => ({ default: m.PaymentPage })))
+const OrderResultPage = lazy(() => import('./pages/OrderResultPage').then(m => ({ default: m.OrderResultPage })))
+const SupportPage = lazy(() => import('./pages/SupportPage').then(m => ({ default: m.SupportPage })))
+const InstallPwaCard = lazy(() => import('./components/InstallPwaCard').then(m => ({ default: m.InstallPwaCard })))
+const VendorRegister = lazy(() => import('./pages/vendor/VendorRegister').then(m => ({ default: m.VendorRegister })))
+const AdminLogin = lazy(() => import('./pages/admin/AdminLogin').then(m => ({ default: m.AdminLogin })))
+
+function PageSpinner() {
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-white">
+      <div className="flex flex-col items-center gap-3">
+        <div className="h-10 w-10 animate-spin rounded-full border-4 border-emerald-200 border-t-emerald-600" />
+        <p className="text-sm font-medium text-gray-400">Loading...</p>
+      </div>
+    </div>
+  )
+}
+
+/* ─── Portal Landing Page (student only) ─── */
 function PortalLanding() {
   return (
     <div className="min-h-screen bg-gradient-to-br from-emerald-950 via-emerald-900 to-emerald-800 text-white">
@@ -28,11 +41,12 @@ function PortalLanding() {
           DETOMSITE
         </h1>
         <p className="mt-4 max-w-xl text-lg font-medium text-primary/50/80">
-          Campus Food Ordering Platform — Choose your portal below
+          Campus Food Ordering Platform — order from your campus kitchens
         </p>
 
-        <div className="mt-12 grid gap-5 sm:grid-cols-3">
-          {/* Student */}            <Link to="/auth"
+        <div className="mt-12 grid w-full max-w-lg gap-5">
+          {/* Student */}
+          <Link to="/auth"
             className="group rounded-[28px] border border-white/10 bg-white/5 p-6 text-left backdrop-blur-sm transition-all hover:bg-white/10 hover:-translate-y-1 hover:shadow-2xl">
             <span className="text-4xl">🎓</span>
             <h2 className="mt-4 text-xl font-bold text-white">Student Portal</h2>
@@ -41,31 +55,10 @@ function PortalLanding() {
               Register →
             </div>
           </Link>
-
-          {/* Shopkeeper */}            <Link to="/vendor/register"
-            className="group rounded-[28px] border border-amber-300/20 bg-gold-light/5 p-6 text-left backdrop-blur-sm transition-all hover:bg-gold-light/10 hover:-translate-y-1 hover:shadow-2xl">
-            <span className="text-4xl">👨‍🍳</span>
-            <h2 className="mt-4 text-xl font-bold text-white">Shopkeeper Portal</h2>
-            <p className="mt-2 text-sm text-primary/50/60">Register your shop, manage orders, install mobile app.</p>
-            <div className="mt-4 inline-flex rounded-btn bg-gold px-4 py-2 text-sm font-bold text-white transition-all group-hover:bg-gold">
-              Register Shop →
-            </div>
-          </Link>
-
-          {/* Admin */}
-          <Link to="/admin"
-            className="group rounded-[28px] border border-white/10 bg-white/5 p-6 text-left backdrop-blur-sm transition-all hover:bg-white/10 hover:-translate-y-1 hover:shadow-2xl">
-            <span className="text-4xl">⚙️</span>
-            <h2 className="mt-4 text-xl font-bold text-white">Admin Portal</h2>
-            <p className="mt-2 text-sm text-primary/50/60">Approve shops, monitor orders, manage platform.</p>
-            <div className="mt-4 inline-flex rounded-btn bg-primary px-4 py-2 text-sm font-bold text-white transition-all group-hover:bg-primary">
-              Admin Login →
-            </div>
-          </Link>
         </div>
 
         <p className="mt-10 text-sm font-medium text-primary/50/40">
-          Existing users{' '}
+          Existing user?{' '}
           <Link to="/auth" className="font-bold text-gold hover:text-gold">Sign In</Link>
         </p>
       </div>
@@ -86,7 +79,9 @@ function VendorPortalLanding() {
 
         {/* PWA Install Card */}
         <div className="mb-8">
-          <InstallPwaCard />
+          <Suspense fallback={null}>
+            <InstallPwaCard />
+          </Suspense>
         </div>
 
         <div className="rounded-[28px] border border-emerald-100 bg-white p-6 shadow-[0_14px_42px_rgba(15,118,110,0.12)]">
@@ -131,41 +126,45 @@ function NotFound() {
 function App() {
   return (
     <Router>
-      <Routes>
-        {/* Portal landing selector - no auth needed */}
-        <Route path="/" element={<PortalLanding />} />
-        <Route path="/admin" element={<AdminLogin />} />
-        <Route path="/vendor" element={<VendorPortalLanding />} />
-        <Route path="/vendor/register" element={<VendorRegister />} />
-        <Route path="/admin/login" element={<AdminLogin />} />
+      <Suspense fallback={<PageSpinner />}>
+        <Routes>
+          {/* Portal landing selector - no auth needed */}
+          <Route path="/" element={<PortalLanding />} />
+          <Route path="/admin" element={<AdminLogin />} />
+          <Route path="/vendor" element={<VendorPortalLanding />} />
+          <Route path="/vendor/register" element={<VendorRegister />} />
+          <Route path="/admin/login" element={<AdminLogin />} />
 
-        {/* Auth pages — unified login/signup for student & shopkeeper */}
-        <Route path="/auth" element={<AuthPage />} />
+          {/* Auth pages — unified login/signup for student & shopkeeper */}
+          <Route path="/auth" element={<AuthPage />} />
 
-        {/* All authenticated routes */}
-        <Route path="/*" element={
-          <RoleGate>
-            <MainLayout>
-              <Routes>
-                <Route path="/home" element={<Home />} />
-                <Route path="/shops" element={<Shops />} />
-                <Route path="/shop/:shopId" element={<ShopDetail />} />
-                <Route path="/cart" element={<CartPage />} />
-                <Route path="/payment" element={<PaymentPage />} />
-                <Route path="/order-result/:orderId" element={<OrderResultPage />} />
-                <Route path="/support" element={<SupportPage />} />
-                <Route path="/login" element={<AuthPage />} />
-                <Route path="/register" element={<AuthPage />} />
-                <Route path="/customer-dashboard" element={<CustomerDashboard />} />
-                <Route path="/feedback" element={<FeedbackPage />} />
-                <Route path="/shopkeeper-dashboard" element={<ShopkeeperDashboard />} />
-                <Route path="/admin-dashboard" element={<AdminDashboard />} />
-                <Route path="*" element={<NotFound />} />
-              </Routes>
-            </MainLayout>
-          </RoleGate>
-        } />
-      </Routes>
+          {/* All authenticated routes */}
+          <Route path="/*" element={
+            <RoleGate>
+              <MainLayout>
+                <Suspense fallback={<PageSpinner />}>
+                  <Routes>
+                    <Route path="/home" element={<Home />} />
+                    <Route path="/shops" element={<Shops />} />
+                    <Route path="/shop/:shopId" element={<ShopDetail />} />
+                    <Route path="/cart" element={<CartPage />} />
+                    <Route path="/payment" element={<PaymentPage />} />
+                    <Route path="/order-result/:orderId" element={<OrderResultPage />} />
+                    <Route path="/support" element={<SupportPage />} />
+                    <Route path="/login" element={<AuthPage />} />
+                    <Route path="/register" element={<AuthPage />} />
+                    <Route path="/customer-dashboard" element={<CustomerDashboard />} />
+                    <Route path="/feedback" element={<FeedbackPage />} />
+                    <Route path="/shopkeeper-dashboard" element={<ShopkeeperDashboard />} />
+                    <Route path="/admin-dashboard" element={<AdminDashboard />} />
+                    <Route path="*" element={<NotFound />} />
+                  </Routes>
+                </Suspense>
+              </MainLayout>
+            </RoleGate>
+          } />
+        </Routes>
+      </Suspense>
     </Router>
   )
 }
