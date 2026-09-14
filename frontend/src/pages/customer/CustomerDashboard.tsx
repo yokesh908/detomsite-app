@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, useCallback } from 'react'
 import { Link } from 'react-router-dom'
 import api from '../../services/api'
 import { LocalNotification, LocalParentOrder, LocalTicket } from '../../types/localApi'
-import { getLocalSession } from '../../utils/session'
+import { getLocalSession, saveLocalSession } from '../../utils/session'
 import { subscribeNotifications } from '../../services/notifStore'
 import { usePolling } from '../../hooks/usePolling'
 import { same } from '../../utils/same'
@@ -31,6 +31,49 @@ export function CustomerDashboard() {
   const [tickets, setTickets] = useState<LocalTicket[]>([])
   const [notifications, setNotifications] = useState<LocalNotification[]>([])
   const [notice, setNotice] = useState<Notice>(null)
+  const [editingProfile, setEditingProfile] = useState(false)
+  const [profileForm, setProfileForm] = useState({ name: session?.name || '', phone: session?.phone || '', email: session?.email || '' })
+  const [savingProfile, setSavingProfile] = useState(false)
+  const [editNotice, setEditNotice] = useState<Notice>(null)
+  const profilePhone = session?.phone || ''
+
+  const startEditProfile = () => {
+    setProfileForm({ name: session?.name || '', phone: session?.phone || '', email: session?.email || '' })
+    setEditNotice(null)
+    setEditingProfile(true)
+  }
+
+  const saveProfile = async () => {
+    const name = profileForm.name.trim()
+    if (!name) {
+      setEditNotice({ kind: 'error', text: 'Name is required' })
+      return
+    }
+    setSavingProfile(true)
+    setEditNotice(null)
+    try {
+      const r = await api.patch<{ access_token: string; user: { name: string; email: string; phone: string; role: string } }>('/local/auth/me', {
+        name,
+        phone: profileForm.phone.trim(),
+        email: profileForm.email.trim(),
+      })
+      if (r.data.access_token) localStorage.setItem('access_token', r.data.access_token)
+      saveLocalSession({
+        role: session?.role || 'student',
+        email: r.data.user.email || session?.email || '',
+        name: r.data.user.name || name,
+        phone: r.data.user.phone || profileForm.phone.trim(),
+      })
+      setNotice({ kind: 'ok', text: 'Profile updated successfully' })
+      setEditNotice({ kind: 'ok', text: 'Saved!' })
+      setEditingProfile(false)
+      setTimeout(() => setNotice(null), 2500)
+    } catch (err: any) {
+      setEditNotice({ kind: 'error', text: err?.response?.data?.detail || 'Could not save your details' })
+    } finally {
+      setSavingProfile(false)
+    }
+  }
 
   useEffect(() => {
     // Notifications come from the shared store (same 10s poller as the navbar
@@ -196,10 +239,63 @@ export function CustomerDashboard() {
           <div>
             <section className="mb-4 rounded-btn bg-white p-4 shadow-card">
               <h2 className="mb-3 text-lg font-bold text-primary">Profile</h2>
-              <div className="space-y-1 text-sm text-gray-500">
-                <p><span className="font-medium text-gray-700">Name:</span> {session?.name || '—'}</p>
-                <p><span className="font-medium text-gray-700">Phone:</span> {session?.phone || session?.email || '—'}</p>
-              </div>
+              {editingProfile ? (
+                <div className="space-y-3">
+                  <div>
+                    <label className="mb-1 block text-xs font-bold text-gray-500">Full name</label>
+                    <input
+                      value={profileForm.name}
+                      onChange={e => setProfileForm({ ...profileForm, name: e.target.value })}
+                      className="w-full rounded-btn border border-gray-200 px-3 py-2 text-sm text-gray-800 outline-none focus:border-primary"
+                      placeholder="Your full name"
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-xs font-bold text-gray-500">Phone</label>
+                    <input
+                      value={profileForm.phone}
+                      onChange={e => setProfileForm({ ...profileForm, phone: e.target.value })}
+                      className="w-full rounded-btn border border-gray-200 px-3 py-2 text-sm text-gray-800 outline-none focus:border-primary"
+                      placeholder="10-digit mobile number"
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-xs font-bold text-gray-500">Email</label>
+                    <input
+                      value={profileForm.email}
+                      onChange={e => setProfileForm({ ...profileForm, email: e.target.value })}
+                      className="w-full rounded-btn border border-gray-200 px-3 py-2 text-sm text-gray-800 outline-none focus:border-primary"
+                      placeholder="you@campus.local"
+                    />
+                  </div>
+                  {editNotice && (
+                    <p className={`text-xs font-semibold ${editNotice.kind === 'ok' ? 'text-emerald-600' : 'text-red-600'}`}>
+                      {editNotice.text}
+                    </p>
+                  )}
+                  <div className="flex gap-2">
+                    <button onClick={() => void saveProfile()}
+                      disabled={savingProfile}
+                      className="flex-1 rounded-btn bg-primary px-3 py-2 text-sm font-bold text-white hover:bg-primary-dark disabled:opacity-50">
+                      {savingProfile ? 'Saving...' : 'Save changes'}
+                    </button>
+                    <button onClick={() => { setEditingProfile(false); setEditNotice(null) }}
+                      className="rounded-btn border border-gray-200 px-3 py-2 text-sm font-bold text-gray-500 hover:bg-gray-50">
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-1 text-sm text-gray-500">
+                  <p><span className="font-medium text-gray-700">Name:</span> {session?.name || '—'}</p>
+                  <p><span className="font-medium text-gray-700">Phone:</span> {profilePhone || '—'}</p>
+                  <p><span className="font-medium text-gray-700">Email:</span> {session?.email || '—'}</p>
+                  <button onClick={startEditProfile}
+                    className="mt-2 inline-flex items-center gap-1 rounded-btn bg-gold-light/60 px-3 py-1.5 text-xs font-bold text-gold-800 transition-colors hover:bg-gold-light">
+                    ✏️ Edit details
+                  </button>
+                </div>
+              )}
             </section>
             <section className="mb-4 rounded-btn bg-white p-4 shadow-card">
               <h2 className="mb-3 text-lg font-bold text-primary">Notifications</h2>

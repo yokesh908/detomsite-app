@@ -63,15 +63,16 @@ export function AuthPage() {
     }
 
     // ─── Helper to complete auth after login/register ───
-    const finishAuth = (user: { username: string; name: string; role: string }, accessToken: string | null) => {
+    const finishAuth = (user: { username: string; name: string; role: string; email?: string; phone?: string }, accessToken: string | null) => {
       if (accessToken) {
         localStorage.setItem('access_token', accessToken)
       }
       const role: UserRoleChoice = 'student'
       const session = {
         role,
-        email: `${user.username}@campus.local`,
+        email: user.email || `${user.username}@campus.local`,
         name: user.name,
+        phone: user.phone || undefined,
       }
       saveLocalSession(session)
       // Fire-and-forget for backend session + supabase sync

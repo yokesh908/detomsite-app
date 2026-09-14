@@ -2792,6 +2792,28 @@ def update_user_password(username: str, new_password_hash: str) -> bool:
         return cursor.rowcount > 0
 
 
+def update_user_profile(user_id: int, name: str | None = None, email: str | None = None, phone: str | None = None) -> dict[str, Any] | None:
+    """Update a user's editable profile fields (name, email, phone) by id.
+    Returns the full clean user row (without password_hash) or None if the
+    user doesn't exist."""
+    updates: list[str] = []
+    params: list[Any] = []
+    if name is not None:
+        updates.append("name = ?")
+        params.append(name.strip() or "")
+    if email is not None:
+        updates.append("email = ?")
+        params.append(email.strip())
+    if phone is not None:
+        updates.append("phone = ?")
+        params.append(phone.strip())
+    if updates:
+        params.append(user_id)
+        with _connect() as connection:
+            connection.execute(f"UPDATE users SET {', '.join(updates)} WHERE id = ?", params)
+    return get_user_by_id(user_id)
+
+
 # ─── Site feedback / bug reports (students → admin) ───
 
 

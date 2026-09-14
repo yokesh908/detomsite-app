@@ -381,6 +381,8 @@ class LocalAuthUser(BaseModel):
     username: str
     name: str
     role: str
+    email: str = ""
+    phone: str = ""
     created_at: datetime
 
 
@@ -605,6 +607,74 @@ async def local_phone_onboarding(data: LocalPhoneOnboarding, request: Request):
 async def local_me(current_user: dict = Depends(get_current_local_user)):
     """Get the current authenticated user's profile."""
     return current_user
+
+
+class LocalProfileUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    email: str | None = Field(default=None, max_length=200)
+    phone: str | None = Field(default=None, max_length=30)
+    password: str | None = Field(default=None, min_length=4, max_length=128)
+
+
+@router.patch("/auth/me")
+async def local_update_me(data: LocalProfileUpdate, current_user: dict = Depends(get_current_local_user)):
+    """Update the current student's profile — name, phone, email, and/or password.
+    Auth is locked to the JWT subject, so a student can only ever edit their
+    own row. Returns the updated profile and a fresh token so the client session
+    reflects the new identity."""
+    if current_user is None:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+
+    user_id = current_user["id"]
+
+    name = data.name.strip() if data.name is not None else None
+    email = (data.email or "").strip() if data.email is not None else None
+    phone = data.phone.strip() if data.phone is not None else None
+
+    if name is not None and not name:
+        raise HTTPException(status_code=422, detail="Name cannot be empty")
+
+    # Email unique across the whole platform — one email = one account.
+    if email is not None and email:
+        existing = await _db(db.get_user_by_email, email)
+        if existing and existing["id"] != user_id:
+            raise HTTPException(status_code=409, detail="This email is already registered to another account")
+    elif email is not None:
+        email = ""
+
+    if data.password:
+        new_hash = await asyncio.to_thread(hash_password, data.password)
+        # Update password via the dedicated helper (no password in the profile row).
+        await _db(db.update_user_password, current_user["username"], new_hash)
+
+    updated = await _db(db.update_user_profile, user_id, name=name, email=email, phone=phone)
+    if not updated:
+        raise HTTPException(status_code=404, detail="User not found")
+
+    # Issue a fresh token so the name in the JWT/session matches immediately.
+    token_data = {
+        "sub": str(updated["id"]),
+        "username": updated["username"],
+        "name": updated["name"],
+        "role": updated["role"],
+    }
+    access_token = create_access_token(token_data)
+    refresh_token = create_refresh_token(token_data)
+
+    return LocalAuthResponse(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        token_type="bearer",
+        user=LocalAuthUser(
+            id=updated["id"],
+            username=updated["username"],
+            name=updated["name"],
+            role=updated["role"],
+            email=updated.get("email", "") or "",
+            phone=updated.get("phone", "") or "",
+            created_at=updated["created_at"],
+        ),
+    )
 
 
 @router.get("/summary")

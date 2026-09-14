@@ -1877,6 +1877,37 @@ def update_user_password(username: str, new_password_hash: str) -> bool:
             return cursor.rowcount > 0
 
 
+@_dual_read
+def update_user_profile(user_id: int, name: str | None = None, email: str | None = None, phone: str | None = None) -> dict[str, Any] | None:
+    """Update a user's editable profile fields (name, email, phone) by id.
+    Returns the full clean user row (without password_hash) or None if the
+    user doesn't exist. Email is left untouched when not provided so a caller
+    can't accidentally blank it."""
+    updates: list[str] = []
+    params: list[Any] = []
+    if name is not None:
+        updates.append("name = %s")
+        params.append(name.strip() or "")
+    if email is not None:
+        updates.append("email = %s")
+        params.append(email.strip())
+    if phone is not None:
+        updates.append("phone = %s")
+        params.append(phone.strip())
+    if not updates:
+        return get_user_by_id(user_id)
+    params.append(user_id)
+    with _DBContext(_connect()) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(f"UPDATE users SET {', '.join(updates)} WHERE id = %s", params)
+            cursor.execute(
+                "SELECT id, username, name, email, phone, role, created_at FROM users WHERE id = %s",
+                (user_id,),
+            )
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+
 # ─── Site feedback / bug reports (students → admin) ───
 
 
