@@ -2367,6 +2367,27 @@ def get_product_stock(product_id: str, batch_type: str, date_key: str | None = N
         _release(connection)
 
 
+def get_product_stocks(batch_type: str, date_key: str | None = None) -> dict[str, int]:
+    """Remaining stock for EVERY product in the given batch — one query, not
+    one per product. Falls back to the product's ``inventory`` when no explicit
+    ``product_stock`` row exists, mirroring :func:`get_product_stock`."""
+    dk = date_key or _day_key()
+    connection = _connect()
+    try:
+        with connection.cursor() as cur:
+            cur.execute(
+                """SELECT p.id AS pid,
+                          COALESCE(ps.total_stock, p.inventory) - COALESCE(ps.sold, 0) AS stock_left
+                     FROM products p
+                     LEFT JOIN product_stock ps
+                       ON ps.product_id = p.id AND ps.date_key = %s AND ps.batch_type = %s""",
+                (dk, batch_type),
+            )
+            return {r["pid"]: max(0, int(r["stock_left"])) for r in cur.fetchall()}
+    finally:
+        _release(connection)
+
+
 def init_batch_stock(product_id: str, batch_type: str, default_stock: int, date_key: str | None = None) -> None:
     """Insert a default stock row for a product in a batch (no-op if present)."""
     dk = date_key or _day_key()

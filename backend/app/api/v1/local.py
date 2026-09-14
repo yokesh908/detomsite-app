@@ -2140,9 +2140,10 @@ async def products_with_stock(_user: dict = Depends(get_current_local_user)):
     batch_type = db.get_current_batch()
     products = await _db(db.list_products)
     date_key = db._day_key()
+    stocks = await _db(db.get_product_stocks, batch_type, date_key)
     for p in products:
         p["batch_type"] = batch_type
-        p["stock_left"] = db.get_product_stock(p["id"], batch_type, date_key)
+        p["stock_left"] = stocks.get(p["id"], 0)
     ttl_cache.set("products-stock", products, 5)
     if shared_cache.enabled():
         await asyncio.to_thread(shared_cache.set_pair, "products-stock", products, 5)

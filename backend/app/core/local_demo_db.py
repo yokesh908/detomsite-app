@@ -166,6 +166,25 @@ def get_product_stock(product_id: str, batch_type: str, date_key: str | None = N
         return int(product["inventory"]) if product else 0
 
 
+def get_product_stocks(batch_type: str, date_key: str | None = None) -> dict[str, int]:
+    """Current available stock for EVERY product in a batch — one query, not
+    one per product. Mirrors :func:`get_product_stock`'s fallback semantics."""
+    date_key = date_key or _day_key()
+    with _connect() as connection:
+        rows = connection.execute(
+            """SELECT p.id AS pid,
+                      COALESCE(
+                          (SELECT ps.current_stock FROM product_stock ps
+                           WHERE ps.product_id = p.id AND ps.batch_type = ? AND ps.date_key = ?
+                           ORDER BY ps.id DESC LIMIT 1),
+                          p.inventory
+                      ) AS stock_left
+                 FROM products p""",
+            (batch_type, date_key),
+        ).fetchall()
+        return {r["pid"]: max(0, int(r["stock_left"])) for r in rows}
+
+
 def init_batch_stock(product_id: str, batch_type: str, default_stock: int, date_key: str | None = None) -> None:
     """Ensure batch stock exists for today's batch. Reinitialized daily."""
     date_key = date_key or _day_key()
