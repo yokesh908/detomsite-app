@@ -226,13 +226,10 @@ def consume_batch_stock(product_id: str, batch_type: str, qty: int, date_key: st
                 (qty, stock_id),
             )
         else:
-            inventory = int(product["inventory"] or 0)
-            if inventory < qty:
-                return False
-            db.execute(
-                "INSERT INTO product_stock (product_id, batch_type, default_stock, current_stock, date_key) VALUES (?, ?, ?, ?, ?)",
-                (product_id, batch_type, inventory - qty, inventory - qty, date_key),
-            )
+            # No stock row for this product/batch/date yet — the shop has no
+            # explicit batch inventory tracked, so allow the order (matching the
+            # single-shop flow, which never enforces inventory).
+            pass
         return True
 
     if connection is not None:

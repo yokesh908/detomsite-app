@@ -2428,12 +2428,13 @@ def consume_batch_stock(product_id: str, batch_type: str, qty: int, date_key: st
                 )
                 connection.commit()
                 return True
-            # No stock row — fall back to product inventory.
-            cur.execute("SELECT inventory FROM products WHERE id = %s", (product_id,))
-            prow = cursor_row(cur)
-            if prow and int(prow["inventory"]) >= qty:
-                return True
-            return False
+            # No stock row for this product/batch/date yet — the shop has no
+            # explicit batch inventory tracked, so allow the order (matching the
+            # single-shop flow, which never enforces inventory). Only block when
+            # an explicit product_stock row exists AND has insufficient stock;
+            # this keeps combo/multi-shop orders from spuriously failing on
+            # shops that simply haven't configured batch stock rows.
+            return True
     except Exception:
         connection.rollback()
         return False
