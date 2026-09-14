@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import api from '../../services/api'
+import { apiCached } from '../../services/api'
 import { canOrderFromShop, LocalProduct, LocalShop, shopStatusText } from '../../types/localApi'
-import { addProductToCart, updateCartQuantity } from '../../utils/cart'
+import { addProductToCart } from '../../utils/cart'
 import { usePolling } from '../../hooks/usePolling'
 import { same } from '../../utils/same'
 
@@ -12,18 +12,17 @@ export function ShopDetail() {
   const [products, setProducts] = useState<LocalProduct[]>([])
   const [loading, setLoading] = useState(true)
   const [added, setAdded] = useState<string | null>(null)
-  const [activeQty, setActiveQty] = useState<Record<string, number>>({})
   const addedTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const load = useCallback(() => {
     if (!shopId) return
     // Shop and menu failures are independent — a bad stock call must not
     // nuke the whole page into "Shop not found".
-    api.get<LocalShop>(`/local/shops/${shopId}`)
-      .then(s => setShop(cur => same(cur, s.data) ? cur : s.data))
+    apiCached.get<LocalShop>(`/local/shops/${shopId}`, undefined, 6000)
+      .then(s => setShop(cur => same(cur, s) ? cur : s))
       .catch(() => setShop(null))
-    api.get<LocalProduct[]>('/local/products/stock')
-      .then(r => setProducts(cur => same(cur, (r.data || []).filter(p => (p.shop_id || '') === shopId)) ? cur : (r.data || []).filter(p => (p.shop_id || '') === shopId)))
+    apiCached.get<LocalProduct[]>('/local/products/stock', undefined, 6000)
+      .then(r => setProducts(cur => same(cur, (r || []).filter(p => (p.shop_id || '') === shopId)) ? cur : (r || []).filter(p => (p.shop_id || '') === shopId)))
       .catch(() => setProducts([]))
       .finally(() => setLoading(false))
   }, [shopId])
@@ -34,22 +33,13 @@ export function ShopDetail() {
 
   useEffect(() => () => { if (addedTimer.current) clearTimeout(addedTimer.current) }, [])
 
-  const handleAdd = (product: LocalProduct, qty = 1) => {
+  const handleAdd = (product: LocalProduct) => {
     if (!shop) return
     const p = { ...product }
     addProductToCart(p, shop)
-    setActiveQty(prev => ({ ...prev, [product.id]: (prev[product.id] || 0) + qty }))
     setAdded(product.id)
     if (addedTimer.current) clearTimeout(addedTimer.current)
     addedTimer.current = setTimeout(() => setAdded(null), 1500)
-  }
-
-  /* Decrement must actually shrink the cart — otherwise the stepper showed −1
-     while the cart still charged 1 (and hitting 0 left a ghost item behind). */
-  const handleDec = (product: LocalProduct) => {
-    const next = Math.max(0, (activeQty[product.id] || 1) - 1)
-    updateCartQuantity(product.id, next)
-    setActiveQty(prev => ({ ...prev, [product.id]: next }))
   }
 
   if (loading) return <div className="flex min-h-screen items-center justify-center bg-white text-gray-400">Loading...</div>
@@ -104,7 +94,6 @@ export function ShopDetail() {
               {items.map(product => {
                 const stockLeft = product.stock_left ?? product.inventory
                 const avail = Boolean(product.available) && stockLeft > 0
-                const qtyInCart = activeQty[product.id] || 0
                 return (
                   <div key={product.id} className={`flex items-start justify-between gap-3 rounded-card border p-4 transition-all ${avail && isOrderable ? 'border-primary-light/30 bg-white shadow-[0_8px_25px_rgba(15,118,110,0.08)]' : 'border-primary-light/20 bg-white/70 opacity-60'}`}>
                     <div className="min-w-0 flex-1">
@@ -124,22 +113,10 @@ export function ShopDetail() {
                       </div>
                     </div>
                     {avail && isOrderable ? (
-                      <div className="flex shrink-0 flex-col items-center gap-1.5">
-                        {qtyInCart > 0 ? (
-                          <div className="flex items-center gap-2 rounded-pill bg-primary-light/30 px-2 py-1">
-                            <button onClick={() => handleDec(product)}
-                              className="h-6 w-6 rounded-full bg-primary text-white font-bold">−</button>
-                            <span className="w-5 text-center font-bold text-primary">{qtyInCart}</span>
-                            <button onClick={() => handleAdd(product)}
-                              className="h-6 w-6 rounded-full bg-primary text-white font-bold">+</button>
-                          </div>
-                        ) : (
-                          <button onClick={() => handleAdd(product)}
-                            className={`rounded-pill px-4 py-1.5 text-xs font-bold transition-all ${added === product.id ? 'bg-primary text-white' : 'bg-primary-light/30 text-primary hover:bg-primary-light'}`}>
-                            {added === product.id ? '✓ Added' : 'ADD'}
-                          </button>
-                        )}
-                      </div>
+                      <button onClick={() => handleAdd(product)}
+                        className={`shrink-0 rounded-pill px-5 py-2 text-xs font-bold transition-all ${added === product.id ? 'bg-primary text-white shadow-gold-sm' : 'bg-primary-light/30 text-primary hover:bg-primary-light'}`}>
+                        {added === product.id ? '✓ Added' : '+ ADD'}
+                      </button>
                     ) : (
                       <span className="shrink-0 pt-1 text-xs font-semibold text-slate-400">
                         {!isOrderable ? 'Shop closed' : 'Unavailable'}

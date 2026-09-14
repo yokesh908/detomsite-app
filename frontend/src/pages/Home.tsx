@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
-import api from '../services/api'
+import { apiCached } from '../services/api'
 import {
   canOrderFromShop,
   LocalAnnouncement,
@@ -29,11 +29,11 @@ export function Home() {
   const [search, setSearch] = useState('')
 
   useEffect(() => {
-    api.get<LocalShop[]>('/local/shops', { params: { public_only: true } })
-      .then(res => setShops(res.data)).catch(() => setShops([]))
-    api.get<LocalProduct[]>('/local/products').then(res => setProducts(res.data)).catch(() => setProducts([]))
-    api.get<LocalAnnouncement[]>('/local/announcements').then(res => setAnnouncements(res.data)).catch(() => setAnnouncements([]))
-    api.get<BatchInfo>('/local/batch').then(res => setBatch(res.data)).catch(() => setBatch(null))
+    apiCached.get<LocalShop[]>('/local/shops', { public_only: true }, 10000)
+      .then(setShops).catch(() => setShops([]))
+    apiCached.get<LocalProduct[]>('/local/products', undefined, 10000).then(setProducts).catch(() => setProducts([]))
+    apiCached.get<LocalAnnouncement[]>('/local/announcements', undefined, 10000).then(setAnnouncements).catch(() => setAnnouncements([]))
+    apiCached.get<BatchInfo>('/local/batch', undefined, 10000).then(setBatch).catch(() => setBatch(null))
   }, [])
 
   const query = search.trim().toLowerCase()

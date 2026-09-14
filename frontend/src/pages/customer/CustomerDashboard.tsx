@@ -9,6 +9,22 @@ import { same } from '../../utils/same'
 
 type Notice = { kind: 'ok' | 'error'; text: string } | null
 
+const statusLabels: Record<string, string> = {
+  Pending: 'Pending',
+  Confirmed: 'Confirmed',
+  Accepted: 'Accepted',
+  Preparing: 'Preparing',
+  Ready: 'Ready',
+  Delivered: 'Delivered',
+  Completed: 'Completed',
+}
+const subStatusLabels: Record<string, string> = {
+  Confirmed: 'Confirmed',
+  Accepted: 'Accepted',
+  Preparing: 'Preparing',
+  Ready: 'Ready',
+}
+
 export function CustomerDashboard() {
   const session = getLocalSession()
   const [orders, setOrders] = useState<LocalParentOrder[]>([])
@@ -107,17 +123,19 @@ export function CustomerDashboard() {
                         <span className={`rounded-lg px-2.5 py-1 text-xs font-bold ${
                           order.status === 'Completed' ? 'bg-emerald-100 text-emerald-700' :
                           order.status === 'Delivered' ? 'bg-emerald-100 text-emerald-600' :
+                          order.status === 'Confirmed' ? 'bg-gold-100 text-gold-800' :
                           order.status === 'Cancelled' ? 'bg-red-100 text-red-600' :
                           'bg-blue-100 text-blue-700'
-                        }`}>{order.status}</span>
+                        }`}>{statusLabels[order.status] || order.status}</span>
                       </div>
                       <div className="mt-1 flex flex-wrap gap-1.5">
                         {order.sub_orders?.map(sub => (
-                          <span key={sub.id} className={`rounded-pill px-2.5 py-0.5 text-xs font-bold ${
+                          <span className={`rounded-pill px-2.5 py-0.5 text-xs font-bold ${
                             sub.status === 'Delivered' || sub.status === 'Completed' ? 'bg-emerald-50 text-emerald-600' :
+                            sub.status === 'Confirmed' ? 'bg-gold-100 text-gold-800' :
                             sub.status === 'Rejected' ? 'bg-red-50 text-red-600' :
                             'bg-sky-50 text-sky-600'
-                          }`}>{sub.shop_name}</span>
+                          }`}>{subStatusLabels[sub.status] || sub.shop_name}</span>
                         ))}
                       </div>
                       <p className="mt-2 text-sm text-gray-500">{order.sub_orders?.map(s => s.items_summary).join(' + ')}</p>
@@ -163,9 +181,10 @@ export function CustomerDashboard() {
                         <td className="px-4 py-3 font-semibold text-primary">₹{order.total}</td>
                         <td className="px-4 py-3"><span className={`rounded-lg px-2 py-0.5 text-xs font-bold ${
                           order.status === 'Completed' || order.status === 'Delivered' ? 'bg-emerald-50 text-emerald-600' :
+                          order.status === 'Confirmed' ? 'bg-gold-100 text-gold-800' :
                           order.status === 'Cancelled' ? 'bg-red-50 text-red-600' :
                           'bg-gray-50 text-gray-500'
-                        }`}>{order.status}</span></td>
+                        }`}>{statusLabels[order.status] || order.status}</span></td>
                       </tr>
                     ))}
                   </tbody>

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState, useCallback } from 'react'
 import { Link } from 'react-router-dom'
-import api from '../services/api'
+import { apiCached } from '../services/api'
 import { canOrderFromShop, LocalProduct, LocalShop, shopStatusText } from '../types/localApi'
 import { addProductToCart } from '../utils/cart'
 import { usePolling } from '../hooks/usePolling'
@@ -18,16 +18,16 @@ export function Shops() {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    // Products/menu change rarely; fetch once and only re-poll the shop list
-    // (Open/Closed toggles).
-    api.get<LocalProduct[]>('/local/products')
-      .then(res => setProducts(cur => same(cur, res.data || []) ? cur : (res.data || [])))
+    // Products/menu change rarely; cache so navigating back doesn't refetch.
+    apiCached.get<LocalProduct[]>('/local/products', undefined, 30000)
+      .then(res => setProducts(cur => same(cur, res || []) ? cur : (res || [])))
       .catch(() => setProducts([]))
   }, [])
 
   const loadShops = useCallback(() => {
-    api.get<LocalShop[]>('/local/shops', { params: { public_only: true } })
-      .then(res => setShops(cur => same(cur, res.data || []) ? cur : (res.data || [])))
+    // Short cache dedupes concurrent mounts; still resolves fresh-ish values.
+    apiCached.get<LocalShop[]>('/local/shops', { public_only: true }, 7000)
+      .then(res => setShops(cur => same(cur, res || []) ? cur : (res || [])))
       .catch(() => { /* keep the last known list on transient failures */ })
       .finally(() => setLoading(false))
   }, [])

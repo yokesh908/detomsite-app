@@ -36,31 +36,27 @@ function PortalLanding() {
   return (
     <div className="min-h-screen bg-gradient-to-br from-emerald-950 via-emerald-900 to-emerald-800 text-white">
       <div className="mx-auto flex min-h-screen max-w-6xl flex-col items-center justify-center px-6 py-16 text-center">
-        <span className="mb-6 flex h-20 w-20 items-center justify-center rounded-panel bg-gold-light/15 text-5xl font-black text-gold shadow-2xl shadow-emerald-950/30 backdrop-blur-sm">D</span>
+        <span className="mb-6 flex h-20 w-20 items-center justify-center rounded-panel bg-gold/20 text-5xl font-black text-gold shadow-emerald-950/30 backdrop-blur-sm">D</span>
         <h1 className="text-5xl font-black tracking-tight sm:text-6xl lg:text-7xl">
           DETOMSITE
         </h1>
-        <p className="mt-4 max-w-xl text-lg font-medium text-primary/50/80">
+        <p className="mt-4 max-w-xl text-lg font-medium text-gold-light">
           Campus Food Ordering Platform — order from your campus kitchens
         </p>
 
-        <div className="mt-12 grid w-full max-w-lg gap-5">
-          {/* Student */}
+        <div className="mt-12 w-full max-w-lg rounded-[28px] border border-gold-500/30 bg-white/5 p-8 backdrop-blur-sm">
+          <span className="text-4xl">🎓</span>
+          <h2 className="mt-4 text-2xl font-bold text-white">Student Portal</h2>
+          <p className="mt-2 text-sm text-gold-light/90">Browse campus shops, place orders, and track deliveries.</p>
           <Link to="/auth"
-            className="group rounded-[28px] border border-white/10 bg-white/5 p-6 text-left backdrop-blur-sm transition-all hover:bg-white/10 hover:-translate-y-1 hover:shadow-2xl">
-            <span className="text-4xl">🎓</span>
-            <h2 className="mt-4 text-xl font-bold text-white">Student Portal</h2>
-            <p className="mt-2 text-sm text-primary/50/60">Browse shops, place orders, track deliveries.</p>
-            <div className="mt-4 inline-flex rounded-btn bg-primary px-4 py-2 text-sm font-bold text-white transition-all group-hover:bg-primary">
-              Register →
-            </div>
+            className="mt-6 flex items-center justify-center rounded-btn bg-gold px-6 py-3.5 text-base font-black text-white shadow-gold-lg transition-all hover:bg-gold-600 hover:-translate-y-0.5">
+            Continue to Student Portal →
           </Link>
+          <p className="mt-5 text-sm font-medium text-gold-light/80">
+            Existing user?{' '}
+            <Link to="/auth" className="font-bold text-white underline decoration-gold decoration-2 underline-offset-2 hover:text-gold">Sign In</Link>
+          </p>
         </div>
-
-        <p className="mt-10 text-sm font-medium text-primary/50/40">
-          Existing user?{' '}
-          <Link to="/auth" className="font-bold text-gold hover:text-gold">Sign In</Link>
-        </p>
       </div>
     </div>
   )

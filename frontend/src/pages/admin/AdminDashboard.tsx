@@ -1,5 +1,5 @@
 import { useEffect, useState, useCallback } from 'react'
-import api from '../../services/api'
+import { apiCached, api } from '../../services/api'
 import {
   LocalComplaint,
   LocalMenuChangeRequest,
@@ -48,6 +48,7 @@ type Tab =
   | 'refunds'
   | 'settlements'
   | 'menu-changes'
+  | 'broadcast'
   | 'settings'
 
 export function AdminDashboard() {
@@ -64,6 +65,9 @@ export function AdminDashboard() {
   const [message, setMessage] = useState('')
   const [error, setError] = useState('')
   const [tab, setTab] = useState<Tab>('approvals')
+  const [broadcastTitle, setBroadcastTitle] = useState('')
+  const [broadcastBody, setBroadcastBody] = useState('')
+  const [sendingBroadcast, setSendingBroadcast] = useState(false)
   const session = getLocalSession()
   const [pushState, setPushState] = useState<PushState>('checking')
   const [pushPublicKey, setPushPublicKey] = useState('')
@@ -75,23 +79,23 @@ export function AdminDashboard() {
     setError('')
     try {
       const [s, p, o, pa, su, ps, cm, re, se, mc] = await Promise.all([
-        api.get<LocalShop[]>('/local/shops'),
-        api.get<LocalProduct[]>('/local/products'),
+        apiCached.get<LocalShop[]>('/local/shops', undefined, 7000),
+        apiCached.get<LocalProduct[]>('/local/products', undefined, 15000),
         api.get<LocalOrder[]>('/local/orders'),
         api.get<LocalPayment[]>('/local/payments'),
-        api.get<LocalSummary>('/local/summary'),
-        api.get<LocalPaymentSettings>('/local/payment-settings'),
+        apiCached.get<LocalSummary>('/local/summary', undefined, 9000),
+        apiCached.get<LocalPaymentSettings>('/local/payment-settings', undefined, 20000),
         api.get<LocalComplaint[]>('/local/complaints'),
         api.get<LocalRefund[]>('/local/refunds'),
         api.get<LocalSettlement[]>('/local/settlements'),
         api.get<LocalMenuChangeRequest[]>('/local/menu-change-requests'),
       ])
-      setShops(cur => same(cur, s.data) ? cur : s.data)
-      setProducts(cur => same(cur, p.data) ? cur : p.data)
+      setShops(cur => same(cur, s) ? cur : s)
+      setProducts(cur => same(cur, p) ? cur : p)
       setOrders(cur => same(cur, o.data) ? cur : o.data)
       setPayments(cur => same(cur, pa.data) ? cur : pa.data)
-      setSummary(cur => same(cur, su.data) ? cur : su.data)
-      setPaymentSettings(cur => same(cur, ps.data) ? cur : ps.data)
+      setSummary(cur => same(cur, su) ? cur : su)
+      setPaymentSettings(cur => same(cur, ps) ? cur : ps)
       setComplaints(cur => same(cur, cm.data) ? cur : cm.data)
       setRefunds(cur => same(cur, re.data) ? cur : re.data)
       setSettlements(cur => same(cur, se.data) ? cur : se.data)
@@ -304,6 +308,28 @@ export function AdminDashboard() {
     setMessage(`Menu change ${status.toLowerCase()}`)
   }
 
+  // Broadcast a notification to every student (shows in their bell + dashboard)
+  const sendBroadcast = async () => {
+    const title = broadcastTitle.trim()
+    const body = broadcastBody.trim()
+    if (!title || !body) {
+      setError('Title and message are required')
+      return
+    }
+    setSendingBroadcast(true)
+    setError('')
+    try {
+      const r = await api.post('/admin/notifications/broadcast', { title, message: body })
+      setMessage(r.data?.message || 'Broadcast sent to all students')
+      setBroadcastTitle('')
+      setBroadcastBody('')
+    } catch (err: any) {
+      setError(err?.response?.data?.detail || 'Could not send the broadcast')
+    } finally {
+      setSendingBroadcast(false)
+    }
+  }
+
   const pendingShops = shops.filter(s => s.approval_status === 'Pending Approval')
   const pendingPayments = payments.filter(p => p.status === 'Pending Verification')
   const pendingPrices = products.filter(p => p.pending_price)
@@ -318,6 +344,7 @@ export function AdminDashboard() {
     { id: 'refunds', label: 'Refunds', count: pendingRefunds.length },
     { id: 'settlements', label: 'Settlements' },
     { id: 'menu-changes', label: 'Menu Changes', count: pendingMenuChanges.length },
+    { id: 'broadcast', label: 'Broadcast' },
     { id: 'shops', label: 'Shops' },
     { id: 'settings', label: 'Settings' },
   ]
@@ -774,6 +801,43 @@ export function AdminDashboard() {
                   ))}
                 </tbody>
               </table>
+            </div>
+          </section>
+        )}
+
+        {tab === 'broadcast' && (
+          <section className="rounded-btn bg-white p-5 shadow-card">
+            <h2 className="mb-1 text-lg font-bold text-primary">Send a Message to All Students</h2>
+            <p className="mb-4 text-sm text-gray-500">
+              It appears instantly in every student's notification bell and on their dashboard.
+            </p>
+            <div className="max-w-lg space-y-4">
+              <div>
+                <label className="mb-1 block text-sm font-medium text-gray-600">Title</label>
+                <input
+                  value={broadcastTitle}
+                  onChange={e => setBroadcastTitle(e.target.value)}
+                  className="w-full rounded-btn border-2 border-gray-200 px-4 py-2.5 text-sm text-gray-900 outline-none focus:border-gold focus:shadow-gold-sm"
+                  placeholder="e.g. Lunch batch closes at 2 PM"
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-sm font-medium text-gray-600">Message</label>
+                <textarea
+                  value={broadcastBody}
+                  onChange={e => setBroadcastBody(e.target.value)}
+                  rows={4}
+                  className="w-full rounded-btn border-2 border-gray-200 px-4 py-2.5 text-sm text-gray-900 outline-none focus:border-gold focus:shadow-gold-sm"
+                  placeholder="Write the full message every student should see..."
+                />
+              </div>
+              <button
+                onClick={() => void sendBroadcast()}
+                disabled={sendingBroadcast}
+                className="rounded-btn bg-gold px-5 py-2.5 text-sm font-bold text-white shadow-gold-sm transition-all hover:bg-gold-600 hover:shadow-gold disabled:opacity-50"
+              >
+                {sendingBroadcast ? 'Sending...' : '📢 Send to all students'}
+              </button>
             </div>
           </section>
         )}

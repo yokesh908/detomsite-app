@@ -7,9 +7,20 @@ import { same } from '../utils/same'
 
 const statusStyles: Record<string, { bg: string; color: string; border: string }> = {
   Completed: { bg: '#ECFDF5', color: '#065F46', border: '#A7F3D0' },
+  Confirmed: { bg: '#F0FDF4', color: '#15803D', border: '#BBF7D0' },
   Cancelled: { bg: '#FEF2F2', color: '#DC2626', border: '#FECACA' },
   Pending: { bg: '#FFFBEB', color: '#966A2C', border: '#FDE68A' },
   Delivered: { bg: '#ECFDF5', color: '#065F46', border: '#A7F3D0' },
+}
+
+const statusLabels: Record<string, string> = {
+  Pending: 'Order Pending',
+  Confirmed: 'Order Confirmed',
+  Accepted: 'Order Accepted',
+  Preparing: 'Preparing Food',
+  Ready: 'Ready for Pickup',
+  Delivered: 'Delivered',
+  Completed: 'Order Completed',
 }
 
 const subOrderStyles: Record<string, { bg: string; color: string; border: string }> = {
@@ -17,10 +28,56 @@ const subOrderStyles: Record<string, { bg: string; color: string; border: string
   Delivered: { bg: '#ECFDF5', color: '#065F46', border: '#A7F3D0' },
   Cancelled: { bg: '#FEF2F2', color: '#DC2626', border: '#FECACA' },
   Rejected: { bg: '#FEF2F2', color: '#DC2626', border: '#FECACA' },
+  Confirmed: { bg: '#F0FDF4', color: '#15803D', border: '#BBF7D0' },
   Accepted: { bg: '#EFF6FF', color: '#1D4ED8', border: '#BFDBFE' },
   Preparing: { bg: '#FFFBEB', color: '#966A2C', border: '#FDE68A' },
   Ready: { bg: '#F0FDF4', color: '#15803D', border: '#BBF7D0' },
   Pending: { bg: '#FFFBEB', color: '#966A2C', border: '#FDE68A' },
+}
+
+/* Order journey: Pending → Confirmed → Preparing → Ready → Delivered → Completed.
+   Renders a 6-step gold/green progress bar so students always see where their
+   order stands without hunting through status pills. */
+const journeySteps = [
+  { key: 'Pending', label: 'Pending' },
+  { key: 'Confirmed', label: 'Confirmed' },
+  { key: 'Preparing', label: 'Preparing' },
+  { key: 'Ready', label: 'Ready' },
+  { key: 'Delivered', label: 'Delivered' },
+  { key: 'Completed', label: 'Completed' },
+]
+const journeyInnerRank: Record<string, number> = { Pending: 0, Accepted: 1, Confirmed: 1, Preparing: 2, Ready: 3, Delivered: 4, Completed: 5 }
+
+function OrderJourney({ status }: { status: string }) {
+  const rank = journeyInnerRank[status] ?? (status === 'Cancelled' || status === 'Rejected' ? -1 : 0)
+  return (
+    <div className="mt-5 rounded-btn border border-primary-light/30 bg-white p-4">
+      <p className="mb-3 text-left text-xs font-black uppercase tracking-wider text-primary">Order Journey</p>
+      <div className="flex items-center gap-1">
+        {journeySteps.map((step, i) => {
+          const done = rank >= i
+          const isCancelled = rank < 0
+          return (
+            <div key={step.key} className="flex flex-1 flex-col items-center gap-1.5">
+              <div className={`flex h-7 w-7 items-center justify-center rounded-full text-[11px] font-black transition-all ${
+                isCancelled
+                  ? 'bg-red-100 text-red-600'
+                  : (done ? (step.key === 'Confirmed' ? 'bg-gold text-white shadow-gold-sm' : 'bg-primary text-white shadow-emerald-sm') : 'bg-slate-100 text-slate-400')
+              }`}>
+                {isCancelled ? '✕' : done ? (step.key === 'Completed' ? '✓' : (i + 1)) : ''}
+              </div>
+              <span className={`text-[10px] font-bold ${done ? 'text-primary' : 'text-slate-400'}`}>{step.label}</span>
+            </div>
+          )
+        })}
+      </div>
+      <div className="relative mt-1 flex gap-1">
+        {journeySteps.map((step, i) => (
+          <div key={step.key} className={`h-1 flex-1 rounded-pill ${rank >= i ? (step.key === 'Confirmed' ? 'bg-gold' : 'bg-primary') : 'bg-slate-200'}`} />
+        ))}
+      </div>
+    </div>
+  )
 }
 
 export function OrderResultPage() {
@@ -64,8 +121,10 @@ export function OrderResultPage() {
             <h1 className="mt-3 text-5xl font-black text-primary-dark">Token {order.token}</h1>
             <p className="mt-2 text-lg font-semibold text-gray-600">{order.student_name}</p>
             <div className="mt-5 inline-flex rounded-btn px-4 py-2 text-sm font-bold"
-              style={parentStyle}>{order.status}</div>
+              style={parentStyle}>{statusLabels[order.status] || order.status}</div>
             <p className="mt-2 text-sm text-gray-500">{order.sub_orders?.length || 0} shop{order.sub_orders?.length !== 1 ? 's' : ''} · one payment</p>
+
+            <OrderJourney status={order.status} />
 
             <div className="mt-6 space-y-4 text-left">
               {order.sub_orders?.map(sub => {
@@ -74,7 +133,7 @@ export function OrderResultPage() {
                   <div key={sub.id} className="rounded-lg bg-gray-50 p-4 border border-gray-100">
                     <div className="flex items-center justify-between">
                       <h3 className="font-bold text-primary-dark">🏪 {sub.shop_name}</h3>
-                      <span className="rounded-pill px-2.5 py-1 text-xs font-bold" style={st}>{sub.status}</span>
+                      <span className="rounded-pill px-2.5 py-1 text-xs font-bold" style={st}>{statusLabels[sub.status] || sub.status}</span>
                     </div>
                     <p className="mt-1 text-sm text-gray-600">{sub.items_summary}</p>
                     <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-sm">

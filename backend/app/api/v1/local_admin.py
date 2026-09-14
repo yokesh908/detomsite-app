@@ -644,6 +644,42 @@ async def admin_notifications(admin: dict = Depends(verify_admin)):
     return value
 
 
+class BroadcastRequest(BaseModel):
+    title: str = Field(..., min_length=1, max_length=120)
+    message: str = Field(..., min_length=1, max_length=2000)
+
+
+@router.post("/notifications/broadcast")
+async def broadcast_notification(data: BroadcastRequest, admin: dict = Depends(verify_admin)):
+    """Admin writes a notification that surfaces in every student's notification
+    bar (the bell + customer dashboard). The notification is stored with
+    ``target_role="student"`` so vendor/admin alerts never mix it up; students
+    read it through ``/local/notifications``."""
+    title = data.title.strip()
+    message = data.message.strip()
+    if not title or not message:
+        raise HTTPException(status_code=400, detail="Title and message are required")
+    try:
+        notification = await _db(
+            db.create_notification,
+            title=title,
+            message=message,
+            order_id=None,
+            status="Broadcast",
+            target_role="student",
+        )
+    except Exception as e:
+        logger.error(f"Admin broadcast failed: {e}")
+        raise HTTPException(status_code=500, detail="Could not save the broadcast")
+    if not notification:
+        raise HTTPException(status_code=500, detail="Could not save the broadcast")
+    # Invalidate the shared notification cache so the student bell refreshes fast.
+    if shared_cache.enabled():
+        await asyncio.to_thread(shared_cache.clear)
+    logger.info(f"Admin broadcast: {title!r} to all students")
+    return {"message": "Broadcast sent to all students", "notification": notification}
+
+
 @router.get("/payments")
 async def list_all_payments(admin: dict = Depends(verify_admin)):
     """List all payments — single orders from the payments table plus multi-shop
