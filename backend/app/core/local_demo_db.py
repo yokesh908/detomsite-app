@@ -182,14 +182,19 @@ def init_batch_stock(product_id: str, batch_type: str, default_stock: int, date_
         )
 
 
-def consume_batch_stock(product_id: str, batch_type: str, qty: int, date_key: str | None = None) -> bool:
-    """Atomically decrement stock. Returns False if insufficient."""
+def consume_batch_stock(product_id: str, batch_type: str, qty: int, date_key: str | None = None, connection: Any | None = None) -> bool:
+    """Atomically decrement stock. Returns False if insufficient.
+
+    When ``connection`` is given it is used (caller owns the transaction so
+    nested writes share one SQLite writer and never deadlock); otherwise a
+    fresh connection is opened."""
     date_key = date_key or _day_key()
-    with _connect() as connection:
-        product = connection.execute("SELECT inventory FROM products WHERE id = ?", (product_id,)).fetchone()
+
+    def _do(db: Any) -> bool:
+        product = db.execute("SELECT inventory FROM products WHERE id = ?", (product_id,)).fetchone()
         if not product:
             return False
-        row = connection.execute(
+        row = db.execute(
             "SELECT id, current_stock FROM product_stock WHERE product_id = ? AND batch_type = ? AND date_key = ? ORDER BY id DESC LIMIT 1",
             (product_id, batch_type, date_key),
         ).fetchone()
@@ -197,7 +202,7 @@ def consume_batch_stock(product_id: str, batch_type: str, qty: int, date_key: st
             stock_id, current = row["id"], int(row["current_stock"])
             if current < qty:
                 return False
-            connection.execute(
+            db.execute(
                 "UPDATE product_stock SET current_stock = current_stock - ? WHERE id = ?",
                 (qty, stock_id),
             )
@@ -205,53 +210,76 @@ def consume_batch_stock(product_id: str, batch_type: str, qty: int, date_key: st
             inventory = int(product["inventory"] or 0)
             if inventory < qty:
                 return False
-            connection.execute(
+            db.execute(
                 "INSERT INTO product_stock (product_id, batch_type, default_stock, current_stock, date_key) VALUES (?, ?, ?, ?, ?)",
                 (product_id, batch_type, inventory - qty, inventory - qty, date_key),
             )
         return True
 
+    if connection is not None:
+        return _do(connection)
+    with _connect() as conn:
+        return _do(conn)
 
-def release_batch_stock(product_id: str, batch_type: str, qty: int, date_key: str | None = None) -> None:
+
+def release_batch_stock(product_id: str, batch_type: str, qty: int, date_key: str | None = None, connection: Any | None = None) -> None:
     date_key = date_key or _day_key()
-    with _connect() as connection:
-        row = connection.execute(
+
+    def _do(db: Any) -> None:
+        row = db.execute(
             "SELECT id, current_stock FROM product_stock WHERE product_id = ? AND batch_type = ? AND date_key = ? ORDER BY id DESC LIMIT 1",
             (product_id, batch_type, date_key),
         ).fetchone()
         if row:
-            connection.execute(
+            db.execute(
                 "UPDATE product_stock SET current_stock = current_stock + ? WHERE id = ?",
                 (qty, row["id"]),
             )
 
+    if connection is not None:
+        return _do(connection)
+    with _connect() as conn:
+        return _do(conn)
 
-def get_next_token() -> int:
+
+def get_next_token(connection: Any | None = None) -> int:
     """Next token number. Starts at #18 each day and daily resets to 18."""
     date_key = _day_key()
-    with _connect() as connection:
-        value = connection.execute(
+
+    def _do(db: Any) -> int:
+        value = db.execute(
             "SELECT value FROM app_settings WHERE key = ?", (f"token_base_{date_key}",)
         ).fetchone()
         if value:
             return int(value["value"])
-        connection.execute(
+        db.execute(
             "INSERT OR IGNORE INTO app_settings (key, value) VALUES (?, ?)",
             (f"token_base_{date_key}", "18"),
         )
         return 18
 
+    if connection is not None:
+        return _do(connection)
+    with _connect() as conn:
+        return _do(conn)
 
-def consume_token() -> int:
+
+def consume_token(connection: Any | None = None) -> int:
     """Allocate the next token and record it in today's counter."""
     date_key = _day_key()
-    with _connect() as connection:
-        token = get_next_token()
-        connection.execute(
+
+    def _do(db: Any) -> int:
+        token = get_next_token(connection=db)
+        db.execute(
             "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)",
             (f"token_base_{date_key}", str(token + 1)),
         )
-    return token
+        return token
+
+    if connection is not None:
+        return _do(connection)
+    with _connect() as conn:
+        return _do(conn)
 
 
 def _shop_is_orderable(shop: dict[str, Any]) -> bool:
@@ -671,6 +699,7 @@ def init_local_demo_db() -> None:
                 sub_order_id TEXT NOT NULL DEFAULT '',
                 phone TEXT NOT NULL DEFAULT '',
                 message TEXT NOT NULL DEFAULT '',
+                url TEXT NOT NULL DEFAULT '',
                 status TEXT NOT NULL DEFAULT 'Sent',
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             );
@@ -730,6 +759,10 @@ def init_local_demo_db() -> None:
             connection.execute("ALTER TABLE shops ADD COLUMN admin_dues_balance INTEGER NOT NULL DEFAULT 0")
         if not _column_exists(connection, "shops", "admin_dues_last_paid_at"):
             connection.execute("ALTER TABLE shops ADD COLUMN admin_dues_last_paid_at TEXT")
+        if not _column_exists(connection, "parent_orders", "utr_number"):
+            connection.execute("ALTER TABLE parent_orders ADD COLUMN utr_number TEXT")
+        if not _column_exists(connection, "parent_orders", "screenshot_name"):
+            connection.execute("ALTER TABLE parent_orders ADD COLUMN screenshot_name TEXT")
         if not _column_exists(connection, "shops", "ordering_position"):
             connection.execute("ALTER TABLE shops ADD COLUMN ordering_position INTEGER NOT NULL DEFAULT 0")
         if not _column_exists(connection, "shops", "whatsapp_number"):
@@ -786,6 +819,15 @@ def init_local_demo_db() -> None:
 
         # No seed data. All shops, products, and orders are created by real users.
 
+        # ─── Schema migration: URL for WhatsApp notifications (for demo DBs
+        # created before the column existed). ───
+        try:
+            cols = [r[1] for r in connection.execute("PRAGMA table_info(whatsapp_logs)")]
+            if "url" not in cols:
+                connection.execute("ALTER TABLE whatsapp_logs ADD COLUMN url TEXT NOT NULL DEFAULT ''")
+        except sqlite3.Error:
+            pass
+
         # ─── Seed default delivery batches (Afternoon / Night). ───
         connection.execute(
             """
@@ -806,6 +848,37 @@ def init_local_demo_db() -> None:
             ('batch-night', 'Night', '13:00', '18:00', '19:30', '19:45', 1)
             """
         )
+
+
+def ensure_admin_user() -> None:
+    """Seed the super admin as a real DB user (role='admin') so the admin
+    portal login AND forgot-password flow work end-to-end. The DB email is a
+    unique placeholder because DEFAULT_SUPER_ADMIN_EMAIL is often already
+    claimed by a shopkeeper/student account (one email = one account) — the
+    reset OTP is delivered to DEFAULT_SUPER_ADMIN_EMAIL instead (see
+    users.py)._send_reset_otp). Idempotent: an existing account is left
+    untouched so a password reset or role change is never overwritten on boot."""
+    email = (settings.DEFAULT_SUPER_ADMIN_EMAIL or "").strip()
+    password = settings.DEFAULT_SUPER_ADMIN_PASSWORD or ""
+    if not email or not password:
+        print("ensure_admin_user: DEFAULT_SUPER_ADMIN_EMAIL/PASSWORD not set — skipping")
+        return
+    username = email.split("@")[0].lower() or "admin"
+    if get_user_by_username(username):
+        print(f"ensure_admin_user: admin user already exists ({username}) — skipping")
+        return
+    from app.core.security import hash_password
+    user, conflict = register_user(
+        username=username,
+        password_hash=hash_password(password),
+        name="Administrator",
+        role="admin",
+        email="admin@detomsite.local",
+    )
+    if user:
+        print(f"ensure_admin_user: created admin '{username}' — reset OTP goes to {email}")
+    else:
+        print(f"ensure_admin_user: could not create admin ({conflict}) — {username} may be in use")
 
 
 def register_user(
@@ -923,6 +996,27 @@ def list_shops(public_only: bool = False) -> list[dict[str, Any]]:
         return shops
 
 
+def get_shop_by_phone(phone: str) -> dict[str, Any] | None:
+    """Find a shop by its phone number (the bank-linked number whose SMS the
+    agent forwards). Matches on digits only so '+919876543210' == '9876543210'."""
+    import re as _re
+    digits = _re.sub(r'\D', '', phone or '')
+    if not digits:
+        return None
+    if len(digits) == 10:
+        digits = '91' + digits
+    with _connect() as connection:
+        rows = connection.execute("SELECT * FROM shops WHERE approval_status = 'Approved'").fetchall()
+        for row in rows:
+            shop = dict(row)
+            shop_digits = _re.sub(r'\D', '', shop.get('phone') or '')
+            if len(shop_digits) == 10:
+                shop_digits = '91' + shop_digits
+            if shop_digits == digits:
+                return shop
+    return None
+
+
 def get_shop(shop_id: str) -> dict[str, Any] | None:
     with _connect() as connection:
         row = connection.execute("SELECT * FROM shops WHERE id = ?", (shop_id,)).fetchone()
@@ -951,9 +1045,9 @@ def create_shop(values: dict[str, Any]) -> dict[str, Any]:
                 closing_time, present, status, approval_status, shopkeeper_email,
                 shopkeeper_name, phone, upi_id, orders_today, revenue_today, current_token,
                 is_removed, admin_dues_balance, admin_dues_last_paid_at,
-                upi_enabled, cod_enabled
+                upi_enabled, cod_enabled, whatsapp_number
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 shop_id,
@@ -978,6 +1072,7 @@ def create_shop(values: dict[str, Any]) -> dict[str, Any]:
                 None,
                 values.get("upi_enabled", 1),
                 values.get("cod_enabled", 1),
+                values.get("whatsapp_number", ""),
             ),
         )
         row = connection.execute("SELECT * FROM shops WHERE id = ?", (shop_id,)).fetchone()
@@ -1003,6 +1098,7 @@ def update_shop(shop_id: str, values: dict[str, Any]) -> dict[str, Any] | None:
         "is_removed",
         "admin_dues_balance",
         "admin_dues_last_paid_at",
+        "whatsapp_number",
     }
     updates = {key: value for key, value in values.items() if key in allowed_fields and value is not None}
     if not updates:
@@ -1052,7 +1148,7 @@ def pay_admin_dues(shop_id: str, amount: int | None = None) -> dict[str, Any] | 
         return dict(row) if row else None
 
 
-# ─── Admin share payments (5% of vendor daily earnings → admin) ───
+# ─── Admin share payments (₹10 per order → admin) ───
 
 
 def record_share_payment(shop_id: str, amount: int) -> dict[str, Any] | None:
@@ -1310,7 +1406,7 @@ def create_order(values: dict[str, Any]) -> dict[str, Any] | None:
         if not item_labels:
             return None
 
-        # ─── Fees: the customer pays only the subtotal. The admin's 5% is
+        # ─── Fees: the customer pays only the subtotal. The admin's ₹10 per order is
         # taken from the vendor's single-day earnings, never added to the
         # student's bill. ───
         service_fee = 0
@@ -1413,10 +1509,10 @@ def create_parent_order(
     Returns the parent order dict (with nested ``sub_orders``) or ``None`` when
     any shop/item is invalid. One token is shared across ALL sub-orders.
     The student pays ONE bill (sum of every sub-order subtotal); each shop's
-    5% commission is recorded per sub-order but never charged to the student.
+    ₹10-per-order commission is recorded per sub-order but never charged to the student.
     """
     with _connect() as connection:
-        token = consume_token()
+        token = consume_token(connection=connection)
         today_key = connection.execute(
             "SELECT strftime('%Y%m%d', 'now', '+05:30')"
         ).fetchone()[0]
@@ -1455,7 +1551,7 @@ def create_parent_order(
                 if quantity <= 0:
                     continue
                 if not consume_batch_stock(
-                    product["id"], batch_type, quantity
+                    product["id"], batch_type, quantity, connection=connection
                 ):
                     raise ValueError(
                         f"Insufficient stock for {product['name']}"
@@ -1474,7 +1570,7 @@ def create_parent_order(
             if not order_item_rows:
                 continue
 
-            commission = round(subtotal * 0.05)
+            commission = 10  # flat ₹10 per order (admin's cut)
             sub_order_id = f"{parent_id}-{len(sub_orders) + 1}"
             shop_whatsapp = str(shop.get("whatsapp_number") or "").strip()
             shop_phone = str(shop.get("phone") or "").strip()
@@ -1580,7 +1676,9 @@ def create_parent_order(
 
 
 def get_parent_order(parent_order_id: str, with_items: bool = True) -> dict[str, Any] | None:
-    """Get a parent order including its shop sub-orders (and their items)."""
+    """Get a parent order including its shop sub-orders (and their items).
+
+    Batched — one items query for all sub-orders instead of one per sub."""
     with _connect() as connection:
         row = connection.execute(
             "SELECT * FROM parent_orders WHERE id = ?", (parent_order_id,)
@@ -1593,15 +1691,21 @@ def get_parent_order(parent_order_id: str, with_items: bool = True) -> dict[str,
             (parent_order_id,),
         ).fetchall()
         sub_orders = []
-        for sub_row in sub_rows:
-            sub = dict(sub_row)
+        if sub_rows:
             if with_items:
+                placeholders = ",".join("?" * len(sub_rows))
                 item_rows = connection.execute(
-                    "SELECT * FROM order_items WHERE sub_order_id = ?",
-                    (sub["id"],),
+                    f"SELECT sub_order_id, product_name, quantity FROM order_items WHERE sub_order_id IN ({placeholders}) ORDER BY rowid",
+                    [s["id"] for s in sub_rows],
                 ).fetchall()
-                sub["items"] = _rows_to_dicts(item_rows)
-            sub_orders.append(sub)
+                items: dict[str, list[dict[str, Any]]] = {}
+                for item in item_rows:
+                    items.setdefault(item["sub_order_id"], []).append(dict(item))
+            for sub_row in sub_rows:
+                sub = dict(sub_row)
+                if with_items:
+                    sub["items"] = items.get(sub["id"], [])
+                sub_orders.append(sub)
         parent["sub_orders"] = sub_orders
         return parent
 
@@ -1621,7 +1725,9 @@ def list_parent_orders(limit: int = 200, status: str | None = None) -> list[dict
 
 
 def get_shop_sub_orders(shop_id: str, status: str | None = None) -> list[dict[str, Any]]:
-    """All sub-orders for a shop. Only the shop's own orders."""
+    """All sub-orders for a shop. Only the shop's own orders.
+
+    Batched — items + parent rows pulled in two queries total (1 + 2N → 3)."""
     with _connect() as connection:
         sql = "SELECT * FROM shop_sub_orders WHERE shop_id = ?"
         args: list[Any] = [shop_id]
@@ -1630,21 +1736,59 @@ def get_shop_sub_orders(shop_id: str, status: str | None = None) -> list[dict[st
             args.append(status)
         sql += " ORDER BY rowid DESC"
         rows = connection.execute(sql, args).fetchall()
-        sub_orders = []
-        for row in rows:
-            sub = dict(row)
-            item_rows = connection.execute(
-                "SELECT * FROM order_items WHERE sub_order_id = ?",
-                (sub["id"],),
+        sub_orders = [dict(row) for row in rows]
+        if not sub_orders:
+            return sub_orders
+        sub_ids = [s["id"] for s in sub_orders]
+        parent_ids = list({s["parent_order_id"] for s in sub_orders if s.get("parent_order_id")})
+        placeholders = ",".join("?" * len(sub_ids))
+        item_rows = connection.execute(
+            f"SELECT sub_order_id, product_name, quantity FROM order_items WHERE sub_order_id IN ({placeholders}) ORDER BY rowid",
+            sub_ids,
+        ).fetchall()
+        items: dict[str, list[dict[str, Any]]] = {}
+        for item in item_rows:
+            items.setdefault(item["sub_order_id"], []).append(dict(item))
+        parents: dict[str, dict[str, Any]] = {}
+        if parent_ids:
+            parent_placeholders = ",".join("?" * len(parent_ids))
+            parent_rows = connection.execute(
+                f"SELECT id, student_name, student_phone, delivery_location, total, payment_method, created_at FROM parent_orders WHERE id IN ({parent_placeholders})",
+                parent_ids,
             ).fetchall()
-            sub["items"] = _rows_to_dicts(item_rows)
-            parent = connection.execute(
-                "SELECT student_name, student_phone, delivery_location, total, payment_method, created_at FROM parent_orders WHERE id = ?",
-                (sub["parent_order_id"],),
-            ).fetchone()
-            sub["parent"] = dict(parent) if parent else {}
-            sub_orders.append(sub)
+            parents = {pr["id"]: dict(pr) for pr in parent_rows}
+        for s in sub_orders:
+            s["items"] = items.get(s["id"], [])
+            s["parent"] = parents.get(s.get("parent_order_id", "")) or {}
         return sub_orders
+
+
+def get_sub_order(sub_order_id: str) -> dict[str, Any] | None:
+    """Find one shop sub-order with its parent + shop context attached.
+
+    Used to enrich WhatsApp logs whose ``sub_order_id`` is a multi-shop
+    sub-order id (those don't live in the plain ``orders`` table). Returns the
+    sub-order dict plus ``parent`` (student/phone/location/total/payment) and
+    ``shop`` context, or ``None`` when it's not a sub-order id at all.
+    """
+    with _connect() as connection:
+        row = connection.execute(
+            "SELECT * FROM shop_sub_orders WHERE id = ?", (sub_order_id,)
+        ).fetchone()
+        if not row:
+            return None
+        sub = dict(row)
+        parent = connection.execute(
+            "SELECT student_name, student_phone, delivery_location, total, payment_method, created_at FROM parent_orders WHERE id = ?",
+            (sub["parent_order_id"],),
+        ).fetchone()
+        sub["parent"] = dict(parent) if parent else {}
+        shop = connection.execute(
+            "SELECT id, name, phone, whatsapp_number FROM shops WHERE id = ?",
+            (sub["shop_id"],),
+        ).fetchone()
+        sub["shop"] = dict(shop) if shop else {}
+        return sub
 
 
 def update_sub_order_status(
@@ -1928,8 +2072,8 @@ def list_settlements(status: str | None = None) -> list[dict[str, Any]]:
 
 
 def run_daily_settlements() -> list[dict[str, Any]]:
-    """Compute every shop's gross sales, 5% commission, and net payable for
-    today and upsert a settlement record. Called by admin or a 9 PM job."""
+    """Compute every shop's gross sales, ₹10-per-order commission, and net payable
+    for today and upsert a settlement record. Called by admin or a 9 PM job."""
     from datetime import datetime
     date_key = _day_key()
     with _connect() as connection:
@@ -1939,14 +2083,14 @@ def run_daily_settlements() -> list[dict[str, Any]]:
             shop_id = shop_row["id"]
             gross = connection.execute(
                 """
-                SELECT COALESCE(SUM(total), 0) AS g FROM order_items oi
+                SELECT COALESCE(SUM(subtotal), 0) AS g, COUNT(*) AS cnt FROM order_items oi
                 JOIN shop_sub_orders sso ON sso.id = oi.sub_order_id
                 WHERE sso.shop_id = ?
                 """,
                 (shop_id,),
-            ).fetchone()["g"]
-            commission = round(gross * 0.05)
-            net = gross - commission
+            ).fetchone()
+            commission = (gross["cnt"] or 0) * 10
+            net = gross["g"] - commission
             existing = connection.execute(
                 "SELECT id FROM settlements WHERE shop_id = ? AND date_key = ?",
                 (shop_id, date_key),
@@ -2041,6 +2185,48 @@ def list_audit_logs(limit: int = 200) -> list[dict[str, Any]]:
             "SELECT * FROM audit_logs ORDER BY rowid DESC LIMIT ?", (limit,)
         ).fetchall()
         return _rows_to_dicts(rows)
+
+
+def log_whatsapp(
+    sub_order_id: str = "",
+    phone: str = "",
+    message: str = "",
+    url: str = "",
+    status: str = "Pending",
+) -> dict[str, Any] | None:
+    """Persist one WhatsApp notification (link generated, ready to send)."""
+    with _connect() as connection:
+        next_id = connection.execute(
+            "SELECT COALESCE(MAX(CAST(substr(id, 2) AS INTEGER)), 0) + 1 FROM whatsapp_logs"
+        ).fetchone()[0]
+        wa_id = f"w{next_id}"
+        connection.execute(
+            "INSERT INTO whatsapp_logs (id, sub_order_id, phone, message, url, status) VALUES (?, ?, ?, ?, ?, ?)",
+            (wa_id, sub_order_id, phone or "", message or "", url or "", status),
+        )
+        row = connection.execute("SELECT * FROM whatsapp_logs WHERE id = ?", (wa_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def mark_whatsapp_sent(whatsapp_id: str) -> dict[str, Any] | None:
+    """Mark a WhatsApp notification as sent."""
+    with _connect() as connection:
+        connection.execute(
+            "UPDATE whatsapp_logs SET status = 'Sent' WHERE id = ?", (whatsapp_id,)
+        )
+        row = connection.execute("SELECT * FROM whatsapp_logs WHERE id = ?", (whatsapp_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def update_whatsapp_message(whatsapp_id: str, message: str, url: str = "") -> dict[str, Any] | None:
+    """Refresh a pending WhatsApp notification (e.g. payment flipped to paid)."""
+    with _connect() as connection:
+        connection.execute(
+            "UPDATE whatsapp_logs SET message = ?, url = ? WHERE id = ?",
+            (message or "", url or "", whatsapp_id),
+        )
+        row = connection.execute("SELECT * FROM whatsapp_logs WHERE id = ?", (whatsapp_id,)).fetchone()
+        return dict(row) if row else None
 
 
 def list_whatsapp_logs(limit: int = 100) -> list[dict[str, Any]]:
@@ -2186,6 +2372,98 @@ def update_payment_record(order_id: str, screenshot_name: str, utr_number: str |
         )
         updated = connection.execute("SELECT * FROM payments WHERE id = ?", (row["id"],)).fetchone()
         return dict(updated) if updated else None
+
+
+def get_payment_by_id(payment_id: str) -> dict[str, Any] | None:
+    with _connect() as connection:
+        row = connection.execute("SELECT * FROM payments WHERE id = ?", (payment_id,)).fetchone()
+        return dict(row) if row else None
+
+
+# ─── Parent (multi-shop) payments ────────────────────────────────────
+# A multi-shop parent pays ONE bill as a group. The ``payments`` table's
+# ``order_id`` FK only accepts ``orders`` rows (sub-order ids belong to
+# ``shop_sub_orders``), so parent payments live directly on the
+# ``parent_orders`` row — these helpers read/write them there.
+
+
+def _parent_payment_shape(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "order_id": row["id"],
+        "amount": row["total"],
+        "method": row["payment_method"],
+        "status": "Success" if str(row.get("payment_status") or "").upper() == "PAID" else row.get("payment_status", "Pending"),
+        "utr_number": row.get("utr_number"),
+        "screenshot_name": row.get("screenshot_name"),
+        "created_at": str(row.get("created_at") or ""),
+        "is_parent": True,
+    }
+
+
+def record_parent_payment(
+    parent_order_id: str,
+    amount: int,
+    method: str,
+    utr_number: str | None = None,
+    screenshot_name: str | None = None,
+) -> dict[str, Any] | None:
+    with _connect() as connection:
+        parent = connection.execute("SELECT * FROM parent_orders WHERE id = ?", (parent_order_id,)).fetchone()
+        if not parent:
+            return None
+        connection.execute(
+            """UPDATE parent_orders
+               SET payment_method = COALESCE(?, payment_method),
+                   utr_number = COALESCE(?, utr_number),
+                   screenshot_name = COALESCE(?, screenshot_name)
+               WHERE id = ?""",
+            (method, utr_number, screenshot_name, parent_order_id),
+        )
+        parent = connection.execute("SELECT * FROM parent_orders WHERE id = ?", (parent_order_id,)).fetchone()
+        return _parent_payment_shape(dict(parent)) if parent else None
+
+
+def get_parent_payment(parent_order_id: str) -> dict[str, Any] | None:
+    with _connect() as connection:
+        row = connection.execute("SELECT * FROM parent_orders WHERE id = ?", (parent_order_id,)).fetchone()
+        return _parent_payment_shape(dict(row)) if row else None
+
+
+def list_parent_payments() -> list[dict[str, Any]]:
+    with _connect() as connection:
+        rows = connection.execute("SELECT * FROM parent_orders ORDER BY created_at DESC").fetchall()
+        return [_parent_payment_shape(dict(r)) for r in rows]
+
+
+def verify_parent_payment(parent_order_id: str, status: str) -> dict[str, Any] | None:
+    with _connect() as connection:
+        if str(status).lower() in ("success", "verified", "received"):
+            prow = connection.execute(
+                "SELECT token, status FROM parent_orders WHERE id = ?", (parent_order_id,)
+            ).fetchone()
+            if not prow:
+                return None
+            connection.execute("UPDATE parent_orders SET payment_status = 'Paid' WHERE id = ?", (parent_order_id,))
+            if prow["status"] == "Pending":
+                connection.execute("UPDATE parent_orders SET status = 'Pending Acceptance' WHERE id = ?", (parent_order_id,))
+            connection.execute(
+                "UPDATE shop_sub_orders SET status = 'Accepted' WHERE parent_order_id = ? AND status = 'Pending'",
+                (parent_order_id,),
+            )
+            create_notification(
+                title="Payment confirmed",
+                message=f"Payment for token {prow['token']} confirmed — the shops will accept your order soon.",
+                order_id=None,  # notifications.order_id FK only accepts `orders` ids
+                status="Pending Acceptance",
+                target_role="student",
+            )
+        else:
+            if not connection.execute("SELECT id FROM parent_orders WHERE id = ?", (parent_order_id,)).fetchone():
+                return None
+            connection.execute("UPDATE parent_orders SET payment_status = 'Failed' WHERE id = ?", (parent_order_id,))
+        row = connection.execute("SELECT * FROM parent_orders WHERE id = ?", (parent_order_id,)).fetchone()
+        return _parent_payment_shape(dict(row)) if row else None
 
 
 def update_payment_status(payment_id: str, status: str) -> dict[str, Any] | None:
@@ -2763,7 +3041,7 @@ def get_orders_grouped_by_date() -> dict[str, Any]:
     with _connect() as connection:
         rows = connection.execute(
             "SELECT substr(created_at, 1, 10) AS day, COUNT(*) as count, SUM(total) as revenue, "
-            "SUM(subtotal) as subtotal, ROUND(SUM(total) * 0.05) as service_fee, "
+            "SUM(subtotal) as subtotal, COUNT(*) * 10 as service_fee, "
             "SUM(tax) as tax, SUM(delivery_fee) as delivery_fee, "
             "GROUP_CONCAT(id) as ids FROM orders GROUP BY day ORDER BY day DESC"
         ).fetchall()
@@ -2795,14 +3073,14 @@ def get_daily_stats() -> dict[str, Any]:
     with _connect() as connection:
         today_orders = connection.execute(
             "SELECT COUNT(*) as count, COALESCE(SUM(total), 0) as revenue, "
-            "ROUND(COALESCE(SUM(total), 0) * 0.05) as service_fee "
+            "COUNT(*) * 10 as service_fee "
             "FROM orders WHERE substr(created_at, 1, 10) = date('now', '+05:30')"
         ).fetchone()
         total_users = connection.execute("SELECT COUNT(*) as count FROM users").fetchone()
         total_shops = connection.execute("SELECT COUNT(*) as count FROM shops WHERE approval_status = 'Approved'").fetchone()
         total_orders = connection.execute("SELECT COUNT(*) as count FROM orders").fetchone()
         total_service_fee = connection.execute(
-            "SELECT ROUND(COALESCE(SUM(total), 0) * 0.05) as total FROM orders"
+            "SELECT COUNT(*) * 10 as total FROM orders"
         ).fetchone()
         return {
             "today_orders": dict(today_orders) if today_orders else {"count": 0, "revenue": 0, "service_fee": 0},
@@ -2836,7 +3114,7 @@ def get_vendor_daily_logs(shop_id: str) -> list[dict[str, Any]]:
         rows = connection.execute(
             """
             SELECT substr(created_at, 1, 10) AS created_at, COUNT(*) as count, SUM(total) as revenue,
-                   ROUND(SUM(total) * 0.05) as admin_fee
+                   COUNT(*) * 10 as admin_fee
             FROM orders WHERE shop_id = ?
             GROUP BY created_at ORDER BY created_at DESC
             """,

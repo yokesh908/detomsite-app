@@ -317,6 +317,47 @@ async def log_sms(
     return _without_id(sms) or sms
 
 
+async def log_whatsapp(
+    sub_order_id: str = "",
+    phone: str = "",
+    message: str = "",
+    url: str = "",
+    status: str = "Pending",
+) -> dict[str, Any] | None:
+    """Persist one WhatsApp notification (link generated, ready to send)."""
+    database = _database()
+    next_id = await database.local_whatsapp_logs.count_documents({}) + 1
+    wa = {
+        "id": f"w{next_id}",
+        "sub_order_id": sub_order_id,
+        "phone": phone or "",
+        "message": message or "",
+        "url": url or "",
+        "status": status,
+        "created_at": datetime.utcnow().isoformat(),
+        "sequence": next_id,
+    }
+    await database.local_whatsapp_logs.insert_one(wa)
+    return _without_id(wa) or wa
+
+
+async def mark_whatsapp_sent(whatsapp_id: str) -> dict[str, Any] | None:
+    """Mark a WhatsApp notification as sent."""
+    database = _database()
+    updated = await database.local_whatsapp_logs.find_one_and_update(
+        {"id": whatsapp_id}, {"$set": {"status": "Sent"}}, return_document=True
+    )
+    if not updated:
+        return None
+    return _without_id(updated) or updated
+
+
+async def list_whatsapp_logs(limit: int = 100) -> list[dict[str, Any]]:
+    database = _database()
+    rows = await database.local_whatsapp_logs.find({}, {"_id": 0}).sort("sequence", -1).limit(limit).to_list(length=limit)
+    return rows
+
+
 async def list_sms_logs(limit: int = 100) -> list[dict[str, Any]]:
     database = _database()
     rows = await database.local_sms_logs.find({}, {"_id": 0}).sort("sequence", -1).limit(limit).to_list(length=limit)
@@ -381,10 +422,10 @@ async def create_order(values: dict[str, Any]) -> dict[str, Any] | None:
     if not item_labels:
         return None
 
-    # Only the 5% platform service fee (no tax, no delivery)
+    # Flat ₹10-per-order admin commission (no tax, no delivery)
     tax = 0
     delivery_fee = 0
-    total = subtotal + round(subtotal * 0.05)
+    total = subtotal + 10
     today = _today()
     latest_today = await database.local_orders.find_one(
         {"created_at": today},
