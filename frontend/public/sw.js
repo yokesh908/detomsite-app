@@ -1,4 +1,4 @@
-const CACHE_NAME = 'detomsite-v3';
+const CACHE_NAME = 'detomsite-v4';
 const PRECACHE = ['/', '/index.html'];
 
 self.addEventListener('install', event => {
@@ -48,18 +48,18 @@ self.addEventListener('fetch', event => {
     return;
   }
 
-  // Stale-while-revalidate for HTML/navigation
+  // Network-first for HTML/navigation (fresh content after each deploy;
+  // cache only serves as an offline fallback)
   event.respondWith(
-    caches.match(request).then(cached => {
-      const fetched = fetch(request).then(response => {
-        if (response.ok) {
-          const clone = response.clone();
-          caches.open(CACHE_NAME).then(c => c.put(request, clone));
-        }
-        return response;
-      }).catch(() => cached || new Response('Offline', { status: 503 }));
-      return cached || fetched;
-    })
+    fetch(request).then(response => {
+      if (response.ok) {
+        const clone = response.clone();
+        caches.open(CACHE_NAME).then(c => c.put(request, clone));
+      }
+      return response;
+    }).catch(() =>
+      caches.match(request).then(cached => cached || new Response('Offline', { status: 503 }))
+    )
   );
 });
 
