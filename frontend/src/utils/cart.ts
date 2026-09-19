@@ -82,10 +82,12 @@ export function addProductToCart(product: LocalProduct, shop: LocalShop) {
 }
 
 /** Convert a cart shop group into the backend's checkout payload shape.
- *  Each line is submitted as a single unit — the quantity field is always 1. */
+ *  Each line is submitted as a single unit — the quantity field is always 1.
+ *  quantity is included for backward compatibility with older backends that
+ *  still read item["quantity"] (the quantity system was removed from the UI). */
 export function toPaymentGroup(group: CartShopGroup) {
   return {
     shop_id: group.shop_id,
-    items: group.items.map(item => ({ product_id: item.product_id })),
+    items: group.items.map(item => ({ product_id: item.product_id, quantity: 1 })),
   }
 }

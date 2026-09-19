@@ -1021,7 +1021,9 @@ def _create_order_impl(values: dict[str, Any]) -> dict[str, Any] | None:
                 product = products_by_id.get(item["product_id"])
                 if not product:
                     continue
-                quantity = int(item["quantity"])
+                # Quantity system removed — each cart line is one unit, so older
+                # callers that send only {"product_id"} still work (default 1).
+                quantity = int(item.get("quantity", 1) or 1)
                 subtotal += int(product["price"]) * quantity
                 # Quantity system removed — a single item reads "Masala Dosa",
                 # not "1x Masala Dosa". Multi-quantity callers keep the prefix.
@@ -2444,7 +2446,7 @@ def create_parent_order(
                     product = products_by_id.get(item["product_id"])
                     if not product:
                         continue
-                    quantity = int(item["quantity"])
+                    quantity = int(item.get("quantity", 1) or 1)
                     if quantity <= 0:
                         continue
                     if not consume_batch_stock(product["id"], batch_type, quantity):

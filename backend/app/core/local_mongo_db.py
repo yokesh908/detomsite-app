@@ -415,7 +415,7 @@ async def create_order(values: dict[str, Any]) -> dict[str, Any] | None:
         product = await get_product(item["product_id"])
         if not product:
             continue
-        quantity = int(item["quantity"])
+        quantity = int(item.get("quantity", 1) or 1)
         subtotal += int(product["price"]) * quantity
         item_labels.append(f"{quantity}x {product['name']}")
 
