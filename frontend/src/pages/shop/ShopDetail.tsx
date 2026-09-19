@@ -16,12 +16,14 @@ export function ShopDetail() {
 
   const load = useCallback(() => {
     if (!shopId) return
-    // Shop and menu failures are independent — a bad stock call must not
-    // nuke the whole page into "Shop not found".
+    // Shop and menu failures are independent — a bad menu call must not
+    // nuke the whole page into "Shop not found". Menu uses the public
+    // /local/products endpoint (works for logged-out visitors; the
+    // auth-protected /local/products/stock returned 401 here).
     apiCached.get<LocalShop>(`/local/shops/${shopId}`, undefined, 6000)
       .then(s => setShop(cur => same(cur, s) ? cur : s))
       .catch(() => setShop(null))
-    apiCached.get<LocalProduct[]>('/local/products/stock', undefined, 6000)
+    apiCached.get<LocalProduct[]>('/local/products', undefined, 6000)
       .then(r => setProducts(cur => same(cur, (r || []).filter(p => (p.shop_id || '') === shopId)) ? cur : (r || []).filter(p => (p.shop_id || '') === shopId)))
       .catch(() => setProducts([]))
       .finally(() => setLoading(false))
