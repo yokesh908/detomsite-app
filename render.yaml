@@ -24,18 +24,3 @@ services:
         sync: false
       - key: DEFAULT_SUPER_ADMIN_PASSWORD
         sync: false
-
-  # Keep the free web service awake (Render free tier sleeps after idle).
-  - type: cron
-    name: detomsite-keep-alive
-    runtime: python
-    plan: free
-    schedule: "*/5 * * * *"
-    rootDir: backend
-    buildCommand: "pip install -r requirements.txt"
-    startCommand: "python scripts/keep_alive.py"
-    envVars:
-      - key: PYTHON_VERSION
-        value: 3.11.0
-      - key: HEALTH_URL
-        value: https://detomsite-backend.onrender.com/health
