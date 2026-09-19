@@ -208,6 +208,9 @@ _MIGRATIONS = [
     # the vendor's "Add Product" fails in production (500) while local SQLite
     # works (local auto-creates the schema on startup).
     "ALTER TABLE products ADD COLUMN IF NOT EXISTS pending_price integer",
+    # Remove the sold column from product_stock — we now track stock by directly
+    # decrementing/incrementing total_stock instead of maintaining a separate sold counter.
+    "ALTER TABLE product_stock DROP COLUMN IF EXISTS sold",
     "ALTER TABLE products ADD COLUMN IF NOT EXISTS prep_time integer NOT NULL DEFAULT 10",
     "ALTER TABLE products ADD COLUMN IF NOT EXISTS available boolean NOT NULL DEFAULT true",
     # Track the ₹10-per-order shares vendors pay to the admin (UPI → recorded as Pending,
@@ -2284,12 +2287,12 @@ def get_product_stock(product_id: str, batch_type: str, date_key: str | None = N
     try:
         with connection.cursor() as cur:
             cur.execute(
-                "SELECT total_stock, sold FROM product_stock WHERE product_id = %s AND date_key = %s AND batch_type = %s",
+                "SELECT total_stock FROM product_stock WHERE product_id = %s AND date_key = %s AND batch_type = %s",
                 (product_id, dk, batch_type),
             )
             row = cursor_row(cur)
             if row:
-                return max(0, int(row["total_stock"]) - int(row["sold"]))
+                return max(0, int(row["total_stock"]))
             cur.execute("SELECT inventory FROM products WHERE id = %s", (product_id,))
             prow = cursor_row(cur)
             return int(prow["inventory"]) if prow else 0
@@ -2307,7 +2310,7 @@ def get_product_stocks(batch_type: str, date_key: str | None = None) -> dict[str
         with connection.cursor() as cur:
             cur.execute(
                 """SELECT p.id AS pid,
-                          COALESCE(ps.total_stock, p.inventory) - COALESCE(ps.sold, 0) AS stock_left
+                          COALESCE(ps.total_stock, p.inventory) AS stock_left
                      FROM products p
                      LEFT JOIN product_stock ps
                        ON ps.product_id = p.id AND ps.date_key = %s AND ps.batch_type = %s""",
@@ -2325,8 +2328,8 @@ def init_batch_stock(product_id: str, batch_type: str, default_stock: int, date_
     try:
         with connection.cursor() as cur:
             cur.execute(
-                """INSERT INTO product_stock (product_id, date_key, batch_type, total_stock, sold)
-                   VALUES (%s, %s, %s, %s, 0)
+                """INSERT INTO product_stock (product_id, date_key, batch_type, total_stock)
+                   VALUES (%s, %s, %s, %s)
                    ON CONFLICT (product_id, date_key, batch_type) DO NOTHING""",
                 (product_id, dk, batch_type, default_stock),
             )
@@ -2344,16 +2347,15 @@ def consume_batch_stock(product_id: str, batch_type: str, qty: int, date_key: st
     try:
         with connection.cursor() as cur:
             cur.execute(
-                "SELECT id, total_stock, sold FROM product_stock WHERE product_id = %s AND date_key = %s AND batch_type = %s",
+                "SELECT id, total_stock FROM product_stock WHERE product_id = %s AND date_key = %s AND batch_type = %s",
                 (product_id, dk, batch_type),
             )
             row = cursor_row(cur)
             if row:
-                remaining = int(row["total_stock"]) - int(row["sold"])
-                if remaining < qty:
+                if int(row["total_stock"]) < qty:
                     return False
                 cur.execute(
-                    "UPDATE product_stock SET sold = sold + %s WHERE id = %s",
+                    "UPDATE product_stock SET total_stock = total_stock - %s WHERE id = %s",
                     (qty, row["id"]),
                 )
                 connection.commit()
@@ -2379,7 +2381,7 @@ def release_batch_stock(product_id: str, batch_type: str, qty: int, date_key: st
     try:
         with connection.cursor() as cur:
             cur.execute(
-                "UPDATE product_stock SET sold = GREATEST(0, sold - %s) WHERE product_id = %s AND date_key = %s AND batch_type = %s",
+                "UPDATE product_stock SET total_stock = total_stock + %s WHERE product_id = %s AND date_key = %s AND batch_type = %s",
                 (qty, product_id, dk, batch_type),
             )
             connection.commit()

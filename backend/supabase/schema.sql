@@ -303,7 +303,6 @@ create table if not exists public.product_stock (
   date_key text not null,
   batch_type text not null,
   total_stock integer not null default 0,
-  sold integer not null default 0,
   created_at timestamptz not null default now(),
   unique (product_id, date_key, batch_type)
 );
