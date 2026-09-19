@@ -15,6 +15,7 @@ const MainLayout = lazy(() => import('./components/Layout').then(m => ({ default
 const CartPage = lazy(() => import('./pages/CartPage').then(m => ({ default: m.CartPage })))
 const PaymentPage = lazy(() => import('./pages/PaymentPage').then(m => ({ default: m.PaymentPage })))
 const OrderResultPage = lazy(() => import('./pages/OrderResultPage').then(m => ({ default: m.OrderResultPage })))
+const PreviousOrdersPage = lazy(() => import('./pages/PreviousOrdersPage').then(m => ({ default: m.PreviousOrdersPage })))
 const SupportPage = lazy(() => import('./pages/SupportPage').then(m => ({ default: m.SupportPage })))
 const InstallPwaCard = lazy(() => import('./components/InstallPwaCard').then(m => ({ default: m.InstallPwaCard })))
 const VendorRegister = lazy(() => import('./pages/vendor/VendorRegister').then(m => ({ default: m.VendorRegister })))
@@ -150,6 +151,7 @@ function App() {
                     <Route path="/login" element={<AuthPage />} />
                     <Route path="/register" element={<AuthPage />} />
                     <Route path="/customer-dashboard" element={<CustomerDashboard />} />
+                    <Route path="/previous-orders" element={<PreviousOrdersPage />} />
                     <Route path="/feedback" element={<FeedbackPage />} />
                     <Route path="/shopkeeper-dashboard" element={<ShopkeeperDashboard />} />
                     <Route path="/admin-dashboard" element={<AdminDashboard />} />

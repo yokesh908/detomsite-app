@@ -105,35 +105,14 @@ async def rate_limit_middleware(request: Request, call_next):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup and shutdown events"""
-    # Startup
+    # Startup — Supabase Postgres is the ONLY database.
     logger.info("Starting DETOMSITE application")
-    # Keep-alive cron: self-ping /health every 5 minutes so the free-tier
-    # backend never sleeps (works even without the external Render cron).
+    from app.core.store import init_store
+    if not await asyncio.to_thread(init_store):
+        raise RuntimeError("Supabase initialization failed; no fallback database is available.")
+    logger.info("Supabase Postgres store initialized")
     keep_alive_task = asyncio.create_task(keep_alive_loop())
     auto_delivery_task = asyncio.create_task(auto_delivery_loop())
-    if settings.USE_SUPABASE_DB:
-        from app.core.store import init_store
-        init_store()
-        logger.info("Supabase Postgres store initialized")
-    elif settings.USE_TURSO_DB:
-        from app.core.store import init_store
-        init_store()
-        logger.info("Turso database initialized")
-    elif settings.USE_LOCAL_DB:
-        from app.core.store import init_store
-        init_store()
-        logger.info("Local SQLite database initialized")
-    else:
-        from app.core.database import connect_to_mongo
-        await connect_to_mongo()
-
-        # Initialize default super admin if none exists
-        from app.services.auth_service import init_default_super_admin
-        await init_default_super_admin()
-
-        from app.core.local_mongo_db import init_local_mongo_db
-        await init_local_mongo_db()
-        logger.info("MongoDB local API collections initialized")
     
     yield
 
@@ -150,21 +129,16 @@ async def lifespan(app: FastAPI):
         pass
 
     logger.info("Shutting down DETOMSITE application")
-    if not settings.USE_LOCAL_DB and not settings.USE_TURSO_DB and not settings.USE_SUPABASE_DB:
-        from app.core.database import close_mongo_connection
-        await close_mongo_connection()
 
 
 # ─── 30-minute auto-delivery background job ───
 async def auto_delivery_loop():
     """Every 60 seconds, auto-complete sub-orders delivered more than 30 minutes
     ago (the student didn't report a problem) — see spec section 36. Uses the
-    store facade so it works on SQLite, Turso AND Supabase."""
+    Supabase store."""
     while True:
         await asyncio.sleep(60)
         try:
-            if not settings.USE_LOCAL_DB and not settings.USE_TURSO_DB and not settings.USE_SUPABASE_DB:
-                continue
             from app.core.store import store
             def _run():
                 return store.auto_complete_expired_deliveries()
@@ -239,7 +213,7 @@ app.include_router(
     tags=["Local Runnable API"]
 )
 
-# Register the three portals (always available, even in local mode)
+# Register the three portals (always available — all backed by Supabase).
 app.include_router(
     users.router,
     prefix="/api/v1/users",
@@ -256,64 +230,10 @@ app.include_router(
     tags=["Admin Portal"]
 )
 
-if not settings.USE_LOCAL_DB and not settings.USE_TURSO_DB and not settings.USE_SUPABASE_DB:
-    from app.api.v1 import auth, users, campuses, shops, products, orders, payments, reviews, tickets, admin, admin_super
-
-    app.include_router(
-        auth.router,
-        prefix="/api/v1/auth",
-        tags=["Authentication"]
-    )
-    app.include_router(
-        users.router,
-        prefix="/api/v1/users",
-        tags=["Users"]
-    )
-    app.include_router(
-        campuses.router,
-        prefix="/api/v1/campuses",
-        tags=["Campuses"]
-    )
-    app.include_router(
-        shops.router,
-        prefix="/api/v1/shops",
-        tags=["Shops"]
-    )
-    app.include_router(
-        products.router,
-        prefix="/api/v1/products",
-        tags=["Products"]
-    )
-    app.include_router(
-        orders.router,
-        prefix="/api/v1/orders",
-        tags=["Orders"]
-    )
-    app.include_router(
-        payments.router,
-        prefix="/api/v1/payments",
-        tags=["Payments"]
-    )
-    app.include_router(
-        reviews.router,
-        prefix="/api/v1/reviews",
-        tags=["Reviews"]
-    )
-    app.include_router(
-        tickets.router,
-        prefix="/api/v1/tickets",
-        tags=["Tickets"]
-    )
-    app.include_router(
-        admin.router,
-        prefix="/api/v1/admin",
-        tags=["Admin"]
-    )
-    app.include_router(
-        admin_super.router,
-        prefix="/api/v1/super-admin",
-        tags=["Super Admin"]
-    )
+# NOTE: the old Mongo-only routers (auth, campuses, shops, products, orders,
+# payments, reviews, tickets, admin, super-admin) were removed with the MongoDB
+# backend. Supabase is the only database; /api/v1/local + /users + /vendor +
+# /admin above are the full API.
 
 
 @app.get("/")

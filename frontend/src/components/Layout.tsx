@@ -20,7 +20,7 @@ interface LayoutProps { children: React.ReactNode; className?: string }
 export const MainLayout: React.FC<LayoutProps> = ({ children, className = '' }) => {
   const [mobileOpen, setMobileOpen] = useState(false)
   const [session, setSession] = useState<LocalSession | null>(() => getLocalSession())
-  const [cartCount, setCartCount] = useState(() => getCart().reduce((s, i) => s + i.quantity, 0))
+  const [cartCount, setCartCount] = useState(() => getCart().length)
   const [notifications, setNotifications] = useState<LocalNotification[]>([])
   const [notifOpen, setNotifOpen] = useState(false)
   const [completionToast, setCompletionToast] = useState<LocalNotification | null>(null)
@@ -28,7 +28,7 @@ export const MainLayout: React.FC<LayoutProps> = ({ children, className = '' }) 
   const navigate = useNavigate()
 
   useEffect(() => {
-    const sync = () => setCartCount(getCart().reduce((s, i) => s + i.quantity, 0))
+    const sync = () => setCartCount(getCart().length)
     window.addEventListener('detomsite-cart-updated', sync)
     return () => window.removeEventListener('detomsite-cart-updated', sync)
   }, [])

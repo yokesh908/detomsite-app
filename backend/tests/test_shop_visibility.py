@@ -1,6 +1,4 @@
 import importlib
-import os
-from pathlib import Path
 
 
 def test_shop_toggle_and_admin_actions(monkeypatch, tmp_path):
@@ -9,14 +7,9 @@ def test_shop_toggle_and_admin_actions(monkeypatch, tmp_path):
     monkeypatch.setenv("JWT_SECRET", "test-secret")
     monkeypatch.setenv("FRONTEND_URL", "https://example.com")
     monkeypatch.setenv("BACKEND_URL", "https://api.example.com")
-    monkeypatch.delenv("USE_TURSO_DB", raising=False)
-    monkeypatch.setenv("USE_SUPABASE_DB", "false")
-    monkeypatch.setenv("USE_LOCAL_DB", "true")
 
-    import app.core.config as config_module
     import app.core.local_demo_db as local_demo_db
 
-    importlib.reload(config_module)
     importlib.reload(local_demo_db)
 
     local_demo_db.init_local_demo_db()

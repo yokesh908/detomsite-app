@@ -1,3 +1,5 @@
+import { OperationsPanel } from '../../components/OperationsPanel'
+
 import { useState, useCallback } from 'react'
 import { Link } from 'react-router-dom'
 import api from '../../services/api'
@@ -139,6 +141,8 @@ export function ShopkeeperDashboard() {
                 </div>
               ))}
             </div>
+
+            <OperationsPanel partner orders={subOrders.map(o => ({ id: o.id, status: o.status, created_at: o.created_at, value: o.subtotal, shop: o.shop_name || o.shop_id }))} />
 
             {/* Mobile: single column / Desktop: three columns */}
             <div className="grid gap-4 sm:gap-5 grid-cols-1 lg:grid-cols-3">

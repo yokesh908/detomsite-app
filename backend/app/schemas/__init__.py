@@ -187,9 +187,8 @@ class ProductResponse(ProductBase):
 
 
 class CartItem(BaseModel):
-    """Cart item schema"""
+    """Cart item schema — quantity removed, each item is one unit."""
     product_id: str
-    quantity: int = Field(..., gt=0)
     variant_selections: dict = {}
     addon_selections: List[dict] = []
 
@@ -201,10 +200,9 @@ class Cart(BaseModel):
 
 
 class OrderItemResponse(BaseModel):
-    """Order item response schema"""
+    """Order item response schema — quantity removed."""
     product_id: str
     product_name: str
-    quantity: int
     price: float
     variant_selections: dict
     addon_selections: List[dict]

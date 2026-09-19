@@ -41,33 +41,19 @@ class Settings(BaseSettings):
     HOST: str = "0.0.0.0"
     PORT: int = 8000
     
-    # Database
-    USE_LOCAL_DB: bool = True
-    USE_TURSO_DB: bool = False
-    USE_SUPABASE_DB: bool = False
+    # Database — Supabase Postgres is the ONLY production database.
+    # The old SQLite / Turso / MongoDB backends were removed. local_demo_db.py
+    # is kept ONLY as a throwaway store for pytest (see tests/conftest.py).
+    # ``LOCAL_DB_PATH`` below is test-only and never used by the app itself.
     LOCAL_DB_PATH: str = "detomsite_local.db"
-    TURSO_DATABASE_URL: str = ""
-    TURSO_AUTH_TOKEN: str = ""
     # Supabase Postgres connection string, e.g.
     # postgresql://postgres.<ref>:<password>@aws-0-<region>.pooler.supabase.com:6543/postgres
     SUPABASE_DATABASE_URL: str = ""
     SUPABASE_DB_HOST: str = ""
-    SUPABASE_DB_PORT: int = 5432
+    SUPABASE_DB_PORT: int = 6543
     SUPABASE_DB_USER: str = "postgres"
     SUPABASE_DB_PASSWORD: str = ""
     SUPABASE_DB_NAME: str = "postgres"
-    # Optional SECOND Supabase Postgres database (dual-read). When set, read-
-    # only lookups fall back to this database whenever the primary returns
-    # nothing, so the app can read historical data that lives in another
-    # Supabase project while all writes/migrations stay on the primary.
-    SUPABASE_SECONDARY_DATABASE_URL: str = ""
-    SUPABASE_SECONDARY_DB_HOST: str = ""
-    SUPABASE_SECONDARY_DB_PORT: int = 5432
-    SUPABASE_SECONDARY_DB_USER: str = "postgres"
-    SUPABASE_SECONDARY_DB_PASSWORD: str = ""
-    SUPABASE_SECONDARY_DB_NAME: str = "postgres"
-    MONGODB_URL: str = "mongodb://localhost:27017"
-    DATABASE_NAME: str = "detomsite"
     SEED_DEMO_DATA: bool = False
 
     # SMS-forwarder agent auth. The Android app posts bank credit SMS to
@@ -84,9 +70,6 @@ class Settings(BaseSettings):
     WA_API_URL: str = ""
     WA_META_TOKEN: str = ""
     WA_META_PHONE_ID: str = ""
-    
-    # Redis
-    REDIS_URL: str = "redis://localhost:6379"
     
     # JWT — auto-generated secure secret if not explicitly set via env var.
     JWT_SECRET: Optional[str] = None
@@ -217,8 +200,7 @@ class Settings(BaseSettings):
         import json
         self.ALLOWED_ORIGINS = json.dumps(origins)
 
-        if self.USE_LOCAL_DB and not self.USE_TURSO_DB and not self.USE_SUPABASE_DB:
-            return self
+        # Supabase settings are required in development and production alike.
 
         # In development (DEBUG=True) the app runs on localhost, so the strict
         # production-URL checks below don't apply. They kick in only when DEBUG
@@ -226,18 +208,8 @@ class Settings(BaseSettings):
         is_dev = bool(self.DEBUG)
 
         missing = []
-        if self.USE_TURSO_DB:
-            if not self.TURSO_DATABASE_URL:
-                missing.append("TURSO_DATABASE_URL")
-            if not self.TURSO_AUTH_TOKEN:
-                missing.append("TURSO_AUTH_TOKEN")
-        elif self.USE_SUPABASE_DB:
-            if not self.SUPABASE_DATABASE_URL and not self.SUPABASE_DB_PASSWORD:
-                missing.append("SUPABASE_DATABASE_URL or SUPABASE_DB_PASSWORD")
-        elif not self.MONGODB_URL or self.MONGODB_URL == "mongodb://localhost:27017":
-            missing.append("MONGODB_URL")
-        if not self.DATABASE_NAME:
-            missing.append("DATABASE_NAME")
+        if not self.SUPABASE_DATABASE_URL and not (self.SUPABASE_DB_HOST and self.SUPABASE_DB_PASSWORD):
+            missing.append("SUPABASE_DATABASE_URL or SUPABASE_DB_HOST + SUPABASE_DB_PASSWORD")
         if not is_dev:
             if not self.FRONTEND_URL or "localhost" in self.FRONTEND_URL:
                 missing.append("FRONTEND_URL")

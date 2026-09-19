@@ -6,7 +6,6 @@ export interface StoredCartItem {
   shop_name: string
   name: string
   price: number
-  quantity: number
   category: string
 }
 
@@ -27,7 +26,7 @@ export function getCart(): StoredCartItem[] {
     // A corrupted value (object, string, …) used to hard-crash every page that
     // renders the cart — accept only a real array of items.
     if (!Array.isArray(parsed)) return []
-    return parsed.filter(item => item && typeof item === 'object' && !Number.isNaN(Number(item.price)) && Number(item.quantity) > 0)
+    return parsed.filter(item => item && typeof item === 'object' && !Number.isNaN(Number(item.price)))
   } catch {
     return []
   }
@@ -47,7 +46,7 @@ export function getCartByShop(): CartShopGroup[] {
       map.set(item.shop_id, group)
     }
     group.items.push(item)
-    group.subtotal += item.price * item.quantity
+    group.subtotal += item.price
   }
   return Array.from(map.values())
 }
@@ -61,52 +60,32 @@ export function clearCart() {
   saveCart([])
 }
 
+/** Add a product to the cart. Each tap adds one unit — there is no quantity
+ *  editor. If the exact same product is already in the cart we keep the cart
+ *  unchanged (mirrors the student app behaviour: one product → one line). */
 export function addProductToCart(product: LocalProduct, shop: LocalShop) {
   const current = getCart()
-  const existing = current.find(item => item.product_id === product.id)
-
-  const nextItems = existing
-    ? current.map(item => (
-      item.product_id === product.id ? { ...item, quantity: item.quantity + 1 } : item
-    ))
-    : [
-      ...current,
-      {
-        product_id: product.id,
-        shop_id: shop.id,
-        shop_name: shop.name,
-        name: product.name,
-        price: product.price,
-        quantity: 1,
-        category: product.category,
-      },
-    ]
-
+  if (current.some(item => item.product_id === product.id)) return current
+  const nextItems = [
+    ...current,
+    {
+      product_id: product.id,
+      shop_id: shop.id,
+      shop_name: shop.name,
+      name: product.name,
+      price: product.price,
+      category: product.category,
+    },
+  ]
   saveCart(nextItems)
   return nextItems
 }
 
-export function updateCartQuantity(productId: string, quantity: number) {
-  const current = getCart()
-  const nextItems = quantity <= 0
-    ? current.filter(item => item.product_id !== productId)
-    : current.map(item => item.product_id === productId ? { ...item, quantity } : item)
-  saveCart(nextItems)
-  return nextItems
-}
-
-export function cartTotal(): number {
-  return getCart().reduce((sum, item) => sum + (item.price * item.quantity), 0)
-}
-
-export function cartCount(): number {
-  return getCart().reduce((sum, item) => sum + item.quantity, 0)
-}
-
-/** Convert a cart shop group into the backend's checkout payload shape. */
+/** Convert a cart shop group into the backend's checkout payload shape.
+ *  Each line is submitted as a single unit — the quantity field is always 1. */
 export function toPaymentGroup(group: CartShopGroup) {
   return {
     shop_id: group.shop_id,
-    items: group.items.map(item => ({ product_id: item.product_id, quantity: item.quantity })),
+    items: group.items.map(item => ({ product_id: item.product_id })),
   }
 }

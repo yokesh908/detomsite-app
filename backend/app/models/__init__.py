@@ -24,6 +24,7 @@ class UserStatus(str, Enum):
     ACTIVE = "active"
     SUSPENDED = "suspended"
     DELETED = "deleted"
+    REJECTED = "rejected"
 
 
 class MongoDocument(Document):

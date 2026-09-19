@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback } from 'react'
+import { orderGroup } from '../../utils/operations'
 import { Link } from 'react-router-dom'
 import api from '../../services/api'
 import { LocalNotification, LocalParentOrder, LocalTicket } from '../../types/localApi'
@@ -93,17 +94,15 @@ export function CustomerDashboard() {
   // instantly when you switch back.
   usePolling(load, 10000, [load])
 
-  const myOrders = useMemo(() => {
-    const phone = (session?.phone || '').replace(/\D/g, '')
-    const byName = session?.name ? orders.filter(o => String(o.student_name || '').toLowerCase() === session!.name!.toLowerCase()) : []
-    const byPhone = phone ? orders.filter(o => String(o.student_phone || '').replace(/\D/g, '').slice(-10) === phone.slice(-10)) : []
-    const merged = [...byName, ...byPhone.filter(p => !byName.some(m => m.id === p.id))]
-    return merged.length ? merged : orders
-  }, [orders, session?.name, session?.phone])
-
-  const active = myOrders.filter(o => !['Completed', 'Cancelled'].includes(o.status))
-  const completed = myOrders.filter(o => o.status === 'Completed' || o.status === 'Delivered')
-  const total = myOrders.reduce((s, o) => s + o.total, 0)
+  // The backend returns account-owned orders; never guess ownership by contact details.
+  const myOrders = orders
+  const [orderSearch, setOrderSearch] = useState('')
+  const [orderFilter, setOrderFilter] = useState('all')
+  const history = myOrders.filter(o => (orderFilter === 'all' || orderGroup(o.status) === orderFilter)
+    && `${o.token} ${o.status} ${(o.sub_orders || []).map(s => s.shop_name).join(' ')}`.toLowerCase().includes(orderSearch.trim().toLowerCase()))
+  const active = myOrders.filter(o => orderGroup(o.status) === 'active')
+  const completed = myOrders.filter(o => orderGroup(o.status) === 'completed')
+  const total = completed.reduce((s, o) => s + o.total, 0)
   const myTickets = session?.email ? tickets.filter(t => t.email.toLowerCase() === session.email!.toLowerCase()) : tickets
 
   const cancelOrder = async (orderId: string) => {
@@ -148,7 +147,7 @@ export function CustomerDashboard() {
         </Link>
 
         <div className="mb-6 grid gap-3 sm:grid-cols-4">
-          {[['Total orders', myOrders.length], ['Total spent', `₹${total}`], ['Active', active.length], ['Completed', completed.length]].map(([l, v]) => (
+          {[['Total orders', myOrders.length], ['Completed value', `₹${total}`], ['Active', active.length], ['Completed', completed.length]].map(([l, v]) => (
             <div key={l} className="rounded-btn bg-white p-4 shadow-card"><p className="text-xs font-semibold text-gray-500">{l}</p><p className="mt-1 text-2xl font-bold text-primary-dark">{v}</p></div>
           ))}
         </div>
@@ -211,12 +210,23 @@ export function CustomerDashboard() {
               </section>
             )}
             <section className="rounded-btn bg-white shadow-card">
-              <div className="border-b border-gray-100 px-4 py-3"><h2 className="text-lg font-bold text-primary">Order History</h2></div>
+              <div className="border-b border-gray-100 px-4 py-3">
+                <h2 className="text-lg font-bold text-primary">Order History</h2>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <input aria-label="Search orders by token or shop" placeholder="Search token or shop" value={orderSearch} onChange={e => setOrderSearch(e.target.value)} className="rounded-lg border border-gray-200 p-2 text-sm" />
+                  <select aria-label="Filter order history" value={orderFilter} onChange={e => setOrderFilter(e.target.value)} className="rounded-lg border border-gray-200 p-2 text-sm">
+                    <option value="all">All orders</option><option value="active">Active</option><option value="completed">Completed</option><option value="cancelled">Cancelled / rejected</option>
+                  </select>
+                  <Link to="/shops" className="rounded-lg bg-primary px-3 py-2 text-sm font-bold text-white">Browse menu</Link>
+                  <Link to="/support" className="rounded-lg border border-gray-200 px-3 py-2 text-sm font-bold text-primary">Get help</Link>
+                </div>
+                {!history.length && <p className="mt-3 text-sm text-gray-500">No orders match your filters.</p>}
+              </div>
               <div className="overflow-x-auto">
                 <table className="w-full min-w-[600px] text-sm">
                   <thead className="bg-primary-light/30/50"><tr>{['Token', 'Shops', 'Items', 'Amount', 'Status'].map(h => <th key={h} className="px-4 py-3 text-left text-xs font-bold text-gray-500">{h}</th>)}</tr></thead>
                   <tbody>
-                    {myOrders.map(order => (
+                    {history.map(order => (
                       <tr key={order.id} className="border-t border-gray-50">
                         <td className="px-4 py-3 font-bold text-primary-dark">{order.token}</td>
                         <td className="px-4 py-3 font-medium text-gray-600">{order.sub_orders?.map(s => s.shop_name).join(', ') || '—'}</td>

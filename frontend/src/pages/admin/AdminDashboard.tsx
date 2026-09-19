@@ -1,3 +1,5 @@
+import { OperationsPanel } from '../../components/OperationsPanel'
+
 import { useEffect, useState, useCallback } from 'react'
 import { apiCached, api } from '../../services/api'
 import {
@@ -78,26 +80,31 @@ export function AdminDashboard() {
   const load = useCallback(async () => {
     setError('')
     try {
-      const [s, p, o, pa, su, ps, cm, re, se, mc] = await Promise.all([
-        apiCached.get<LocalShop[]>('/local/shops', undefined, 7000),
-        apiCached.get<LocalProduct[]>('/local/products', undefined, 15000),
-        api.get<LocalOrder[]>('/local/orders'),
-        api.get<LocalPayment[]>('/local/payments'),
-        apiCached.get<LocalSummary>('/local/summary', undefined, 9000),
-        apiCached.get<LocalPaymentSettings>('/local/payment-settings', undefined, 20000),
-        api.get<LocalComplaint[]>('/local/complaints'),
-        api.get<LocalRefund[]>('/local/refunds'),
+      // Load critical data first (shops, summary) with shorter timeouts
+      const [s, su] = await Promise.all([
+        apiCached.get<LocalShop[]>('/local/shops', undefined, 5000),
+        apiCached.get<LocalSummary>('/local/summary', undefined, 5000),
+      ])
+      setShops(cur => same(cur, s) ? cur : s)
+      setSummary(cur => same(cur, su) ? cur : su)
+
+      // Load remaining data in parallel with shorter timeouts
+      const [p, o, pa, ps, cm, re, se, mc] = await Promise.all([
+        apiCached.get<LocalProduct[]>('/local/products', undefined, 8000),
+        apiCached.get<LocalOrder[]>('/local/orders', undefined, 8000),
+        apiCached.get<LocalPayment[]>('/local/payments', undefined, 8000),
+        apiCached.get<LocalPaymentSettings>('/local/payment-settings', undefined, 5000),
+        apiCached.get<LocalComplaint[]>('/local/complaints', undefined, 8000),
+        apiCached.get<LocalRefund[]>('/local/refunds', undefined, 8000),
         api.get<LocalSettlement[]>('/local/settlements'),
         api.get<LocalMenuChangeRequest[]>('/local/menu-change-requests'),
       ])
-      setShops(cur => same(cur, s) ? cur : s)
       setProducts(cur => same(cur, p) ? cur : p)
-      setOrders(cur => same(cur, o.data) ? cur : o.data)
-      setPayments(cur => same(cur, pa.data) ? cur : pa.data)
-      setSummary(cur => same(cur, su) ? cur : su)
+      setOrders(cur => same(cur, o) ? cur : o)
+      setPayments(cur => same(cur, pa) ? cur : pa)
       setPaymentSettings(cur => same(cur, ps) ? cur : ps)
-      setComplaints(cur => same(cur, cm.data) ? cur : cm.data)
-      setRefunds(cur => same(cur, re.data) ? cur : re.data)
+      setComplaints(cur => same(cur, cm) ? cur : cm)
+      setRefunds(cur => same(cur, re) ? cur : re)
       setSettlements(cur => same(cur, se.data) ? cur : se.data)
       setMenuChanges(cur => same(cur, mc.data) ? cur : mc.data)
     } catch {
@@ -435,6 +442,8 @@ export function AdminDashboard() {
             </div>
           ))}
         </div>
+
+        <OperationsPanel orders={orders.map(o => ({ id: o.id, status: o.status, created_at: o.created_at, value: o.total, shop: o.shop_name || o.shop_id }))} />
 
         <div className="mb-6 flex gap-2 overflow-x-auto border-b border-gray-100 pb-px">
           {tabs.map(t => (

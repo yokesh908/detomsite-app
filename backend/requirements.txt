@@ -6,11 +6,6 @@ python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
 bcrypt==4.0.1
 python-multipart==0.0.6
-motor==3.7.1
-beanie==2.0.0
-pymongo[srv]==4.17.0
-redis==5.0.1
-aioredis==2.0.1
 httpx==0.25.0
 python-dotenv==1.0.0
 PyJWT==2.8.0
@@ -21,7 +16,6 @@ sentry-sdk==1.38.0
 prometheus-client==0.19.0
 cryptography==41.0.7
 python-slugify==8.0.1
-libsql==0.1.11
 razorpay==2.0.1
 psycopg2-binary==2.9.9
 pywebpush==1.14.1

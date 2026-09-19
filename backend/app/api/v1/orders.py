@@ -70,6 +70,20 @@ async def create_order(
                     detail=f"Product {item.product_id} not found"
                 )
             
+            # Product must belong to the order's shop — otherwise a customer can
+            # sneak in items from another shop at that shop's expense.
+            if product.shop_id != shop.id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Product {product.name} does not belong to this shop"
+                )
+            # Check stock before committing the purchase.
+            if item.quantity > product.inventory_count:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Insufficient stock for {product.name}"
+                )
+            
             item_total = product.price * item.quantity
             subtotal += item_total
             
@@ -81,6 +95,10 @@ async def create_order(
                 "variant_selections": item.variant_selections,
                 "addon_selections": item.addon_selections
             })
+            
+            # Decrement inventory
+            product.inventory_count -= item.quantity
+            await product.save()
         
         # Calculate fees — flat ₹10 per order admin commission (no tax, no delivery)
         delivery_fee = 0

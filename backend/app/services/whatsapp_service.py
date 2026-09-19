@@ -135,7 +135,7 @@ def send_whatsapp(
 
     if ok and log_fn is not None:
         try:
-            log_fn(sub_order_id, number, message, "Sent")
+            log_fn(sub_order_id, number, message, status="Sent")
         except Exception as e:
             logger.warning(f"WhatsApp log error after send: {e}")
     return ok

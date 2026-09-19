@@ -229,9 +229,6 @@ set_env() {
   echo "$value" | (cd backend && vercel env add "$name" production) >/dev/null 2>&1 \
     || warn "Could not set env ${name} (may already exist — fine)."
 }
-set_env USE_SUPABASE_DB        "True"
-set_env USE_LOCAL_DB           "False"
-set_env USE_TURSO_DB           "False"
 set_env SUPABASE_DATABASE_URL  "$DB_URL"
 set_env JWT_SECRET             "$JWT_SECRET"
 set_env FRONTEND_URL           "$FRONTEND_URL"

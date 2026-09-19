@@ -68,7 +68,7 @@ interface Shop { id: string; name: string; category: string; description: string
 interface Product { id: string; shop_id: string; name: string; description: string; price: number; pending_price: number | null; category: string; inventory: number; prep_time: number; available: number }
 interface Order { id: string; token: number; student_name: string; student_phone: string; shop_id: string; shop_name: string; items: string; total: number; delivery_location: string; delivery_slot: string; status: string; payment_method?: string; created_at: string }
 interface Payment { id: string; order_id: string; amount: number; method: string; status: string; utr_number: string | null; screenshot_name: string | null; created_at: string }
-interface CartItem { product_id: string; shop_id: string; shop_name: string; name: string; price: number; quantity: number; category: string }
+interface CartItem { product_id: string; shop_id: string; shop_name: string; name: string; price: number; category: string }
 interface Notification { id: string; title: string; message: string; order_id: string | null; status: string | null; is_read: number; created_at: string }
 interface PaymentSettings { manual_enabled: boolean; upi_id: string; receiver_name: string; instructions: string }
 
@@ -153,11 +153,13 @@ const Icon = {
   eyeOff: (p: IconProps) => <svg {...iconSvg} className={p.className || 'h-4 w-4'}><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24" /><path d="m1 1 22 22" /></svg>,
   sun: (p: IconProps) => <svg {...iconSvg} className={p.className || 'h-4 w-4'}><circle cx="12" cy="12" r="4" /><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" /></svg>,
   moon: (p: IconProps) => <svg {...iconSvg} className={p.className || 'h-4 w-4'}><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z" /></svg>,
+  clock: (p: IconProps) => <svg {...iconSvg} className={p.className || 'h-4 w-4'}><circle cx="12" cy="12" r="9" /><path d="M12 7v5l3 3" /></svg>,
 }
-const IconH = { user: Icon.user, lock: Icon.lock, graduation: Icon.graduation, bell: Icon.bell, cart: Icon.cart, store: Icon.store, package: Icon.package, home: Icon.home, star: Icon.star, support: Icon.support, search: Icon.search, alert: Icon.alert, phone: Icon.phone, mapPin: Icon.mapPin, check: Icon.check, chevronRight: Icon.chevronRight, card: Icon.card, cash: Icon.cash, eye: Icon.eye, eyeOff: Icon.eyeOff, sun: Icon.sun, moon: Icon.moon }
-function addToCart(p: Product, s: Shop) { const c = getCart(); const e = c.find(i => i.product_id === p.id); saveCart(e ? c.map(i => i.product_id === p.id ? { ...i, quantity: i.quantity + 1 } : i) : [...c, { product_id: p.id, shop_id: s.id, shop_name: s.name, name: p.name, price: p.price, quantity: 1, category: p.category }]) }
-function updateQty(pid: string, q: number) { const c = getCart(); saveCart(q <= 0 ? c.filter(i => i.product_id !== pid) : c.map(i => i.product_id === pid ? { ...i, quantity: q } : i)) }
-function billBreakdown(items: CartItem[]) { const total = items.reduce((a, i) => a + i.price * i.quantity, 0); return { subtotal: total, tax: 0, platformFee: 0, delivery: 0, total: total } }
+const IconH = { user: Icon.user, lock: Icon.lock, graduation: Icon.graduation, bell: Icon.bell, cart: Icon.cart, store: Icon.store, package: Icon.package, home: Icon.home, star: Icon.star, support: Icon.support, search: Icon.search, alert: Icon.alert, phone: Icon.phone, mapPin: Icon.mapPin, check: Icon.check, chevronRight: Icon.chevronRight, card: Icon.card, cash: Icon.cash, eye: Icon.eye, eyeOff: Icon.eyeOff, sun: Icon.sun, moon: Icon.moon, clock: Icon.clock }
+/* Quantity system removed — one copy of each product, no +/− counting.
+   Adding an item that is already in the cart is a no-op (returns False). */
+function addToCart(p: Product, s: Shop): boolean { const c = getCart(); if (c.some(i => i.product_id === p.id)) return false; saveCart([...c, { product_id: p.id, shop_id: s.id, shop_name: s.name, name: p.name, price: p.price, category: p.category }]); return true }
+function billBreakdown(items: CartItem[]) { const total = items.reduce((a, i) => a + i.price, 0); return { subtotal: total, tax: 0, platformFee: 0, delivery: 0, total: total } }
 /* UPI amounts MUST be clean numbers with at most 2 decimal places. Raw float
    totals (e.g. 99.5 * 3 = 298.50000000000006 from decimal product prices)
    make banks reject the payment — often with a confusing "exceeded bank
@@ -285,7 +287,7 @@ function canCancelOrder(o: Order | null): boolean {
 /* ─── Layout ─── */
 function Layout({ children }: { children: React.ReactNode }) {
   const [menu, setMenu] = useState(false)
-  const [cartCount, setCartCount] = useState(getCart().reduce((s, i) => s + i.quantity, 0))
+  const [cartCount, setCartCount] = useState(getCart().length)
   const [notifs, setNotifs] = useState<Notification[]>([])
   const [notifOpen, setNotifOpen] = useState(false)
   const notifRef = useRef<HTMLDivElement>(null)
@@ -302,7 +304,7 @@ function Layout({ children }: { children: React.ReactNode }) {
   }, [])
 
   useEffect(() => {
-    const sync = () => setCartCount(getCart().reduce((s, i) => s + i.quantity, 0))
+    const sync = () => setCartCount(getCart().length)
     window.addEventListener('cart-updated', sync)
     return () => window.removeEventListener('cart-updated', sync)
   }, [])
@@ -324,6 +326,7 @@ function Layout({ children }: { children: React.ReactNode }) {
     { p: '/shops', l: 'Shops', i: IconH.store },
     { p: '/dashboard', l: 'Dashboard', i: IconH.home },
     { p: '/orders', l: 'Orders', i: IconH.package },
+    { p: '/previous-orders', l: 'Past Orders', i: IconH.clock },
     { p: '/cart', l: `Cart${cartCount ? ` (${cartCount})` : ''}`, i: IconH.cart },
     { p: '/reviews', l: 'Reviews', i: IconH.star },
     { p: '/account', l: 'Account', i: IconH.user },
@@ -777,6 +780,8 @@ function ShopDetailPage() {
   const { shopId } = useParams()
   const [shop, setShop] = useState<Shop | null>(null); const [products, setProducts] = useState<Product[]>([]); const [msg, setMsg] = useState('')
   const [search, setSearch] = useState('')
+  const [cart, setCart] = useState<CartItem[]>(() => getCart())
+  useEffect(() => { const sync = () => setCart(getCart()); window.addEventListener('cart-updated', sync); return () => window.removeEventListener('cart-updated', sync) }, [])
   useEffect(() => {
     if (!shopId) return
     Promise.all([api.get<Shop>(`/local/shops/${shopId}`), api.get<Product[]>('/local/products', { params: { shop_id: shopId } })])
@@ -814,7 +819,7 @@ function ShopDetailPage() {
         {products.filter(p => p.available && (!search || `${p.name} ${p.description} ${p.category}`.toLowerCase().includes(search.toLowerCase()))).map(p => (
           <div key={p.id} className="rounded-btn border bg-white p-4 flex items-center justify-between">
             <div><h3 className="font-bold text-primary-dark">{p.name}</h3><p className="text-sm text-gray-500">{p.description}</p><p className="mt-1 font-bold text-primary">₹{p.price}</p></div>
-            <button onClick={() => { addToCart(p, shop); setMsg(`${p.name} added to cart!`) }} disabled={!orderable} className={`rounded-btn px-4 py-2 text-sm font-bold text-white ${orderable ? 'bg-primary hover:bg-primary-dark' : 'cursor-not-allowed bg-gray-300'}`}>{orderable ? 'Add +' : 'Unavailable'}</button>
+            <button onClick={() => { const added = addToCart(p, shop); setMsg(added ? `${p.name} added to cart!` : `${p.name} is already in your cart`) }} disabled={!orderable} className={`rounded-btn px-4 py-2 text-sm font-bold text-white ${orderable ? 'bg-primary hover:bg-primary-dark' : 'cursor-not-allowed bg-gray-300'}`}>{orderable ? (cart.some(c => c.product_id === p.id) ? 'In Cart ✓' : 'Add +') : 'Unavailable'}</button>
           </div>
         ))}
         {products.filter(p => p.available && (!search || `${p.name} ${p.description} ${p.category}`.toLowerCase().includes(search.toLowerCase()))).length === 0 && <p className="text-center text-gray-400 py-8">{search ? 'No products match your search' : 'No products available yet'}</p>}
@@ -848,7 +853,7 @@ function CartPage() {
                 grouped[item.shop_name].push(item)
               }
               return Object.entries(grouped).map(([shopName, shopItems]) => {
-                const shopSubtotal = shopItems.reduce((a, i) => a + i.price * i.quantity, 0)
+                const shopSubtotal = shopItems.reduce((a, i) => a + i.price, 0)
                 return (
                   <div key={shopName} className="rounded-btn bg-white p-4 shadow-sm border">
                     <div className="mb-3 flex items-center justify-between border-b border-gray-100 pb-2">
@@ -859,9 +864,10 @@ function CartPage() {
                       {shopItems.map(item => (
                         <div key={item.product_id} className="flex items-center justify-between rounded-sm bg-gray-50 px-3 py-2.5">
                           <div className="min-w-0"><h4 className="truncate font-semibold text-primary-dark">{item.name}</h4><p className="text-xs text-gray-500">₹{item.price} each</p></div>
+                          {/* Quantity system removed — one row per product, with a remove button instead of −/+ steppers */}
                           <div className="flex items-center gap-3">
-                            <div className="flex items-center rounded-btn border"><button onClick={() => { updateQty(item.product_id, item.quantity - 1); setItems(getCart()) }} className="px-3 py-1.5 text-sm font-bold">−</button><span className="min-w-[2rem] text-center text-sm font-bold">{item.quantity}</span><button onClick={() => { updateQty(item.product_id, item.quantity + 1); setItems(getCart()) }} className="px-3 py-1.5 text-sm font-bold">+</button></div>
-                            <span className="min-w-[4rem] text-right font-bold text-primary">₹{item.price * item.quantity}</span>
+                            <span className="min-w-[4rem] text-right font-bold text-primary">₹{item.price}</span>
+                            <button onClick={() => { saveCart(getCart().filter(i => i.product_id !== item.product_id)); setItems(getCart()) }} className="rounded-sm border border-red-200 px-2.5 py-1 text-xs font-bold text-red-500 transition-colors hover:bg-red-50">Remove</button>
                           </div>
                         </div>
                       ))}
@@ -904,7 +910,10 @@ function OrdersPage() {
   const grouped = { pending: orders.filter(o => o.status === 'Pending Acceptance'), active: orders.filter(o => ['Accepted', 'Confirmed', 'Preparing', 'Ready'].includes(o.status)), completed: orders.filter(o => ['Completed', 'Cancelled'].includes(o.status)) }
   return (
     <div className="mx-auto max-w-5xl px-4 py-6">
-      <h1 className="mb-6 text-2xl font-bold text-primary-dark">My Orders</h1>
+      <div className="mb-6 flex flex-wrap items-center justify-between gap-2">
+        <h1 className="text-2xl font-bold text-primary-dark">My Orders</h1>
+        <Link to="/previous-orders" className="flex items-center gap-1.5 rounded-pill bg-primary-light/30 px-3.5 py-2 text-sm font-bold text-primary transition-colors hover:bg-primary-light">{IconH.clock({ className: 'h-4 w-4' })}Past Orders</Link>
+      </div>
       {['pending', 'active', 'completed'].map(key => {
         const items = grouped[key as keyof typeof grouped]
         if (!items.length) return null
@@ -946,6 +955,66 @@ function OrdersPage() {
 }
 
 /* Payment */
+
+/* Previous Orders — the student's completed/cancelled history with search.
+   Live orders stay on the Orders page; this is the "see my past orders" view. */
+function PreviousOrdersPage() {
+  const [orders, setOrders] = useState<Order[]>([])
+  const [search, setSearch] = useState('')
+  const user = JSON.parse(localStorage.getItem('user_data') || '{}')
+  useEffect(() => { fetchOrdersCached().then(list => setOrders(list.filter(o => o.student_name.toLowerCase() === (user.name || '').toLowerCase()))).catch(() => {}) }, [user.name])
+  const past = orders
+    .filter(o => ['Completed', 'Cancelled'].includes(o.status))
+    .sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')))
+  const q = search.toLowerCase().trim()
+  const filtered = q ? past.filter(o => `${o.shop_name} #${o.token} ${o.items} ${o.status}`.toLowerCase().includes(q)) : past
+  const completed = past.filter(o => o.status === 'Completed').length
+  const spent = past.filter(o => o.status === 'Completed').reduce((s, o) => s + o.total, 0)
+  return (
+    <div className="mx-auto max-w-5xl px-4 py-6">
+      <h1 className="mb-6 text-2xl font-bold text-primary-dark">Previous Orders</h1>
+      <div className="mb-6 grid grid-cols-2 gap-2.5 sm:grid-cols-3">
+        {[['Past Orders', past.length], ['Completed', completed], ['Total Spent', `₹${spent}`]].map(([l, v]) => (
+          <div key={l} className="rounded-btn bg-white p-3.5 shadow-sm border">
+            <p className="text-[11px] font-semibold text-gray-500 sm:text-xs">{l}</p>
+            <p className="mt-0.5 text-xl font-bold text-primary-dark">{v}</p>
+          </div>
+        ))}
+      </div>
+      <div className="relative mb-5">
+        <span className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-gray-400">{IconH.search({ className: 'h-4 w-4' })}</span>
+        <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search past orders by shop, item or token…" className="w-full rounded-btn border-2 border-gray-200 py-3 pl-10 pr-4 text-sm outline-none transition-all focus:border-primary-light/200 focus:shadow-card" />
+      </div>
+      <div className="space-y-3">
+        {filtered.map(o => (
+          <Link key={o.id} to={`/order/${o.id}`} className="block rounded-btn border bg-white p-4 transition-all hover:bg-gray-50">
+            <div className="flex items-start justify-between">
+              <span className="text-lg font-bold text-primary-dark">{o.shop_name}</span>
+              <div className="flex items-center gap-2">
+                <span className={`rounded-sm px-2 py-0.5 text-xs font-bold ${o.status === 'Completed' ? 'bg-primary-light text-primary' : 'bg-red-100 text-red-600'}`}>{o.status}</span>
+                <span className={`rounded-sm px-2 py-0.5 text-xs font-bold ${o.payment_method === 'COD' ? 'bg-gold-light text-gold-dark' : 'bg-blue-100 text-blue-700'}`}>{o.payment_method === 'COD' ? 'COD' : 'UPI'}</span>
+              </div>
+            </div>
+            <ul className="mt-1 space-y-1">
+              {o.items.split(', ').filter(Boolean).map((it, i) => (
+                <li key={i} className="flex items-center gap-2 text-sm text-gray-600"><span className="inline-block h-1.5 w-1.5 rounded-pill bg-primary" />{it}</li>
+              ))}
+            </ul>
+            <p className="mt-1 text-sm text-gray-400">#{o.token} · {o.delivery_location} · {o.delivery_slot} · Placed {formatPlacedAt(o.created_at)}</p>
+            <p className="mt-1 font-bold text-primary">₹{o.total}</p>
+          </Link>
+        ))}
+      </div>
+      {past.length === 0 ? (
+        <div className="rounded-btn bg-white p-8 text-center border"><p className="text-gray-500">No past orders yet — your completed and cancelled orders will appear here.</p></div>
+      ) : filtered.length === 0 ? (
+        <div className="rounded-btn bg-white p-8 text-center border"><p className="text-gray-500">No past orders match "{search}".</p></div>
+      ) : null}
+    </div>
+  )
+}
+
+
 function PaymentPage() {
   const navigate = useNavigate()
   const [ps, setPs] = useState<PaymentSettings | null>(null); const [shop, setShop] = useState<Shop | null>(null)
@@ -1024,10 +1093,10 @@ function PaymentPage() {
       let lastOrder: Order | null = null
       for (const shopId of shopIds) {
         const shopItems = shopGroups[shopId]
-        const shopTotal = shopItems.reduce((a, i) => a + i.price * i.quantity, 0)
+        const shopTotal = shopItems.reduce((a, i) => a + i.price, 0)
         const order = await api.post<Order>('/local/orders', {
           shop_id: shopId,
-          items: shopItems.map(i => ({ product_id: i.product_id, quantity: i.quantity })),
+          items: shopItems.map(i => ({ product_id: i.product_id, quantity: 1 })),
           student_name: user.name || 'Student',
           student_phone: toE164(phone),
           delivery_location: loc,
@@ -1535,6 +1604,7 @@ export default function App() {
                 <Route path="/shop/:shopId" element={<ShopDetailPage />} />
                 <Route path="/cart" element={<CartPage />} />
                 <Route path="/orders" element={<OrdersPage />} />
+                <Route path="/previous-orders" element={<PreviousOrdersPage />} />
                 <Route path="/payment" element={<PaymentPage />} />
                 <Route path="/order/:orderId" element={<OrderResultPage />} />
                 <Route path="/reviews" element={<ReviewsPage />} />

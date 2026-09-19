@@ -210,8 +210,12 @@ async def login(data: AdminLoginRequest, request: Request):
 async def dashboard(admin: dict = Depends(verify_admin)):
     """Get admin dashboard statistics."""
     today_key = datetime.now(_KOLKATA_TZ).strftime("%Y-%m-%d")
-    stats = await _db(db.get_admin_dashboard_stats, today_key)
-    recent_orders = await _db(db.list_orders, limit=10)
+    # Stats + recent orders run CONCURRENTLY — the old sequential awaits made
+    # every dashboard poll pay the full DB latency twice over.
+    stats, recent_orders = await asyncio.gather(
+        _db(db.get_admin_dashboard_stats, today_key),
+        _db(db.list_orders, limit=10),
+    )
 
     total_revenue = stats.get("total_revenue", 0)
     total_service_fee = stats.get("total_orders", 0) * 10  # flat ₹10 per order
@@ -348,15 +352,52 @@ async def shop_today_orders(shop_id: str, admin: dict = Depends(verify_admin)):
 
 @router.get("/orders")
 async def list_all_orders(admin: dict = Depends(verify_admin)):
-    """List orders across all shops, newest first — capped at 1000.
-    Multi-shop sub-orders are merged in so they show in the admin centre too."""
-    orders = await _db(db.list_orders, limit=1000)
-    merged = list(orders)
-    for shop in (await _db(db.list_shops)) or []:
-        for sub in (await _db(db.get_shop_sub_orders, shop["id"])) or []:
-            merged.append(_sub_order_shape(sub))
-    merged.sort(key=lambda o: str(o.get("created_at") or ""), reverse=True)
+    """List orders across all shops, newest first — capped at 1500.
+    Multi-shop sub-orders are merged in so they show in the admin centre too.
+
+    Both sources are fetched CONCURRENTLY and the merged list is served from a
+    short TTL cache. The old version fetched every shop and then called
+    ``get_shop_sub_orders`` once per shop (3 sequential queries per shop),
+    which is what made the admin orders page feel slow."""
+    key = "admin-orders"
+    hit = ttl_cache.get(key)
+    if hit is None and shared_cache.enabled():
+        hit = await asyncio.to_thread(shared_cache.get, key)
+        if hit is not None:
+            ttl_cache.set(key, hit, 10)
+    if hit is not None:
+        return hit
+    merged = await _load_admin_orders()
+    ttl_cache.set(key, merged, 10)
+    if shared_cache.enabled():
+        await asyncio.to_thread(shared_cache.set_pair, key, merged, 10)
     return merged[:1500]
+
+
+async def _load_admin_orders() -> list[dict]:
+    """Latest single orders + multi-shop sub-orders, fetched concurrently."""
+    sub_fn = getattr(db, "list_all_sub_orders", None)
+
+    async def _subs() -> list[dict]:
+        if sub_fn is not None:
+            # Supabase store: one batched query for every shop's sub-orders.
+            return await _db(sub_fn, 300) or []
+        # Fallback (throwaway test store): keep the per-shop loop.
+        shops = await _db(db.list_shops) or []
+        merged: list[dict] = []
+        for shop in shops:
+            merged.extend((await _db(db.get_shop_sub_orders, shop["id"])) or [])
+        return merged
+
+    orders, subs = await asyncio.gather(
+        _db(db.list_orders, limit=1000),
+        _subs(),
+    )
+    merged = list(orders or [])
+    for sub in subs or []:
+        merged.append(_sub_order_shape(sub))
+    merged.sort(key=lambda o: str(o.get("created_at") or ""), reverse=True)
+    return merged
 
 
 def _sub_order_shape(sub: dict) -> dict:

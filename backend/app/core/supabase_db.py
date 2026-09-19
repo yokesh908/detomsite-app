@@ -1,9 +1,5 @@
 """
-Supabase (Postgres) data store for DETOMSITE.
-
-Mirrors the function signatures of ``local_demo_db`` so the API layer can switch
-between SQLite (dev) and Supabase Postgres (production) via the ``store`` facade
-without any other code changes.
+Supabase (Postgres) data store for DETOMSITE — the ONLY database.
 
 Connect using either ``SUPABASE_DATABASE_URL`` (a full Postgres connection
 string) or the individual ``SUPABASE_DB_*`` settings.
@@ -13,10 +9,8 @@ using this store.
 """
 from __future__ import annotations
 
-import functools
 import logging
 import secrets
-import threading
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -37,60 +31,49 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 
+_CONN_QUERY_PARAMS = (
+    "connect_timeout=10"
+    "&keepalives=1"
+    "&keepalives_idle=30"
+    "&keepalives_interval=10"
+    "&keepalives_count=5"
+    "&application_name=detomsite"
+)
+
+
+def _with_conn_params(dsn: str) -> str:
+    """Attach fast-fail connect settings to a Postgres DSN.
+
+    Without an explicit ``connect_timeout`` psycopg2/libpq blocks for minutes on
+    an unreachable host, which made requests (and even startup) hang when the
+    Supabase pooler was down. TCP keepalives also let the pool notice half-open
+    connections the pooler recycled instead of failing on the first query."""
+    if not dsn or "connect_timeout" in dsn:
+        return dsn
+    sep = "&" if "?" in dsn else "?"
+    return f"{dsn}{sep}{_CONN_QUERY_PARAMS}"
+
+
 def _connection_string() -> str:
     if settings.SUPABASE_DATABASE_URL:
-        return settings.SUPABASE_DATABASE_URL
+        return _with_conn_params(settings.SUPABASE_DATABASE_URL)
     return (
         f"postgresql://{settings.SUPABASE_DB_USER}:{settings.SUPABASE_DB_PASSWORD}"
         f"@{settings.SUPABASE_DB_HOST}:{settings.SUPABASE_DB_PORT}/{settings.SUPABASE_DB_NAME}"
+        f"?{_CONN_QUERY_PARAMS}"
     )
 
 
-def _secondary_connection_string() -> str:
-    if settings.SUPABASE_SECONDARY_DATABASE_URL:
-        return settings.SUPABASE_SECONDARY_DATABASE_URL
-    return (
-        f"postgresql://{settings.SUPABASE_SECONDARY_DB_USER}:{settings.SUPABASE_SECONDARY_DB_PASSWORD}"
-        f"@{settings.SUPABASE_SECONDARY_DB_HOST}:{settings.SUPABASE_SECONDARY_DB_PORT}/{settings.SUPABASE_SECONDARY_DB_NAME}"
-    )
-
-
-def _secondary_configured() -> bool:
-    """True when a second Supabase database is configured for dual-read."""
-    if settings.SUPABASE_SECONDARY_DATABASE_URL:
-        return True
-    return bool(settings.SUPABASE_SECONDARY_DB_HOST and settings.SUPABASE_SECONDARY_DB_PASSWORD)
-
-
-# ─── Connection pools ────────────────────────────────────────────────────
+# ─── Connection pool ───────────────────────────────────────────────────────
 # Opening a brand-new Postgres connection for every request is slow (each one
 # needs a TCP + TLS handshake across regions). We keep a small pool of warm
 # connections and reuse them, which makes the site feel much snappier.
-#
-# Two pools may exist: the PRIMARY (writes + reads) and an optional SECONDARY
-# (read-only fallback for dual-read). Which pool ``_connect()`` draws from is
-# decided per-thread via ``_active_db.upstream``, so a single request can read
-# from the primary and, on a miss, transparently re-run against the secondary.
 _pool: Any = None
-_secondary_pool: Any = None
-
-_active_db = threading.local()
 
 
-def _current_upstream() -> str:
-    return getattr(_active_db, "upstream", "primary")
-
-
-def _get_pool_for(upstream: str) -> Any:
-    """Lazily create the shared connection pool (thread-safe) for an upstream."""
-    global _pool, _secondary_pool
-    if upstream == "secondary":
-        if _secondary_pool is None:
-            _secondary_pool = _pg_pool.ThreadedConnectionPool(
-                1, 5, _secondary_connection_string(),
-                cursor_factory=psycopg2.extras.RealDictCursor,
-            )
-        return _secondary_pool
+def _get_pool() -> Any:
+    """Lazily create the shared connection pool (thread-safe)."""
+    global _pool
     if _pool is None:
         _pool = _pg_pool.ThreadedConnectionPool(
             1, 15, _connection_string(),
@@ -100,29 +83,26 @@ def _get_pool_for(upstream: str) -> Any:
 
 
 def _connect() -> Any:
-    """Get a pooled Postgres connection with dict-row support. Draws from the
-    secondary pool when the current thread is in dual-read fallback mode."""
-    upstream = _current_upstream()
-    conn = _get_pool_for(upstream).getconn()
+    """Get a pooled Postgres connection with dict-row support."""
+    conn = _get_pool().getconn()
     if getattr(conn, "closed", 0) != 0:
         # Stale pooled connection — return its slot (rebuilds the pool) and
         # ask for a fresh one, so the slot is never leaked.
         _release(conn, discard=True)
-        conn = _get_pool_for(upstream).getconn()
+        conn = _get_pool().getconn()
     return conn
 
 
 def _release(conn: Any, discard: bool = False) -> None:
-    """Return a connection to its pool. If it broke (or ``discard=True``),
+    """Return a connection to the pool. If it broke (or ``discard=True``),
     rebuild the pool so the next connections are healthy."""
-    upstream = _current_upstream()
-    pool = _get_pool_for(upstream)
+    pool = _get_pool()
     if discard:
         try:
             conn.close()
         except Exception:
             pass
-        _rebuild_pool(upstream)
+        _rebuild_pool()
         return
     try:
         if getattr(conn, "closed", 1) == 0:
@@ -131,19 +111,15 @@ def _release(conn: Any, discard: bool = False) -> None:
     except Exception:
         pass
     # Connection is dead — rebuild the pool so new connections are healthy.
-    _rebuild_pool(upstream)
+    _rebuild_pool()
 
 
-def _rebuild_pool(upstream: str = "primary") -> None:
-    """Close and drop the current pool for an upstream (if any). New connections
+def _rebuild_pool() -> None:
+    """Close and drop the current pool (if any). New connections
     will be created lazily by the next ``_get_pool()`` call."""
-    global _pool, _secondary_pool
-    if upstream == "secondary":
-        old_pool = _secondary_pool
-        _secondary_pool = None  # clear first so concurrent callers build a fresh pool
-    else:
-        old_pool = _pool
-        _pool = None  # clear first so concurrent callers build a fresh pool
+    global _pool
+    old_pool = _pool
+    _pool = None  # clear first so concurrent callers build a fresh pool
     try:
         if old_pool is not None:
             old_pool.closeall()
@@ -174,56 +150,6 @@ class _DBContext:
             # the pool rebuilds with healthy connections.
             _release(self._connection, discard=True)
         return False
-
-
-# ─── Dual-read (primary → secondary fallback) ─────────────────────────────
-# When a SECOND Supabase database is configured, read-only lookups run against
-# the PRIMARY first; if the primary returns nothing, the same read is re-run
-# against the SECONDARY and its result is returned. Writes, migrations and
-# mutations are never routed to the secondary — only reads, only on a primary
-# miss.
-
-
-def _is_empty_result(result: Any) -> bool:
-    """A result counts as a 'miss' (eligible for dual-read fallback) when it is
-    None, an empty list, or an empty dict (e.g. an empty stats payload).
-    Integers/booleans/rows are never empty for our purposes, so writes are
-    never accidentally re-run against the secondary."""
-    if result is None:
-        return True
-    if isinstance(result, (list, dict)):
-        return not result
-    return False
-
-
-def _dual_read(method):
-    """Decorator for read-only store functions. Runs the method against the
-    primary database and, when the primary returns nothing OR fails (e.g. the
-    table only exists in the secondary), re-runs it against the secondary
-    (primary-first fallback)."""
-
-    @functools.wraps(method)
-    def wrapper(*args, **kwargs):
-        if not _secondary_configured():
-            return method(*args, **kwargs)
-        try:
-            result = method(*args, **kwargs)
-            if not _is_empty_result(result):
-                return result
-        except Exception as primary_error:
-            # Primary missing the table/column (or down) — serve from secondary.
-            logger.debug(f"Dual-read: primary failed ({method.__name__}), trying secondary: {primary_error}")
-        previous = _current_upstream()
-        _active_db.upstream = "secondary"
-        try:
-            return method(*args, **kwargs)
-        except Exception as error:
-            logger.warning(f"Dual-read fallback failed ({method.__name__}): {error}")
-            raise
-        finally:
-            _active_db.upstream = previous
-
-    return wrapper
 
 
 def _rows_to_dicts(rows: list) -> list[dict[str, Any]]:
@@ -262,6 +188,8 @@ def _shop_is_orderable(shop: dict[str, Any]) -> bool:
 # fails with a missing-column error (self-healing) — so the app never breaks
 # on a database that hasn't had the latest schema.sql run against it.
 _MIGRATIONS = [
+    "ALTER TABLE orders ADD COLUMN IF NOT EXISTS owner_user_id text NOT NULL DEFAULT ''",
+    "ALTER TABLE parent_orders ADD COLUMN IF NOT EXISTS owner_user_id text NOT NULL DEFAULT ''",
     "ALTER TABLE orders ADD COLUMN IF NOT EXISTS payment_method text NOT NULL DEFAULT 'UPI'",
     "ALTER TABLE shops ADD COLUMN IF NOT EXISTS is_removed boolean NOT NULL DEFAULT false",
     "ALTER TABLE shops ADD COLUMN IF NOT EXISTS admin_dues_balance integer NOT NULL DEFAULT 0",
@@ -404,10 +332,7 @@ def init_supabase_db() -> bool:
     """Verify connectivity and auto-apply any missing columns (idempotent).
     Returns True when reachable. The full schema lives in backend/supabase/schema.sql,
     but the small ALTERs below are re-run on every startup so the app never
-    breaks if a new column hasn't been applied to an existing database yet.
-    When a secondary Supabase database is configured it is also pinged, but a
-    secondary outage never blocks startup — dual-read merely falls back to the
-    primary's (possibly empty) result."""
+    breaks if a new column hasn't been applied to an existing database yet."""
     try:
         with _DBContext(_connect()) as connection:
             with connection.cursor() as cursor:
@@ -415,19 +340,6 @@ def init_supabase_db() -> bool:
                 cursor.fetchone()
         _apply_migrations()
         logger.info("Supabase Postgres connection verified (auto-migrations applied)")
-        if _secondary_configured():
-            previous = _current_upstream()
-            _active_db.upstream = "secondary"
-            try:
-                with _DBContext(_connect()) as connection:
-                    with connection.cursor() as cursor:
-                        cursor.execute("SELECT 1")
-                        cursor.fetchone()
-                logger.info("Supabase secondary database verified (dual-read enabled)")
-            except Exception as secondary_error:
-                logger.warning(f"Supabase secondary database check failed: {secondary_error}")
-            finally:
-                _active_db.upstream = previous
         return True
     except Exception as e:  # pragma: no cover - network dependent
         logger.error(f"Supabase Postgres connection failed: {e}")
@@ -525,7 +437,6 @@ def register_user(
             return (dict(row) if row else None), None
 
 
-@_dual_read
 def get_user_by_username(username: str) -> dict[str, Any] | None:
     """Get full user record (including password_hash) by username."""
     with _DBContext(_connect()) as connection:
@@ -535,7 +446,6 @@ def get_user_by_username(username: str) -> dict[str, Any] | None:
             return dict(row) if row else None
 
 
-@_dual_read
 def get_user_by_id(user_id: int) -> dict[str, Any] | None:
     """Get user by id (without password_hash)."""
     with _DBContext(_connect()) as connection:
@@ -574,7 +484,6 @@ def save_session(email: str, name: str, role: str) -> dict[str, Any]:
 # ─── Shops ───
 
 
-@_dual_read
 def list_shops(public_only: bool = False) -> list[dict[str, Any]]:
     with _DBContext(_connect()) as connection:
         with connection.cursor() as cursor:
@@ -588,7 +497,6 @@ def list_shops(public_only: bool = False) -> list[dict[str, Any]]:
         return shops
 
 
-@_dual_read
 def get_shop(shop_id: str) -> dict[str, Any] | None:
     with _DBContext(_connect()) as connection:
         with connection.cursor() as cursor:
@@ -597,7 +505,6 @@ def get_shop(shop_id: str) -> dict[str, Any] | None:
             return dict(row) if row else None
 
 
-@_dual_read
 def get_shop_by_phone(phone: str) -> dict[str, Any] | None:
     """Find a shop by its phone number (the bank-linked number whose SMS the
     agent forwards). Matches on digits only so '+919876543210' == '9876543210'."""
@@ -620,7 +527,6 @@ def get_shop_by_phone(phone: str) -> dict[str, Any] | None:
     return None
 
 
-@_dual_read
 def get_shop_by_shopkeeper_email(email: str) -> dict[str, Any] | None:
     """Get a vendor's shop by shopkeeper email (used by every vendor endpoint —
     avoids scanning the whole shops table on each request)."""
@@ -742,7 +648,6 @@ def _update_shop_impl(shop_id: str, values: dict[str, Any]) -> dict[str, Any] | 
 # ─── Products ───
 
 
-@_dual_read
 def list_products(shop_id: str | None = None) -> list[dict[str, Any]]:
     with _DBContext(_connect()) as connection:
         with connection.cursor() as cursor:
@@ -835,7 +740,6 @@ def update_product(product_id: str, values: dict[str, Any]) -> dict[str, Any] | 
             return dict(row) if row else None
 
 
-@_dual_read
 def get_product(product_id: str) -> dict[str, Any] | None:
     with _DBContext(_connect()) as connection:
         with connection.cursor() as cursor:
@@ -931,7 +835,6 @@ def _record_share_payment_impl(shop_id: str, amount: int) -> dict[str, Any] | No
             return dict(row) if row else None
 
 
-@_dual_read
 def list_share_payments() -> list[dict[str, Any]]:
     """All vendor→admin share payments, newest first."""
     try:
@@ -941,7 +844,6 @@ def list_share_payments() -> list[dict[str, Any]]:
         return _list_share_payments_impl()
 
 
-@_dual_read
 def list_share_payments_by_shop(shop_id: str) -> list[dict[str, Any]]:
     """Share payments for one shop only (vendor dashboard hot path)."""
     try:
@@ -1000,7 +902,6 @@ def _update_share_payment_status_impl(payment_id: str, status: str) -> dict[str,
 # ─── Orders ───
 
 
-@_dual_read
 def list_orders(limit: int | None = None) -> list[dict[str, Any]]:
     """All orders, newest first. ``limit`` bounds the payload — callers that
     only need the latest rows (admin dashboard, orders page) pass it so the
@@ -1018,7 +919,6 @@ def list_orders(limit: int | None = None) -> list[dict[str, Any]]:
             return _rows_to_dicts(cursor.fetchall())
 
 
-@_dual_read
 def list_orders_by_shop(shop_id: str) -> list[dict[str, Any]]:
     """Orders for one shop only — the vendor dashboard/history hot path. Uses
     the ``idx_orders_shop_id`` index instead of shipping every order to Python."""
@@ -1031,7 +931,6 @@ def list_orders_by_shop(shop_id: str) -> list[dict[str, Any]]:
             return _rows_to_dicts(cursor.fetchall())
 
 
-@_dual_read
 def list_recent_orders_by_shop(shop_id: str, limit: int = 250) -> list[dict[str, Any]]:
     """Latest orders for one shop (newest first) — the live feed shown in the
     vendor app. Bounded so the 30s auto-refresh never ships the shop's entire
@@ -1047,7 +946,6 @@ def list_recent_orders_by_shop(shop_id: str, limit: int = 250) -> list[dict[str,
             return _rows_to_dicts(cursor.fetchall())
 
 
-@_dual_read
 def get_order(order_id: str) -> dict[str, Any] | None:
     with _DBContext(_connect()) as connection:
         with connection.cursor() as cursor:
@@ -1122,7 +1020,9 @@ def _create_order_impl(values: dict[str, Any]) -> dict[str, Any] | None:
                     continue
                 quantity = int(item["quantity"])
                 subtotal += int(product["price"]) * quantity
-                item_labels.append(f"{quantity}x {product['name']}")
+                # Quantity system removed — a single item reads "Masala Dosa",
+                # not "1x Masala Dosa". Multi-quantity callers keep the prefix.
+                item_labels.append(product["name"] if quantity <= 1 else f"{quantity}x {product['name']}")
 
             if not item_labels:
                 return None
@@ -1178,15 +1078,16 @@ def _create_order_impl(values: dict[str, Any]) -> dict[str, Any] | None:
                     cursor.execute(
                         """
                         INSERT INTO orders (
-                            id, token, student_name, student_phone, shop_id, shop_name,
+                            id, token, owner_user_id, student_name, student_phone, shop_id, shop_name,
                             items, subtotal, service_fee, tax, delivery_fee, total,
                             delivery_location, delivery_slot, status, payment_method, created_at
                         )
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, now())
                         """,
                         (
                             order_id,
                             next_token,
+                            values.get("owner_user_id", ""),
                             values.get("student_name", "Student"),
                             values.get("student_phone", ""),
                             values["shop_id"],
@@ -1285,7 +1186,6 @@ def create_payment(
             return dict(row) if row else None
 
 
-@_dual_read
 def list_payments() -> list[dict[str, Any]]:
     with _DBContext(_connect()) as connection:
         with connection.cursor() as cursor:
@@ -1293,7 +1193,6 @@ def list_payments() -> list[dict[str, Any]]:
             return _rows_to_dicts(cursor.fetchall())
 
 
-@_dual_read
 def get_payment_by_id(payment_id: str) -> dict[str, Any] | None:
     with _DBContext(_connect()) as connection:
         with connection.cursor() as cursor:
@@ -1350,7 +1249,6 @@ def record_parent_payment(
             return _parent_payment_shape(parent) if parent else None
 
 
-@_dual_read
 def get_parent_payment(parent_order_id: str) -> dict[str, Any] | None:
     with _DBContext(_connect()) as connection:
         with connection.cursor() as cursor:
@@ -1359,7 +1257,6 @@ def get_parent_payment(parent_order_id: str) -> dict[str, Any] | None:
             return _parent_payment_shape(row) if row else None
 
 
-@_dual_read
 def list_parent_payments() -> list[dict[str, Any]]:
     with _DBContext(_connect()) as connection:
         with connection.cursor() as cursor:
@@ -1462,7 +1359,6 @@ def update_payment_status(payment_id: str, status: str) -> dict[str, Any] | None
             return dict(row) if row else None
 
 
-@_dual_read
 def get_payment_by_order_id(order_id: str) -> dict[str, Any] | None:
     """Get the most recent payment record for an order. For multi-shop parents
     the payment is anchored on a sub-order id but keeps ``parent_order_id`` —
@@ -1517,7 +1413,6 @@ def update_payment_record(order_id: str, screenshot_name: str, utr_number: str |
             return dict(updated) if updated else None
 
 
-@_dual_read
 def get_payment_by_utr(utr_number: str) -> dict[str, Any] | None:
     """Find the most recent payment record carrying this UTR (student-entered)."""
     if not utr_number:
@@ -1532,7 +1427,6 @@ def get_payment_by_utr(utr_number: str) -> dict[str, Any] | None:
             return dict(row) if row else None
 
 
-@_dual_read
 def get_payment_settings() -> dict[str, Any]:
     defaults = {
         "manual_enabled": False,
@@ -1605,7 +1499,6 @@ def create_ticket(values: dict[str, Any]) -> dict[str, Any]:
             return dict(row)
 
 
-@_dual_read
 def list_tickets() -> list[dict[str, Any]]:
     with _DBContext(_connect()) as connection:
         with connection.cursor() as cursor:
@@ -1654,7 +1547,6 @@ def create_notification(
             _release(active_connection)
 
 
-@_dual_read
 def list_notifications(role: str | None = None) -> list[dict[str, Any]]:
     """List notifications. When ``role`` is given, only notifications targeted at
     that exact role are returned (strict role separation)."""
@@ -1716,7 +1608,6 @@ def _save_push_subscription_impl(
             return dict(row) if row else None
 
 
-@_dual_read
 def list_push_subscriptions(shop_id: str) -> list[dict[str, Any]]:
     """All push subscriptions registered for a shop (used to deliver pushes)."""
     try:
@@ -1750,7 +1641,6 @@ def remove_push_subscription(shop_id: str, endpoint: str) -> bool:
 # ─── Admin helpers ───
 
 
-@_dual_read
 def list_users() -> list[dict[str, Any]]:
     """List all registered users (without password_hash)."""
     with _DBContext(_connect()) as connection:
@@ -1761,7 +1651,6 @@ def list_users() -> list[dict[str, Any]]:
             return _rows_to_dicts(cursor.fetchall())
 
 
-@_dual_read
 def list_users_by_role(role: str) -> list[dict[str, Any]]:
     """List users filtered by role."""
     with _DBContext(_connect()) as connection:
@@ -1783,7 +1672,6 @@ def record_registration(user: dict[str, Any]) -> None:
             )
 
 
-@_dual_read
 def list_registrations() -> list[dict[str, Any]]:
     """List all user registrations for admin."""
     with _DBContext(_connect()) as connection:
@@ -1795,7 +1683,6 @@ def list_registrations() -> list[dict[str, Any]]:
 # ─── Forgot password (double email OTP verification) ───
 
 
-@_dual_read
 def get_user_by_email(email: str) -> dict[str, Any] | None:
     """Find a user by their registered email (case-insensitive)."""
     with _DBContext(_connect()) as connection:
@@ -1826,7 +1713,6 @@ def create_password_reset(username: str, otp: str, step: int) -> dict[str, Any] 
             return dict(row) if row else None
 
 
-@_dual_read
 def get_password_reset(username: str, otp: str, step: int) -> dict[str, Any] | None:
     """Return the valid, unused, unexpired reset code for this user/step.
     Codes are locked out after 5 wrong attempts (brute-force protection)."""
@@ -1877,7 +1763,6 @@ def update_user_password(username: str, new_password_hash: str) -> bool:
             return cursor.rowcount > 0
 
 
-@_dual_read
 def update_user_profile(user_id: int, name: str | None = None, email: str | None = None, phone: str | None = None) -> dict[str, Any] | None:
     """Update a user's editable profile fields (name, email, phone) by id.
     Returns the full clean user row (without password_hash) or None if the
@@ -1966,7 +1851,6 @@ def _create_site_feedback_impl(values: dict[str, Any]) -> dict[str, Any] | None:
             return dict(row) if row else None
 
 
-@_dual_read
 def list_site_feedback(source: str | None = None) -> list[dict[str, Any]]:
     """All site feedback, newest first (admin Feedback page).
     Pass ``source`` = 'User' or 'ATS' to see only real students or only
@@ -1991,7 +1875,6 @@ def _list_site_feedback_impl(source: str | None = None) -> list[dict[str, Any]]:
             return _rows_to_dicts(cursor.fetchall())
 
 
-@_dual_read
 def list_site_feedback_by_user(user_id: int) -> list[dict[str, Any]]:
     """A student's own submissions (student portal "my contributions")."""
     try:
@@ -2076,8 +1959,9 @@ def create_review(values: dict[str, Any]) -> dict[str, Any] | None:
 def _create_review_impl(values: dict[str, Any]) -> dict[str, Any] | None:
     with _DBContext(_connect()) as connection:
         with connection.cursor() as cursor:
-            cursor.execute("SELECT COALESCE(MAX(CAST(SUBSTRING(id FROM 3) AS integer)), 0) + 1 FROM reviews")
-            next_id = cursor.fetchone()[0]
+            cursor.execute("SELECT COALESCE(MAX(CAST(SUBSTRING(id FROM 3) AS integer)), 0) + 1 AS next_id FROM reviews")
+            # fetchone() returns a RealDictRow (RealDictCursor), so index by column name
+            next_id = cursor.fetchone()["next_id"]
             review_id = f"rv{next_id}"
             shop_name = values.get("shop_name", "")
             if not shop_name and values.get("shop_id"):
@@ -2107,7 +1991,6 @@ def _create_review_impl(values: dict[str, Any]) -> dict[str, Any] | None:
             return dict(row) if row else None
 
 
-@_dual_read
 def list_reviews(shop_id: str | None = None) -> list[dict[str, Any]]:
     try:
         return _list_reviews_impl(shop_id)
@@ -2126,7 +2009,6 @@ def _list_reviews_impl(shop_id: str | None = None) -> list[dict[str, Any]]:
             return _rows_to_dicts(cursor.fetchall())
 
 
-@_dual_read
 def list_reviews_by_user(user_id: int) -> list[dict[str, Any]]:
     try:
         return _list_reviews_by_user_impl(user_id)
@@ -2194,7 +2076,6 @@ def delete_user(user_id: int) -> bool:
             return cursor.rowcount > 0
 
 
-@_dual_read
 def get_admin_dashboard_stats(today: str) -> dict[str, Any]:
     """Admin dashboard numbers computed in SQL (COUNT/SUM subqueries) instead
     of loading every row into Python. The old approach pulled the entire
@@ -2223,7 +2104,6 @@ def get_admin_dashboard_stats(today: str) -> dict[str, Any]:
             return dict(row) if row else {}
 
 
-@_dual_read
 def get_orders_grouped_by_date() -> list[dict[str, Any]]:
     """Get orders grouped by date for revenue tracking."""
     with _DBContext(_connect()) as connection:
@@ -2237,7 +2117,6 @@ def get_orders_grouped_by_date() -> list[dict[str, Any]]:
             return _rows_to_dicts(cursor.fetchall())
 
 
-@_dual_read
 def get_orders_by_date(date_key: str) -> list[dict[str, Any]]:
     """Get orders for a specific date (YYYY-MM-DD) for daily log filtering."""
     with _DBContext(_connect()) as connection:
@@ -2249,7 +2128,6 @@ def get_orders_by_date(date_key: str) -> list[dict[str, Any]]:
             return _rows_to_dicts(cursor.fetchall())
 
 
-@_dual_read
 def get_payments_by_date(date_key: str) -> list[dict[str, Any]]:
     """Get payments for a specific date (YYYY-MM-DD) for daily log filtering."""
     with _DBContext(_connect()) as connection:
@@ -2261,7 +2139,6 @@ def get_payments_by_date(date_key: str) -> list[dict[str, Any]]:
             return _rows_to_dicts(cursor.fetchall())
 
 
-@_dual_read
 def get_daily_stats() -> dict[str, Any]:
     """Get today's statistics."""
     with _DBContext(_connect()) as connection:
@@ -2288,7 +2165,6 @@ def get_daily_stats() -> dict[str, Any]:
             }
 
 
-@_dual_read
 def get_vendor_daily_logs(shop_id: str) -> list[dict[str, Any]]:
     """Per-day earnings + order counts for one shop (admin vendor logs)."""
     with _DBContext(_connect()) as connection:
@@ -2305,7 +2181,6 @@ def get_vendor_daily_logs(shop_id: str) -> list[dict[str, Any]]:
             return _rows_to_dicts(cursor.fetchall())
 
 
-@_dual_read
 def get_vendor_orders(shop_id: str) -> list[dict[str, Any]]:
     """All orders for one shop (admin vendor logs)."""
     with _DBContext(_connect()) as connection:
@@ -2317,22 +2192,46 @@ def get_vendor_orders(shop_id: str) -> list[dict[str, Any]]:
             return _rows_to_dicts(cursor.fetchall())
 
 
-@_dual_read
 def get_summary() -> dict[str, Any]:
-    shops = list_shops()
-    orders = list_orders()
-    products = list_products()
-    return {
-        "shops": len(shops),
-        "orderable_shops": len([
-            shop for shop in shops
-            if _shop_is_orderable(shop)
-        ]),
-        "products": len(products),
-        "active_orders": len([order for order in orders if order["status"] != "Completed"]),
-        "revenue": sum(order["total"] for order in orders),
-        "token_starts_at": 18,
-    }
+    """Aggregate summary computed with COUNT/SUM SQL so the DB ships a single
+    tiny row instead of every shop/product/order row across the wire.
+
+    The old version loaded ``shops``, ``orders`` and ``products`` in full, then
+    counted in Python — ~800 ms of cold latency on a live Supabase project.
+    This version runs three COUNT/SUM queries and returns immediately."""
+    connection = _connect()
+    try:
+        with connection.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) AS n, COUNT(*) FILTER (WHERE status = 'Open') AS open_n "
+                "FROM shops"
+            )
+            row = cursor_row(cur)
+            shop_count = row["n"] if row else 0
+            open_shop_count = row["open_n"] if row else 0
+
+            cur.execute(
+                "SELECT COUNT(*) AS active, COALESCE(SUM(total), 0) AS revenue "
+                "FROM orders WHERE status != 'Completed'"
+            )
+            row = cursor_row(cur)
+            active_orders = row["active"] if row else 0
+            revenue = row["revenue"] if row else 0
+
+            cur.execute("SELECT COUNT(*) FROM products")
+            row = cursor_row(cur)
+            product_count = row["COUNT(*)"] if row else 0
+
+        return {
+            "shops": shop_count,
+            "orderable_shops": open_shop_count,
+            "products": product_count,
+            "active_orders": active_orders,
+            "revenue": revenue,
+            "token_starts_at": 18,
+        }
+    finally:
+        _release(connection)
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -2498,6 +2397,7 @@ def create_parent_order(
     shops: list[dict[str, Any]],
     student_email: str = "",
     student_id: str = "",
+    owner_user_id: str = "",
 ) -> dict[str, Any] | None:
     """Create a multi-shop parent order with per-shop sub-orders.
 
@@ -2575,9 +2475,9 @@ def create_parent_order(
             cur.execute(
                 """INSERT INTO parent_orders (
                        id, token, date_key, student_name, student_phone, student_email,
-                       student_id, total, payment_method, payment_status,
+                       student_id, owner_user_id, total, payment_method, payment_status,
                        delivery_location, status, created_at)
-                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'Pending', %s, 'Pending', NOW())""",
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'Pending', %s, 'Pending', NOW())""",
                 (
                     parent_id,
                     token,
@@ -2586,6 +2486,7 @@ def create_parent_order(
                     student_phone,
                     student_email,
                     student_id,
+                    owner_user_id,
                     grand_total,
                     payment_method,
                     delivery_location,
@@ -2661,7 +2562,6 @@ def create_parent_order(
 # ─── Parent (multi-shop) orders ────────────────────────────────────
 
 
-@_dual_read
 def get_parent_order(parent_order_id: str, with_items: bool = True) -> dict[str, Any] | None:
     """Parent order with its shop sub-orders and their items.
 
@@ -2702,7 +2602,6 @@ def get_parent_order(parent_order_id: str, with_items: bool = True) -> dict[str,
         _release(connection)
 
 
-@_dual_read
 def list_parent_orders(limit: int = 200, status: str | None = None) -> list[dict[str, Any]]:
     """List parent orders, newest first, optional status filter."""
     connection = _connect()
@@ -2720,7 +2619,6 @@ def list_parent_orders(limit: int = 200, status: str | None = None) -> list[dict
         _release(connection)
 
 
-@_dual_read
 def get_shop_sub_orders(shop_id: str, status: str | None = None) -> list[dict[str, Any]]:
     """All sub-orders for a shop (shopkeeper portal). Only this shop's items.
 
@@ -2766,7 +2664,48 @@ def get_shop_sub_orders(shop_id: str, status: str | None = None) -> list[dict[st
         _release(connection)
 
 
-@_dual_read
+def list_all_sub_orders(limit: int = 300) -> list[dict[str, Any]]:
+    """Recent sub-orders across ALL shops (admin orders view), newest first.
+
+    The admin orders endpoint used to loop over every shop and call
+    ``get_shop_sub_orders`` once per shop — 3 round trips per shop, all
+    sequential, which made the admin orders page crawl as shops grew. This
+    batches it: one query for the sub-orders plus two follow-ups for items
+    and parents, regardless of shop count."""
+    connection = _connect()
+    try:
+        with connection.cursor() as cur:
+            cur.execute(
+                "SELECT * FROM shop_sub_orders ORDER BY created_at DESC LIMIT %s",
+                (limit,),
+            )
+            subs = [dict(row) for row in cur.fetchall()]
+            if not subs:
+                return []
+            sub_ids = [s["id"] for s in subs]
+            parent_ids = list({s["parent_order_id"] for s in subs if s.get("parent_order_id")})
+            cur.execute(
+                "SELECT * FROM order_items WHERE sub_order_id = ANY(%s) ORDER BY id",
+                (sub_ids,),
+            )
+            items: dict[str, list[dict[str, Any]]] = {}
+            for row in cur.fetchall():
+                items.setdefault(row["sub_order_id"], []).append(dict(row))
+            parents: dict[str, dict[str, Any]] = {}
+            if parent_ids:
+                cur.execute(
+                    "SELECT id, student_name, student_phone, delivery_location, total, payment_method, created_at FROM parent_orders WHERE id = ANY(%s)",
+                    (parent_ids,),
+                )
+                parents = {row["id"]: dict(row) for row in cur.fetchall()}
+            for s in subs:
+                s["items"] = items.get(s["id"], [])
+                s["parent"] = parents.get(s.get("parent_order_id", "")) or {}
+            return subs
+    finally:
+        _release(connection)
+
+
 def get_sub_order(sub_order_id: str) -> dict[str, Any] | None:
     """Find one shop sub-order with its parent + shop context attached.
 
@@ -2820,6 +2759,11 @@ def update_sub_order_status(
                         WHERE id = %s RETURNING *""",
                     (status, status, notes, sub_order_id),
                 )
+            elif status == "Rejected":
+                cur.execute(
+                    "UPDATE shop_sub_orders SET status = %s, rejection_reason = %s WHERE id = %s RETURNING *",
+                    (status, notes, sub_order_id),
+                )
             else:
                 cur.execute("UPDATE shop_sub_orders SET status = %s WHERE id = %s RETURNING *", (status, sub_order_id))
             connection.commit()
@@ -2872,7 +2816,6 @@ def cancel_parent_order(parent_order_id: str) -> dict[str, Any] | None:
         _release(connection)
 
 
-@_dual_read
 def get_daily_token_count(date_key: str | None = None) -> int:
     """Number of parent orders today."""
     dk = date_key or _day_key()
@@ -2966,7 +2909,6 @@ def create_shop_announcement(shop_id: str, message: str) -> dict[str, Any] | Non
         _release(connection)
 
 
-@_dual_read
 def list_shop_announcements(shop_id: str | None = None, active_only: bool = True) -> list[dict[str, Any]]:
     """All active (or shop-filtered) announcements."""
     connection = _connect()
@@ -3044,7 +2986,6 @@ def create_complaint(
         _release(connection)
 
 
-@_dual_read
 def list_complaints(status: str | None = None) -> list[dict[str, Any]]:
     """All complaints (optional status filter)."""
     connection = _connect()
@@ -3115,7 +3056,6 @@ def create_refund(
         _release(connection)
 
 
-@_dual_read
 def list_refunds(status: str | None = None) -> list[dict[str, Any]]:
     """All refunds (optional status filter)."""
     connection = _connect()
@@ -3157,7 +3097,6 @@ def update_refund(
 #  SETTLEMENTS
 # ═══════════════════════════════════════════════════════════════════════
 
-@_dual_read
 def list_settlements(status: str | None = None) -> list[dict[str, Any]]:
     """All settlements (optional status filter)."""
     connection = _connect()
@@ -3248,7 +3187,6 @@ def create_menu_change_request(
         _release(connection)
 
 
-@_dual_read
 def list_menu_change_requests(status: str | None = None) -> list[dict[str, Any]]:
     """Menu change requests (optional status filter)."""
     connection = _connect()
@@ -3308,7 +3246,6 @@ def add_audit_log(
         _release(connection)
 
 
-@_dual_read
 def list_audit_logs(limit: int = 200) -> list[dict[str, Any]]:
     connection = _connect()
     try:
@@ -3319,7 +3256,6 @@ def list_audit_logs(limit: int = 200) -> list[dict[str, Any]]:
         _release(connection)
 
 
-@_dual_read
 def list_whatsapp_logs(limit: int = 100) -> list[dict[str, Any]]:
     connection = _connect()
     try:
@@ -3414,7 +3350,6 @@ def log_sms(
         _release(connection)
 
 
-@_dual_read
 def list_sms_logs(limit: int = 100) -> list[dict[str, Any]]:
     connection = _connect()
     try:

@@ -46,8 +46,19 @@ async def create_shop(
             detail="Only shopkeepers can create shops"
         )
     
+    import re
+
+    # Auto-generate a unique slug from the shop name — required by the Shop model.
+    base_slug = re.sub(r"[^a-z0-9]+", "-", data.name.lower()).strip("-") or "shop"
+    slug = base_slug
+    counter = 1
+    while await Shop.find_one({"slug": slug}):
+        counter += 1
+        slug = f"{base_slug}-{counter}"
+    
     shop = Shop(
         **data.dict(),
+        slug=slug,
         shopkeeper_id=current_user.id,
         campus_id=current_user.campus_id
     )

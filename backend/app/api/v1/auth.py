@@ -4,8 +4,9 @@ Authentication API routes
 from fastapi import APIRouter, HTTPException, Depends, status
 from fastapi.security import HTTPBearer
 from fastapi.security.http import HTTPAuthorizationCredentials
+from pydantic import BaseModel, Field
 from app.schemas import UserRegister, UserLogin, UserResponse, TokenResponse, UserRole
-from app.services import (
+from app.services.legacy_auth import (
     authenticate_user, register_user, create_tokens, update_user_password
 )
 from app.core.security import decode_token
@@ -18,6 +19,12 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 security = HTTPBearer()
+
+
+class ChangePasswordRequest(BaseModel):
+    """Request body for password changes — sent as JSON, never in the URL."""
+    old_password: str = Field(..., min_length=1)
+    new_password: str = Field(..., min_length=6)
 
 
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> User:
@@ -111,15 +118,14 @@ async def get_current_user_profile(current_user: User = Depends(get_current_user
 
 @router.post("/change-password")
 async def change_password(
-    old_password: str,
-    new_password: str,
+    data: ChangePasswordRequest,
     current_user: User = Depends(get_current_user)
 ):
     """Change user password"""
     success, error = await update_user_password(
         str(current_user.id),
-        old_password,
-        new_password
+        data.old_password,
+        data.new_password
     )
     
     if not success:

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { getCartByShop, StoredCartItem, updateCartQuantity } from '../utils/cart'
+import { getCartByShop, StoredCartItem } from '../utils/cart'
 import { getBillBreakdown } from '../utils/billing'
 
 export function CartPage() {
@@ -14,8 +14,6 @@ export function CartPage() {
     window.addEventListener('detomsite-cart-updated', sync)
     return () => window.removeEventListener('detomsite-cart-updated', sync)
   }, [])
-
-  const updateQty = (id: string, qty: number) => setItems(updateCartQuantity(id, qty))
 
   return (
     <div className="min-h-screen bg-white">
@@ -53,15 +51,10 @@ export function CartPage() {
                       <div key={item.product_id} className="flex items-center justify-between gap-4 p-4">
                         <div className="min-w-0 flex-1">
                           <h4 className="font-bold text-primary-dark">{item.name}</h4>
-                          <p className="text-sm text-gray-500">₹{item.price} each</p>
+                          <p className="text-sm text-gray-500">₹{item.price}</p>
                         </div>
                         <div className="flex items-center gap-3">
-                          <div className="flex items-center rounded-btn border border-gray-200">
-                            <button onClick={() => updateQty(item.product_id, item.quantity - 1)} className="px-3 py-1.5 text-sm font-bold text-gray-600 hover:bg-gray-50">−</button>
-                            <span className="min-w-[2rem] text-center text-sm font-bold text-primary-dark">{item.quantity}</span>
-                            <button onClick={() => updateQty(item.product_id, item.quantity + 1)} className="px-3 py-1.5 text-sm font-bold text-gray-600 hover:bg-gray-50">+</button>
-                          </div>
-                          <span className="min-w-[4rem] text-right text-base font-bold text-primary">₹{item.price * item.quantity}</span>
+                          <span className="min-w-[4rem] text-right text-base font-bold text-primary">₹{item.price}</span>
                         </div>
                       </div>
                     ))}

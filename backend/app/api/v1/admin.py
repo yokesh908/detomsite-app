@@ -62,6 +62,8 @@ async def approve_vendor(
         
         logger.info(f"Vendor approved: {vendor.email}")
         return {"message": "Vendor approved"}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error approving vendor: {e}")
         raise HTTPException(
@@ -91,6 +93,8 @@ async def reject_vendor(
         # TODO: Send rejection email
         logger.info(f"Vendor rejected: {vendor.email}, Reason: {reason}")
         return {"message": "Vendor rejected"}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error rejecting vendor: {e}")
         raise HTTPException(

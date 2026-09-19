@@ -86,6 +86,7 @@ create table if not exists public.products (
 -- ─── Orders (with the full ₹10-per-order fee breakdown stored per order) ───
 create table if not exists public.orders (
   id text primary key,
+  owner_user_id text not null default '',
   token integer not null,
   student_name text not null,
   student_phone text not null default '',
@@ -311,6 +312,7 @@ create index if not exists idx_product_stock_lookup on public.product_stock (pro
 -- ─── Parent orders (one per student checkout, wraps shop sub-orders) ───
 create table if not exists public.parent_orders (
   id text primary key,
+  owner_user_id text not null default '',
   token integer not null,
   date_key text not null default '',
   student_name text not null,

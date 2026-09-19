@@ -10,10 +10,8 @@ services:
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.0
-      - key: USE_SUPABASE_DB
-        value: "False"
-      - key: USE_LOCAL_DB
-        value: "True"
+      - key: SUPABASE_DATABASE_URL
+        sync: false
       - key: JWT_SECRET
         sync: false
       - key: FRONTEND_URL

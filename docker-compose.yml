@@ -1,40 +1,12 @@
 services:
-  mongodb:
-    image: mongo:7.0
-    container_name: detomsite-mongodb
-    environment:
-      MONGO_INITDB_ROOT_USERNAME: admin
-      MONGO_INITDB_ROOT_PASSWORD: password
-    ports:
-      - "27017:27017"
-    volumes:
-      - mongodb_data:/data/db
-
-  redis:
-    image: redis:7-alpine
-    container_name: detomsite-redis
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis_data:/data
-
   backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
     container_name: detomsite-backend
-    environment:
-      MONGODB_URL: mongodb://admin:password@mongodb:27017/detomsite?authSource=admin
-      REDIS_URL: redis://redis:6379
-      DEBUG: "False"
+    env_file:
+      - ./backend/.env
     ports:
       - "8000:8000"
-    depends_on:
-      - mongodb
-      - redis
     volumes:
       - ./backend:/app
-
-volumes:
-  mongodb_data:
-  redis_data:

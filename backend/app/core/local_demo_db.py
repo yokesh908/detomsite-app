@@ -1,9 +1,9 @@
 """
-Local SQLite data store for a runnable development build.
+TEST-ONLY throwaway SQLite store (used by pytest only).
 
-This keeps the app usable without a MongoDB service. The production MongoDB
-routes are still present, but the frontend can use these local endpoints during
-development.
+Production uses Supabase Postgres exclusively (app/core/supabase_db.py via
+app/core/store.py). This module exists so the test suite can run without
+Supabase credentials and can never leak test rows into the live database.
 """
 from __future__ import annotations
 
@@ -89,16 +89,7 @@ def _db_path() -> Path:
 
 
 def _connect() -> Any:
-    if settings.USE_TURSO_DB:
-        import libsql
-
-        return _NamedRowConnection(
-            libsql.connect(
-                settings.TURSO_DATABASE_URL,
-                auth_token=settings.TURSO_AUTH_TOKEN,
-            )
-        )
-
+    """Test-only SQLite connection (pytest). Production uses Supabase."""
     connection = sqlite3.connect(_db_path(), timeout=10)
     connection.row_factory = sqlite3.Row
     # ─── Speed: WAL journaling keeps readers and the writer from blocking each
@@ -787,6 +778,9 @@ def init_local_demo_db() -> None:
             connection.execute("ALTER TABLE shops ADD COLUMN is_featured INTEGER NOT NULL DEFAULT 0")
         if not _column_exists(connection, "shops", "shop_image"):
             connection.execute("ALTER TABLE shops ADD COLUMN shop_image TEXT DEFAULT ''")
+        for table in ("orders", "parent_orders"):
+            if not _column_exists(connection, table, "owner_user_id"):
+                connection.execute(f"ALTER TABLE {table} ADD COLUMN owner_user_id TEXT NOT NULL DEFAULT ''")
         if not _column_exists(connection, "orders", "parent_order_id"):
             connection.execute("ALTER TABLE orders ADD COLUMN parent_order_id TEXT DEFAULT ''")
         if not _column_exists(connection, "orders", "batch_type"):
@@ -1458,15 +1452,16 @@ def create_order(values: dict[str, Any]) -> dict[str, Any] | None:
         connection.execute(
             """
             INSERT INTO orders (
-                id, token, student_name, student_phone, shop_id, shop_name,
+                id, token, owner_user_id, student_name, student_phone, shop_id, shop_name,
                 items, subtotal, service_fee, tax, delivery_fee, total,
                 delivery_location, delivery_slot, status, payment_method, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%d %H:%M:%S', 'now', '+05:30'))
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, strftime('%Y-%m-%d %H:%M:%S', 'now', '+05:30'))
             """,
             (
                 order_id,
                 next_token,
+                values.get("owner_user_id", ""),
                 values.get("student_name", "Student"),
                 values.get("student_phone", ""),
                 values["shop_id"],
@@ -1515,6 +1510,7 @@ def create_parent_order(
     shops: list[dict[str, Any]],
     student_email: str = "",
     student_id: str = "",
+    owner_user_id: str = "",
 ) -> dict[str, Any] | None:
     """Create a multi-shop parent order with per-shop sub-orders.
 
@@ -1662,11 +1658,11 @@ def create_parent_order(
             """
             INSERT INTO parent_orders (
                 id, token, student_name, student_phone, student_email,
-                student_id, total, payment_method, payment_status,
+                student_id, owner_user_id, total, payment_method, payment_status,
                 delivery_location, status, created_at
             )
             VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, 'Pending', ?, 'Pending',
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, 'Pending', ?, 'Pending',
                 strftime('%Y-%m-%d %H:%M:%S', 'now', '+05:30')
             )
             """,
@@ -1677,6 +1673,7 @@ def create_parent_order(
                 student_phone,
                 student_email,
                 student_id,
+                owner_user_id,
                 grand_total,
                 payment_method,
                 delivery_location,
@@ -1875,13 +1872,16 @@ def auto_complete_expired_deliveries() -> int:
             WHERE status = 'Delivered' AND delivered_at IS NOT NULL
             """
         ).fetchall()
-        now = datetime.utcnow()
+        # ``delivered_at`` is written as IST wall-clock time (datetime('now','+05:30'))
+        # so the comparison baseline must be IST too, not UTC — otherwise the
+        # 30-minute window is shifted by 5h30m and orders auto-complete ~6h late.
+        now_ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
         for row in rows:
             try:
                 dt_str = str(row["delivered_at"] or "")
                 dt_str_clean = dt_str.replace("+05:30", "").replace("+00:00", "")
                 delivered = datetime.strptime(dt_str_clean[:19], "%Y-%m-%d %H:%M:%S")
-                if (now - delivered) >= timedelta(minutes=30):
+                if (now_ist - delivered) >= timedelta(minutes=30):
                     connection.execute(
                         "UPDATE shop_sub_orders SET status = 'Completed', completed_at = datetime('now', '+05:30') WHERE id = ?",
                         (row["id"],),
@@ -2099,14 +2099,16 @@ def run_daily_settlements() -> list[dict[str, Any]]:
             shop_id = shop_row["id"]
             gross = connection.execute(
                 """
-                SELECT COALESCE(SUM(subtotal), 0) AS g, COUNT(*) AS cnt FROM order_items oi
+                SELECT COALESCE(SUM(oi.total), 0) AS g, COUNT(DISTINCT sso.id) AS cnt
+                FROM order_items oi
                 JOIN shop_sub_orders sso ON sso.id = oi.sub_order_id
                 WHERE sso.shop_id = ?
                 """,
                 (shop_id,),
             ).fetchone()
+            gross_sales = gross["g"] or 0
             commission = (gross["cnt"] or 0) * 10
-            net = gross["g"] - commission
+            net = gross_sales - commission
             existing = connection.execute(
                 "SELECT id FROM settlements WHERE shop_id = ? AND date_key = ?",
                 (shop_id, date_key),
@@ -2121,13 +2123,13 @@ def run_daily_settlements() -> list[dict[str, Any]]:
                 )
                 VALUES (?, ?, ?, ?, ?, ?, 0, ?, 'Pending', datetime('now', '+05:30'))
                 """,
-                (settlement_id, shop_id, shop_row["name"], date_key, gross, commission, net),
+                (settlement_id, shop_id, shop_row["name"], date_key, gross_sales, commission, net),
             )
             settlements.append({
                 "id": settlement_id,
                 "shop_id": shop_id,
                 "shop_name": shop_row["name"],
-                "gross_sales": gross,
+                "gross_sales": gross_sales,
                 "commission_5pct": commission,
                 "net_payable": net,
             })
@@ -3130,20 +3132,31 @@ def get_daily_stats() -> dict[str, Any]:
 
 
 def get_summary() -> dict[str, Any]:
-    shops = list_shops()
-    orders = list_orders()
-    products = list_products()
-    return {
-        "shops": len(shops),
-        "orderable_shops": len([
-            shop for shop in shops
-            if _shop_is_orderable(shop)
-        ]),
-        "products": len(products),
-        "active_orders": len([order for order in orders if order["status"] != "Completed"]),
-        "revenue": sum(order["total"] for order in orders),
-        "token_starts_at": 18,
-    }
+    """Aggregate summary computed with COUNT/SUM SQL for speed."""
+    with _connect() as connection:
+        shop_count = connection.execute(
+            "SELECT COUNT(*) FROM shops"
+        ).fetchone()[0]
+        orderable = connection.execute(
+            "SELECT COUNT(*) FROM shops WHERE status = 'Open'"
+        ).fetchone()[0]
+        row = connection.execute(
+            "SELECT COUNT(*) AS active, COALESCE(SUM(total), 0) AS revenue "
+            "FROM orders WHERE status != 'Completed'"
+        ).fetchone()
+        active_orders = row["active"] if row else 0
+        revenue = row["revenue"] if row else 0
+        product_count = connection.execute(
+            "SELECT COUNT(*) FROM products"
+        ).fetchone()[0]
+        return {
+            "shops": shop_count,
+            "orderable_shops": orderable,
+            "products": product_count,
+            "active_orders": active_orders,
+            "revenue": revenue,
+            "token_starts_at": 18,
+        }
 
 
 def get_vendor_daily_logs(shop_id: str) -> list[dict[str, Any]]:

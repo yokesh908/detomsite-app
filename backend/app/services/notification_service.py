@@ -2,7 +2,7 @@
 Notification service
 """
 from app.models import Notification, NotificationChannel, User
-from typing import List
+from typing import List, Optional
 from bson import ObjectId
 from datetime import datetime
 import logging
@@ -109,6 +109,3 @@ class NotificationService:
         except Exception as e:
             logger.error(f"Error marking notification as read: {e}")
             return False
-
-
-from typing import Optional

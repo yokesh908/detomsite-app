@@ -13,16 +13,35 @@ let running = false
 let inflight: Promise<void> | null = null
 
 const listeners = new Set<(n: LocalNotification[]) => void>()
+let ownerToken = localStorage.getItem('access_token')
+let generation = 0
+
+function resetForSession() {
+  ownerToken = localStorage.getItem('access_token')
+  generation++
+  cache = []
+  inflight = null
+  listeners.forEach(l => l([]))
+}
+
+window.addEventListener('detomsite-session-changed', resetForSession)
+window.addEventListener('storage', () => {
+  if (ownerToken !== localStorage.getItem('access_token')) resetForSession()
+})
 
 async function poll() {
+  if (ownerToken !== localStorage.getItem('access_token')) resetForSession()
+  if (!ownerToken) return
   if (inflight) return inflight
+  const started = generation
   inflight = (async () => {
     try {
       const r = await api.get<LocalNotification[]>('/local/notifications')
+      if (started !== generation || ownerToken !== localStorage.getItem('access_token')) return
       cache = Array.isArray(r.data) ? r.data : []
       listeners.forEach(l => l(cache))
     } catch { /* keep the last known list */ }
-  })().finally(() => { inflight = null })
+  })().finally(() => { if (started === generation) inflight = null })
   return inflight
 }
 
@@ -76,6 +95,7 @@ function stop() {
 }
 
 export function subscribeNotifications(cb: (n: LocalNotification[]) => void): () => void {
+  if (ownerToken !== localStorage.getItem('access_token')) resetForSession()
   listeners.add(cb)
   cb(cache)
   start()

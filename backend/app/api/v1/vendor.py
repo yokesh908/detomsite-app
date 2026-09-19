@@ -13,7 +13,6 @@ from app.core.rate_limit import allow as rate_allow, reset as rate_reset, client
 from app.core.store import store as db
 from app.core.security import hash_password, verify_password, create_access_token, create_refresh_token, decode_token
 from app.services import push_service
-from app.services import push_service
 
 logger = logging.getLogger(__name__)
 
@@ -97,12 +96,20 @@ def get_current_vendor(authorization: Optional[str] = Header(None)) -> dict:
 
 
 def _my_shop(current_vendor: dict) -> dict:
-    """Find the vendor's shop by their email (indexed, single query)."""
-    vendor_email = f"{current_vendor['username']}@campus.local"
-    shop = db.get_shop_by_shopkeeper_email(vendor_email)
-    if not shop:
-        raise HTTPException(status_code=404, detail="Shop not found")
-    return shop
+    """Find the vendor's shop by their email. Some shops are auto-created with
+    the shopkeeper's real email, others with ``{username}@campus.local``, so
+    check both (indexed, single query each) before failing."""
+    candidates = (
+        current_vendor.get("email") or "",
+        f"{current_vendor['username']}@campus.local",
+    )
+    for vendor_email in candidates:
+        if not vendor_email:
+            continue
+        shop = db.get_shop_by_shopkeeper_email(vendor_email)
+        if shop:
+            return shop
+    raise HTTPException(status_code=404, detail="Shop not found")
 
 
 def _sub_order_shape(sub: dict) -> dict:
@@ -170,7 +177,7 @@ def register(data: VendorRegisterRequest, request: Request):
             "name": data.shop_name,
             "category": data.shop_category,
             "description": data.shop_description or f"{data.shop_name} - New vendor",
-            "shopkeeper_email": f"{data.username}@campus.local",
+            "shopkeeper_email": data.email or f"{data.username}@campus.local",
             "shopkeeper_name": data.name,
             "phone": data.phone,
             "opening_time": "09:00 AM",

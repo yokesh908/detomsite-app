@@ -2,7 +2,7 @@ import { FormEvent, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import api from '../services/api'
 import { saveSessionToBackend } from '../services/localApi'
-import { saveLocalSession, UserRoleChoice, getDashboardPath } from '../utils/session'
+import { clearLocalSession, saveLocalSession, UserRoleChoice, getDashboardPath } from '../utils/session'
 import { syncProfileToSupabase, isSupabaseConfigured } from '../services/supabase'
 
 type AuthMode = 'login' | 'signup'
@@ -64,9 +64,12 @@ export function AuthPage() {
 
     // ─── Helper to complete auth after login/register ───
     const finishAuth = (user: { username: string; name: string; role: string; email?: string; phone?: string }, accessToken: string | null) => {
-      if (accessToken) {
-        localStorage.setItem('access_token', accessToken)
+      if (!accessToken) {
+        clearLocalSession()
+        throw new Error('Login did not return a token')
       }
+      localStorage.removeItem('refresh_token')
+      localStorage.setItem('access_token', accessToken)
       const role: UserRoleChoice = 'student'
       const session = {
         role,
@@ -104,27 +107,26 @@ export function AuthPage() {
         finishAuth(user, access_token)
       } else {
         // ─── Signup: register then construct session from response ───
-        const response = await api.post('/local/auth/register', {
+        await api.post('/local/auth/register', {
           username: cleanUsername,
           password,
           name: profileName,
           role: 'student',
         })
-        const { user } = response.data
-
-        // Try auto-login to get a JWT token; if it fails, continue without token
-        let accessToken: string | null = null
+        // Registration alone is not authentication. Never retain a previous
+        // account's token if automatic login fails.
+        clearLocalSession()
         try {
           const loginRes = await api.post('/local/auth/login', {
             username: cleanUsername,
             password,
           })
-          accessToken = loginRes.data.access_token
+          finishAuth(loginRes.data.user, loginRes.data.access_token)
         } catch {
-          // Auto-login failed — user is registered but we proceed without JWT
+          clearLocalSession()
+          setError('Account created. Please log in to continue.')
+          return
         }
-
-        finishAuth(user, accessToken)
       }
     } catch (error: any) {
       const msg =

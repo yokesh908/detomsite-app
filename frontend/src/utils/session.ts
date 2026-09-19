@@ -19,7 +19,7 @@ const SESSION_KEY = 'detomsite-session'
 export function getLocalSession(): LocalSession | null {
   try {
     const rawSession = localStorage.getItem(SESSION_KEY)
-    if (!rawSession) return null
+    if (!rawSession || !localStorage.getItem('access_token')) return null
     const session = JSON.parse(rawSession) as LocalSession
     // Validate required fields
     if (!session.role || !session.email) return null
@@ -35,10 +35,16 @@ export function saveLocalSession(session: LocalSession) {
     loggedInAt: new Date().toISOString(),
   }
   localStorage.setItem(SESSION_KEY, JSON.stringify(enriched))
+  window.dispatchEvent(new Event('detomsite-session-changed'))
 }
 
 export function clearLocalSession() {
-  localStorage.removeItem(SESSION_KEY)
+  for (const key of [SESSION_KEY, 'access_token', 'refresh_token', 'detomsite-cart']) {
+    localStorage.removeItem(key)
+  }
+  sessionStorage.removeItem('payment_pending')
+  window.dispatchEvent(new Event('detomsite-session-changed'))
+  window.dispatchEvent(new Event('detomsite-cart-updated'))
 }
 
 export function isSessionValid(): boolean {
