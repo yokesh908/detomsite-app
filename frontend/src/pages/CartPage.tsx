@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { getCartByShop, StoredCartItem } from '../utils/cart'
+import { getCartByShop, StoredCartItem, setProductQuantity, removeProductFromCart } from '../utils/cart'
 import { getBillBreakdown } from '../utils/billing'
 
 export function CartPage() {
@@ -47,14 +47,31 @@ export function CartPage() {
                     <span className="text-xs font-bold text-primary">Subtotal ₹{group.subtotal}</span>
                   </div>
                   <div className="divide-y divide-gray-50">
-                    {group.items.map(item => (
+                  {group.items.map(item => (
                       <div key={item.product_id} className="flex items-center justify-between gap-4 p-4">
                         <div className="min-w-0 flex-1">
                           <h4 className="font-bold text-primary-dark">{item.name}</h4>
-                          <p className="text-sm text-gray-500">₹{item.price}</p>
+                          <p className="text-sm text-gray-500">Rs.{item.price} each</p>
                         </div>
                         <div className="flex items-center gap-3">
-                          <span className="min-w-[4rem] text-right text-base font-bold text-primary">₹{item.price}</span>
+                          <div className="flex items-center gap-1">
+                            <button
+                              type="button"
+                              onClick={() => setProductQuantity(item.product_id, Math.max(1, item.quantity - 1))}
+                              className="h-7 w-7 rounded-full bg-gray-100 text-gray-600 hover:bg-gray-200"
+                            >-</button>
+                            <span className="w-7 text-center text-sm font-bold">{item.quantity}</span>
+                            <button
+                              type="button"
+                              onClick={() => setProductQuantity(item.product_id, item.quantity + 1)}
+                              className="h-7 w-7 rounded-full bg-gray-100 text-gray-600 hover:bg-gray-200"
+                            >+</button>
+                          </div>
+                          <span className="min-w-[4rem] text-right font-bold text-primary">Rs.{item.price * item.quantity}</span>
+                          <button
+                            onClick={() => removeProductFromCart(item.product_id)}
+                            className="text-xs font-semibold text-red-500 hover:text-red-700"
+                          >Remove</button>
                         </div>
                       </div>
                     ))}

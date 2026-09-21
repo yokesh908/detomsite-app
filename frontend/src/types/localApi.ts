@@ -19,6 +19,7 @@ export interface LocalShop {
   orders_today: number
   revenue_today: number
   current_token: number
+  prep_time?: number
 }
 
 export interface LocalProduct {
