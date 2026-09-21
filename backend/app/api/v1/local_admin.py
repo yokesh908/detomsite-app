@@ -140,6 +140,17 @@ async def verify_admin(authorization: Optional[str] = Header(None)) -> dict:
     role = payload.get("role")
     if role != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
+    # Re-verify against the database (not just the token claim) so a removed or
+    # downgraded admin loses access immediately instead of keeping it until the
+    # token expires. The DEBUG-only dev fallback admin ("sub": "0") is exempt.
+    if not settings.DEBUG:
+        try:
+            user_id = int(payload.get("sub"))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=403, detail="Admin access required")
+        user = await _db(db.get_user_by_id, user_id)
+        if not user or user.get("role") != "admin":
+            raise HTTPException(status_code=403, detail="Admin access required")
     return payload
 
 

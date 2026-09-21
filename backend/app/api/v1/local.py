@@ -2,13 +2,12 @@
 API routes backed by Supabase Postgres (the only database).
 """
 from fastapi import APIRouter, HTTPException, Depends, Header, UploadFile, File, Form, Request
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 from datetime import datetime
 import asyncio
 import os
 import re
 import secrets
-import shutil
 import threading
 
 from app.core.config import settings
@@ -34,6 +33,29 @@ import logging
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+# Highest number of units of a single dish a student may put on one order line.
+# The cart UI caps itself well below this; the server-side bound exists so a
+# hand-crafted request can't inflate a bill/stock row to an absurd value.
+MAX_LINE_QUANTITY = 99
+
+# Largest payment screenshot accepted (bytes). Screenshots are phone photos of a
+# UPI receipt, so 5 MB is generous; the cap stops a hand-crafted request from
+# filling the platform's temp disk.
+MAX_UPLOAD_BYTES = 5 * 1024 * 1024
+
+
+def _clean_payment_method(value: str, allowed: tuple[str, ...]) -> str:
+    """Normalise a client-supplied payment method and reject unknown ones.
+
+    The method decides the order's *initial status* (paid vs awaiting payment),
+    so it must not be a free-form string: an unrecognised/forged value could
+    otherwise steer the order into a status the caller didn't pay for.
+    """
+    method = (value or "").strip().upper()
+    if method not in allowed:
+        raise ValueError(f"payment_method must be one of {', '.join(allowed)}")
+    return method
 
 
 async def _db(fn, *args, **kwargs):
@@ -202,6 +224,11 @@ class LocalOrderStatusUpdate(BaseModel):
 
 class LocalOrderItem(BaseModel):
     product_id: str
+    # The cart UI lets a student pick a quantity per line; older clients omit it
+    # (default 1). Declaring it here matters: Pydantic silently DROPS unknown
+    # fields, so without this the server billed every line as a single unit no
+    # matter how many the student actually chose.
+    quantity: int = Field(1, ge=1, le=MAX_LINE_QUANTITY)
 
 
 class LocalOrderCreate(BaseModel):
@@ -214,6 +241,12 @@ class LocalOrderCreate(BaseModel):
     pending_payment: bool = False
     payment_method: str = "UPI"  # 'UPI' | 'COD' | 'Razorpay'
 
+    @field_validator("payment_method")
+    @classmethod
+    def _validate_payment_method(cls, value: str) -> str:
+        return _clean_payment_method(value, ("UPI", "COD", "RAZORPAY"))
+
+
 
 class LocalMultiShopOrder(BaseModel):
     """Multi-shop checkout payload: one list of shops, each with items."""
@@ -224,6 +257,15 @@ class LocalMultiShopOrder(BaseModel):
     delivery_location: str
     delivery_slot: str = ""
     payment_method: str = "UTR"  # 'UTR' | 'COD'
+
+    @field_validator("payment_method")
+    @classmethod
+    def _validate_payment_method(cls, value: str) -> str:
+        # Multi-shop has no per-shop gateway hook, so Razorpay is deliberately
+        # not accepted here — a multi-shop bill is only settled by UPI/UTR proof
+        # or cash on delivery.
+        return _clean_payment_method(value, ("UTR", "COD", "UPI", "MANUAL UTR"))
+
 
 
 class LocalSubOrderStatusUpdate(BaseModel):
@@ -287,10 +329,19 @@ class LocalMenuChangeApprove(BaseModel):
 
 class LocalPaymentCreate(BaseModel):
     order_id: str
-    amount: int
+    amount: int = Field(..., ge=1, le=1_000_000)
     method: str
     utr_number: str | None = None
     screenshot_name: str | None = None
+
+    @field_validator("method")
+    @classmethod
+    def _validate_method(cls, value: str) -> str:
+        # Keep the caller's spelling (views display it) but refuse anything
+        # outside the methods the platform can actually settle.
+        if (value or "").strip().lower() not in {"manual utr", "upi", "cod", "razorpay"}:
+            raise ValueError("Unsupported payment method")
+        return value
 
 
 class LocalPaymentStatusUpdate(BaseModel):
@@ -408,6 +459,18 @@ async def _require_admin(authorization: Optional[str] = Header(None)) -> dict:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
     if payload.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
+    # A signed token is not proof of *current* privilege — re-check the account
+    # in the database so a removed or downgraded admin cannot keep using an
+    # unexpired token. The DEBUG-only dev fallback admin ("sub": "0") has no row
+    # and is exempt, as is any non-numeric subject.
+    if not settings.DEBUG:
+        try:
+            user_id = int(payload.get("sub"))
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=403, detail="Admin access required")
+        user = await _db(db.get_user_by_id, user_id)
+        if not user or user.get("role") != "admin":
+            raise HTTPException(status_code=403, detail="Admin access required")
     return payload
 
 
@@ -419,6 +482,48 @@ def _same_student(user: dict, order: dict) -> bool:
     """
     owner = str(order.get("owner_user_id") or "").strip()
     return bool(owner) and owner == str(user.get("id") or "")
+
+
+def _require_agent_key(x_agent_key: Optional[str]) -> None:
+    """Gate the bank-SMS endpoints on the Android agent's shared key.
+
+    ``/sms/match`` and ``/sms/incoming`` can both move an order to **Confirmed**
+    (i.e. mark it paid), so the check must fail CLOSED. Previously an unset
+    ``SMS_FORWARD_KEY`` silently skipped the comparison, so on any deployment
+    without the key one anonymous request carrying a plausible UTR + amount was
+    enough to settle a pending UPI order. DEBUG deployments stay permissive so
+    local flows and tests can drive the endpoints by hand.
+    """
+    configured = (settings.SMS_FORWARD_KEY or "").strip()
+    if not configured:
+        if settings.DEBUG:
+            return
+        raise HTTPException(
+            status_code=503,
+            detail="Bank-SMS ingest is not configured on this server (SMS_FORWARD_KEY is unset).",
+        )
+    if (x_agent_key or "") != configured:
+        raise HTTPException(status_code=401, detail="Invalid agent key")
+
+
+async def _resolve_owned_order(order_id: str, user: dict) -> tuple[dict, bool]:
+    """Resolve an order id (single order OR multi-shop parent) and require that
+    the caller owns it — admins may act on any order.
+
+    Every money-moving endpoint must go through this: taking the ``order_id``
+    from the request body without checking ownership lets one account attach a
+    payment/verification to somebody else's order.
+    """
+    order = await _db(db.get_order, order_id)
+    is_parent = False
+    if not order:
+        order = await _db(db.get_parent_order, order_id)
+        is_parent = bool(order)
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
+    if user.get("role") != "admin" and not _same_student(user, order):
+        raise HTTPException(status_code=403, detail="You can only pay for your own orders")
+    return order, is_parent
 
 
 # ─── Auth endpoints ───
@@ -1110,7 +1215,9 @@ async def _confirm_order_via_utr(utr: str, phone: str = "", raw_text: str = "", 
     if amount is None:
         return None
     try:
-        result = await sms_match(LocalSmsMatch(phone=phone, utr=utr, amount=amount), settings.SMS_FORWARD_KEY)
+        # In-process call: bypass the HTTP agent gate (which requires the shared
+        # key) and reuse the shared matching core directly.
+        result = await _sms_match_core(LocalSmsMatch(phone=phone, utr=utr, amount=amount))
         return await _get_order(result["order_id"])
     except HTTPException:
         return None
@@ -1171,11 +1278,10 @@ async def sms_incoming(data: LocalIncomingSms, x_agent_key: Optional[str] = Head
     if not text:
         raise HTTPException(status_code=400, detail="No SMS text provided")
 
-    # Agent auth: when a forward key is configured, only the Android agent
-    # (which holds the key) may submit bank SMS. With no key configured (dev /
-    # demo), the endpoint stays open so flows can be tested manually.
-    if settings.SMS_FORWARD_KEY and (x_agent_key or "") != settings.SMS_FORWARD_KEY:
-        raise HTTPException(status_code=401, detail="Invalid agent key")
+    # Agent auth: fail closed (see ``_require_agent_key``). With no key
+    # configured the endpoint refuses to run instead of letting any anonymous
+    # caller inject "YES <token>" / a fake bank UTR and confirm an order.
+    _require_agent_key(x_agent_key)
 
     report = {"received": True, "phone": phone, "text": text, "order": None}
 
@@ -1183,7 +1289,9 @@ async def sms_incoming(data: LocalIncomingSms, x_agent_key: Optional[str] = Head
     utr = _extract_utr(text)
     amount = _extract_amount(text)
     if utr and amount is not None:
-        result = await sms_match(LocalSmsMatch(phone=phone, utr=utr, amount=amount), x_agent_key)
+        # Already past the agent gate above — go straight to the matching core
+        # instead of re-entering the HTTP-level key check.
+        result = await _sms_match_core(LocalSmsMatch(phone=phone, utr=utr, amount=amount))
         report["order"] = await _get_order(result["order_id"])
         report["matched"] = result
         return report
@@ -1290,9 +1398,22 @@ async def sms_match(data: LocalSmsMatch, x_agent_key: Optional[str] = Header(Non
     both order and payment amounts equal to ``amount``. Marks it
     **Confirmed**, and fires the shopkeeper's WhatsApp notification.
     """
-    if settings.SMS_FORWARD_KEY and (x_agent_key or "") != settings.SMS_FORWARD_KEY:
-        raise HTTPException(status_code=401, detail="Invalid agent key")
+    # Agent auth: fail closed. Only the Android agent (which holds the shared
+    # key) may submit bank SMS — an unset key must NOT mean "everyone is the
+    # agent", because this endpoint can mark an order paid.
+    _require_agent_key(x_agent_key)
+    return await _sms_match_core(data)
 
+
+async def _sms_match_core(data: LocalSmsMatch) -> dict:
+    """Shared matching logic behind ``/sms/match``.
+
+    Split out of the route so the in-process UTR confirmation path
+    (``_confirm_order_via_utr``) can reuse it WITHOUT re-entering the HTTP agent
+    gate: that gate fails closed when no ``SMS_FORWARD_KEY`` is configured, and
+    the internal path must keep working (it already requires a freshly arrived
+    bank SMS carrying the same UTR).
+    """
     utr = (data.utr or "").strip().upper()
     if not utr:
         raise HTTPException(status_code=400, detail="UTR is required")
@@ -1388,8 +1509,9 @@ async def whatsapp_pending_agent(x_agent_key: Optional[str] = Header(None)):
     "paid ✓" and then sends exactly ONE clean message (never a stale
     "awaiting payment" followed by a final one).
     """
-    if settings.SMS_FORWARD_KEY and (x_agent_key or "") != settings.SMS_FORWARD_KEY:
-        raise HTTPException(status_code=401, detail="Invalid agent key")
+    # Agent auth: fail closed — this feed carries customer phone numbers and
+    # order messages, so an anonymous caller must never be able to read it.
+    _require_agent_key(x_agent_key)
 
     logs = await _db(db.list_whatsapp_logs, 100)
     pending = []
@@ -1413,8 +1535,7 @@ async def whatsapp_pending_agent(x_agent_key: Optional[str] = Header(None)):
 @router.post("/whatsapp/{whatsapp_id}/mark-sent")
 async def whatsapp_mark_sent_agent(whatsapp_id: str, x_agent_key: Optional[str] = Header(None)):
     """Mark a WhatsApp notification as sent once the phone bot delivered it."""
-    if settings.SMS_FORWARD_KEY and (x_agent_key or "") != settings.SMS_FORWARD_KEY:
-        raise HTTPException(status_code=401, detail="Invalid agent key")
+    _require_agent_key(x_agent_key)
     doc = await _db(db.mark_whatsapp_sent, whatsapp_id)
     if not doc:
         raise HTTPException(status_code=404, detail="WhatsApp notification not found")
@@ -1439,13 +1560,22 @@ async def add_payment(data: LocalPaymentCreate, current_user: dict = Depends(get
     # multi order's id lives in `parent_orders`, not `orders`, so the old
     # orders-only lookup made every UPI/UTR payment for the student's multi
     # cart 404 ("Order not found").
-    order = await _db(db.get_order, data.order_id)
-    is_parent = False
-    if not order:
-        order = await _db(db.get_parent_order, data.order_id)
-        is_parent = bool(order)
-        if not order:
-            raise HTTPException(status_code=404, detail="Order not found")
+    order, is_parent = await _resolve_owned_order(data.order_id, current_user)
+
+    # ─── Server-authoritative amount ───
+    # The amount is recorded from the STORED order total, never from the request
+    # body: a student could otherwise declare ₹1 against a ₹500 order, and every
+    # downstream "does the bank credit match?" check would compare against that
+    # ₹1. A price change between add-to-cart and checkout only means the
+    # recorded amount (and therefore the amount the bank SMS must match) follows
+    # the real bill.
+    server_total = int(round(float(order.get("total") or 0)))
+    if server_total > 0 and int(data.amount) != server_total:
+        logger.warning(
+            "Payment amount override for order %s: client=%s server=%s (user=%s)",
+            data.order_id, data.amount, server_total, current_user.get("id"),
+        )
+        data.amount = server_total
     # A student may only record payment for an order they own.
     if current_user.get("role") != "admin" and not _same_student(current_user, order):
         raise HTTPException(status_code=403, detail="You can only pay for your own orders")
@@ -1564,8 +1694,28 @@ async def upload_payment_screenshot(
     dest_path = os.path.join(uploads_dir, stored_name)
 
     try:
+        # Stream with a hard cap: the old unbounded copyfileobj happily wrote a
+        # multi-gigabyte body to the platform's temp disk.
+        written = 0
         with open(dest_path, "wb") as out:
-            shutil.copyfileobj(file.file, out)
+            while True:
+                chunk = file.file.read(1024 * 256)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > MAX_UPLOAD_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"Screenshot is too large — maximum {MAX_UPLOAD_BYTES // (1024 * 1024)} MB.",
+                    )
+                out.write(chunk)
+    except HTTPException:
+        # Don't leave the partial file behind for the truncated upload.
+        try:
+            os.remove(dest_path)
+        except OSError:
+            pass
+        raise
     except Exception:
         raise HTTPException(status_code=500, detail="Could not save the uploaded file")
 
@@ -1636,8 +1786,19 @@ class LocalRazorpayVerify(BaseModel):
 
 
 @router.post("/payments/create-razorpay-order")
-async def create_razorpay_order(data: LocalRazorpayOrderCreate):
-    """Create a Razorpay order for payment."""
+async def create_razorpay_order(
+    data: LocalRazorpayOrderCreate,
+    current_user: dict = Depends(get_current_local_user),
+):
+    """Create a Razorpay order for payment.
+
+    Authenticated AND amount-bound: the payable amount is derived from the
+    STORED order total, never from the request body. Previously the caller's
+    ``amount`` was forwarded to the gateway as-is and no token was required, so
+    anyone could open a ₹1 gateway order against a ₹500 local order.
+    """
+    order, is_parent = await _resolve_owned_order(data.order_id, current_user)
+
     payment_settings = await _db(db.get_payment_settings)
     if not payment_settings.get("razorpay_enabled"):
         raise HTTPException(status_code=400, detail="Razorpay is not enabled by admin")
@@ -1647,6 +1808,18 @@ async def create_razorpay_order(data: LocalRazorpayOrderCreate):
     if not key_id or not key_secret:
         raise HTTPException(status_code=500, detail="Razorpay API keys not configured on server")
 
+    if str(order.get("status") or "") != "Pending Payment":
+        raise HTTPException(status_code=400, detail="This order is not awaiting an online payment.")
+
+    expected_paise = int(round(float(order.get("total") or 0) * 100))
+    if expected_paise <= 0:
+        raise HTTPException(status_code=400, detail="This order has nothing left to pay.")
+    if int(data.amount) != expected_paise:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Payment amount must be ₹{expected_paise // 100} for this order.",
+        )
+
     try:
         import razorpay
         client = razorpay.Client(auth=(key_id, key_secret))
@@ -1655,7 +1828,7 @@ async def create_razorpay_order(data: LocalRazorpayOrderCreate):
         razorpay_order = await asyncio.to_thread(
             client.order.create,
             {
-                "amount": data.amount,
+                "amount": expected_paise,
                 "currency": data.currency,
                 "receipt": data.order_id,
                 "payment_capture": 1,  # Auto-capture
@@ -1675,8 +1848,23 @@ async def create_razorpay_order(data: LocalRazorpayOrderCreate):
 
 
 @router.post("/payments/verify-razorpay")
-async def verify_razorpay_payment(data: LocalRazorpayVerify):
-    """Verify Razorpay payment signature and update order."""
+async def verify_razorpay_payment(
+    data: LocalRazorpayVerify,
+    current_user: dict = Depends(get_current_local_user),
+):
+    """Verify a Razorpay payment signature and mark the order paid.
+
+    Three independent checks are enforced before the order is marked paid:
+    the caller must own the order, the captured amount must equal the stored
+    order total, and the gateway payment id must not already be recorded
+    against another order (replay). Without them a single ₹1 payment could be
+    presented as settling an arbitrary order.
+    """
+    order, is_parent = await _resolve_owned_order(data.order_id, current_user)
+
+    if str(order.get("status") or "") != "Pending Payment":
+        raise HTTPException(status_code=400, detail="This order is not awaiting an online payment.")
+
     key_secret = settings.RAZORPAY_KEY_SECRET
     if not key_secret:
         raise HTTPException(status_code=500, detail="Razorpay secret not configured")
@@ -1698,25 +1886,65 @@ async def verify_razorpay_payment(data: LocalRazorpayVerify):
         amount_paise = payment_info.get("amount", 0)
         amount_rupees = amount_paise // 100
 
+        # ─── Amount binding: the gateway amount must match the order total ───
+        expected_rupees = float(order.get("total") or 0)
+        if abs(amount_rupees - expected_rupees) >= 0.01:
+            raise HTTPException(
+                status_code=400,
+                detail=f"The amount paid (₹{amount_rupees}) does not match this order's total (₹{int(expected_rupees)}).",
+            )
+
+        # ─── Replay guard: one gateway payment settles exactly one order ───
+        existing_payments = await _db(db.list_payments)
+        if any(
+            str(p.get("utr_number") or "").strip() == data.razorpay_payment_id
+            for p in existing_payments
+        ):
+            raise HTTPException(status_code=409, detail="This payment has already been applied to an order.")
+        if any(
+            str(p.get("order_id") or "") == data.order_id and str(p.get("status") or "") == "Success"
+            for p in existing_payments
+        ):
+            raise HTTPException(status_code=409, detail="This order has already been paid.")
+
         # Create payment record in local DB
-        payment = await _db(
-            db.create_payment,
-            order_id=data.order_id,
-            amount=amount_rupees,
-            method="Razorpay",
-            utr_number=data.razorpay_payment_id,
-            screenshot_name=None,
-        )
+        if is_parent:
+            payment = await _db(
+                db.record_parent_payment,
+                data.order_id,
+                amount_rupees,
+                "Razorpay",
+                data.razorpay_payment_id,
+                None,
+            )
+        else:
+            payment = await _db(
+                db.create_payment,
+                order_id=data.order_id,
+                amount=amount_rupees,
+                method="Razorpay",
+                utr_number=data.razorpay_payment_id,
+                screenshot_name=None,
+            )
         if not payment:
             raise HTTPException(status_code=400, detail="Could not save payment record")
 
-        # Update order status to Pending Acceptance
-        await _db(db.update_order_status, data.order_id, "Pending Acceptance")
+        # Payment verified → the order is now genuinely paid and can move on to
+        # the shop's acceptance queue. Parent (multi-shop) orders keep their
+        # status on parent_orders.
+        if is_parent:
+            await _db(db.update_parent_order_status, data.order_id, "Pending Acceptance")
+        else:
+            await _db(db.update_order_status, data.order_id, "Pending Acceptance")
 
         return {
             "message": "Payment verified successfully",
             "payment": payment,
         }
+    except HTTPException:
+        # Ownership/amount/replay rejections must reach the client as-is instead
+        # of being flattened into the generic "verification failed" 400 below.
+        raise
     except Exception as e:
         logger.error(f"Error verifying Razorpay payment: {e}")
         raise HTTPException(status_code=400, detail=f"Payment verification failed: {str(e)}")
@@ -1948,6 +2176,28 @@ async def create_multi_shop_order(data: LocalMultiShopOrder, current_user: dict 
         raise HTTPException(status_code=400, detail="No shops selected.")
     payload = data.model_dump()
     payload["student_phone"] = _normalize_phone(payload.get("student_phone", ""))
+
+    # ``shops`` is a free-form list[dict] (the shape is validated deeper in the
+    # store), so the per-line quantity must be bounded HERE: an unbounded value
+    # would be multiplied straight into the bill and the stock decrement.
+    for group in payload["shops"]:
+        items = group.get("items") or []
+        if not items:
+            raise HTTPException(status_code=400, detail="One of the selected shops has no items in your cart.")
+        for item in items:
+            raw_quantity = item.get("quantity", 1)
+            if raw_quantity is None or raw_quantity == "":
+                raw_quantity = 1  # older clients omit the field entirely
+            try:
+                quantity = int(raw_quantity)
+            except (TypeError, ValueError):
+                raise HTTPException(status_code=400, detail="Invalid item quantity.")
+            if not 1 <= quantity <= MAX_LINE_QUANTITY:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"You can order between 1 and {MAX_LINE_QUANTITY} of the same item.",
+                )
+            item["quantity"] = quantity
 
     # Pre-validate each shop for clear error messages.
     for group in payload["shops"]:

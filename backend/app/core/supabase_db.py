@@ -1044,13 +1044,20 @@ def _create_order_impl(values: dict[str, Any]) -> dict[str, Any] | None:
             #   COD     → awaiting shop acceptance
             #   UPI     → awaiting the customer's UPI payment (vendor confirms)
             #   Razorpay → paid instantly, awaiting acceptance
-            payment_method = str(values.get("payment_method", "") or "").strip()
+            payment_method = str(values.get("payment_method", "") or "").strip().upper()
             if payment_method == "COD":
                 initial_status = "Pending Acceptance"
             elif payment_method == "UPI":
                 initial_status = "Pending Payment"
-            elif payment_method == "Razorpay":
-                initial_status = "Pending Acceptance"
+            elif payment_method == "RAZORPAY":
+                # SECURITY: a Razorpay order is only PAID once
+                # ``/payments/verify-razorpay`` has verified the gateway
+                # signature AND the captured amount. Starting it at
+                # "Pending Acceptance" let any authenticated student POST
+                # payment_method="Razorpay" and receive a fulfilled order they
+                # never paid for (the vendor is SMSed the moment the order is
+                # created). It must start unpaid — verification promotes it.
+                initial_status = "Pending Payment"
             else:
                 # Legacy callers without a payment method keep old behavior
                 initial_status = "Pending Payment" if values.get("pending_payment") else "Pending Acceptance"

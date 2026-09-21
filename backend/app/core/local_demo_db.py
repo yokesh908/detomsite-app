@@ -1427,14 +1427,16 @@ def create_order(values: dict[str, Any]) -> dict[str, Any] | None:
         # Payment method drives the initial order status:
         #   COD     → awaiting shop acceptance
         #   UPI     → awaiting the customer's UPI payment (vendor confirms)
-        #   Razorpay → paid instantly, awaiting acceptance
-        payment_method = str(values.get("payment_method", "") or "").strip()
+        #   Razorpay → ALSO awaiting payment. It only becomes "paid" after
+        #              /payments/verify-razorpay validates the gateway signature
+        #              and the captured amount — see the note in supabase_db.
+        payment_method = str(values.get("payment_method", "") or "").strip().upper()
         if payment_method == "COD":
             initial_status = "Pending Acceptance"
         elif payment_method == "UPI":
             initial_status = "Pending Payment"
-        elif payment_method == "Razorpay":
-            initial_status = "Pending Acceptance"
+        elif payment_method == "RAZORPAY":
+            initial_status = "Pending Payment"
         else:
             # Legacy callers without a payment method keep old behavior
             initial_status = "Pending Payment" if values.get("pending_payment") else "Pending Acceptance"
@@ -1802,6 +1804,30 @@ def get_sub_order(sub_order_id: str) -> dict[str, Any] | None:
         ).fetchone()
         sub["shop"] = dict(shop) if shop else {}
         return sub
+
+
+def update_parent_order_status(parent_order_id: str, status: str) -> dict[str, Any] | None:
+    """Update a parent (multi-shop) order's own status.
+
+    Kept for interface parity with ``supabase_db.update_parent_order_status``:
+    the vendor status sync and the Razorpay verification path both call this for
+    multi-shop orders, so without it those flows would raise AttributeError when
+    the test/demo store is active.
+    """
+    with _connect() as connection:
+        row = connection.execute(
+            "SELECT * FROM parent_orders WHERE id = ?", (parent_order_id,)
+        ).fetchone()
+        if not row:
+            return None
+        connection.execute(
+            "UPDATE parent_orders SET status = ? WHERE id = ?",
+            (status, parent_order_id),
+        )
+        updated = connection.execute(
+            "SELECT * FROM parent_orders WHERE id = ?", (parent_order_id,)
+        ).fetchone()
+        return dict(updated) if updated else None
 
 
 def update_sub_order_status(

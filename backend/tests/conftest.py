@@ -2,6 +2,7 @@
 Test configuration and fixtures
 """
 import os
+import uuid
 
 # CRITICAL: tests NEVER touch Supabase. They run against a throwaway local
 # SQLite DB (app/core/local_demo_db.py, test-only) so no test user/shop/order
@@ -37,12 +38,23 @@ def _init_test_db(tmp_path):
     httpx test client does not, so we swap + init here explicitly (idempotent).
     """
     from app.core import local_demo_db as _test_db, shared_cache, supabase_db
+    from app.core import rate_limit
     from app.core.config import settings
+    from app import main as main_module
 
     settings.LOCAL_DB_PATH = str(tmp_path / "test.db")
     patch = pytest.MonkeyPatch()
     patch.setattr(shared_cache, "enabled", lambda: False)
     patch.setattr(shared_cache, "_pg_enabled", lambda: False)
+
+    # Every test starts with empty throttling buckets. Both the middleware (60
+    # auth calls/min per IP+path) and the per-endpoint limiter
+    # (app/core/rate_limit) key on the client IP, and the whole suite hammers
+    # those endpoints from ONE test-client IP — without this reset a later test
+    # would randomly see 429 instead of the response it asserts on, so the suite
+    # must only ever fail for real regressions.
+    main_module._rate_limit_store.clear()
+    rate_limit._hits.clear()
 
     def forbid_live_database():
         raise AssertionError("Tests must not connect to Supabase")
@@ -54,14 +66,29 @@ def _init_test_db(tmp_path):
         _test_db.ensure_admin_user()
     yield
     store_module._use_test_store(None)
+    main_module._rate_limit_store.clear()
+    rate_limit._hits.clear()
     patch.undo()
 
 
 @pytest.fixture
 async def client():
-    """Create test client (httpx>=0.28 uses ASGITransport instead of app=)."""
+    """Create test client (httpx>=0.28 uses ASGITransport instead of app=).
+
+    Each client carries its own synthetic ``x-forwarded-for`` (the header Vercel
+    sets in production), so every test gets a private rate-limit bucket. The
+    auth endpoints cap sign-ups at 40/hour per IP and the middleware at 60/min;
+    with one shared test-client IP the suite exhausted that budget and later
+    tests saw an unrelated 429 (a real flake: the run failed at
+    ``test_tickets_username`` because an earlier test file had spent the quota).
+    A per-test IP makes throttling deterministic and still exercises the limit
+    *within* a test, where one client must share the bucket.
+    """
+    fake_ip = f"10.{uuid.uuid4().int % 250 + 1}.{(uuid.uuid4().int % 250) + 1}.{(uuid.uuid4().int % 250) + 1}"
     transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://test", headers={"x-forwarded-for": fake_ip}
+    ) as ac:
         yield ac
 
 
