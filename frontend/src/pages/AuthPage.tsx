@@ -150,7 +150,8 @@ export function AuthPage() {
       const msg =
         error?.response?.data?.detail ||
         error?.response?.data?.message ||
-        'An unexpected error occurred. Please try again.'
+        error?.message ||
+        `Error ${error?.response?.status || 'unknown'}: Operation failed`
       setError(typeof msg === 'string' ? msg : 'Operation failed')
     } finally {
       setLoading(false)
