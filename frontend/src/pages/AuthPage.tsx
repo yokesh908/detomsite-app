@@ -37,6 +37,24 @@ export function AuthPage() {
   const [fullName, setFullName] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  // ─── Forgot username (emailed reminder) ───
+  const [showUsernameHelp, setShowUsernameHelp] = useState(false)
+  const [recoverEmail, setRecoverEmail] = useState('')
+  const [recoverMsg, setRecoverMsg] = useState('')
+  const [recoverLoading, setRecoverLoading] = useState(false)
+
+  const sendUsernameReminder = async () => {
+    if (!recoverEmail.trim()) { setRecoverMsg('Please enter your registered email'); return }
+    setRecoverLoading(true); setRecoverMsg('')
+    try {
+      const r = await api.post<{ message: string }>('/users/forgot-username', { email: recoverEmail.trim() })
+      setRecoverMsg(r.data?.message || 'If that email is registered, your username has been sent to it.')
+    } catch (err: any) {
+      setRecoverMsg(err?.response?.data?.detail || 'Could not send the reminder — please try again.')
+    } finally {
+      setRecoverLoading(false)
+    }
+  }
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
@@ -238,6 +256,23 @@ export function AuthPage() {
             </div>
           )}
 
+          {mode === 'login' && showUsernameHelp && (
+            <div className="mb-4 rounded-card border border-primary-light/40 bg-primary-light/20 px-4 py-3">
+              <p className="mb-2 text-sm font-bold text-primary-dark">Forgot your username?</p>
+              <p className="mb-2 text-xs text-slate-500">Enter the email you registered with and we'll email your username. Works for student and shopkeeper accounts.</p>
+              <div className="flex gap-2">
+                <input type="email" value={recoverEmail} onChange={e => setRecoverEmail(e.target.value)}
+                  className="flex-1 rounded-card border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-700 placeholder-slate-400 outline-none transition-all focus:border-primary"
+                  placeholder="you@campus.edu" />
+                <button type="button" onClick={() => void sendUsernameReminder()} disabled={recoverLoading}
+                  className="rounded-card bg-primary px-4 py-2.5 text-sm font-bold text-white transition-colors hover:bg-primary-dark disabled:opacity-40">
+                  {recoverLoading ? 'Sending…' : 'Send'}
+                </button>
+              </div>
+              {recoverMsg && <p className="mt-2 text-xs font-semibold text-primary">{recoverMsg}</p>}
+            </div>
+          )}
+
           <form onSubmit={handleSubmit} className="space-y-4">
             {mode === 'signup' && (
               <div>
@@ -294,6 +329,10 @@ export function AuthPage() {
                 Don't have an account?{' '}
                 <button type="button" onClick={() => switchMode('signup')} className="font-bold text-primary hover:text-primary">
                   Sign Up
+                </button>
+                {' · '}
+                <button type="button" onClick={() => { setShowUsernameHelp(s => !s); setRecoverMsg('') }} className="font-bold text-primary hover:text-primary">
+                  Forgot username?
                 </button>
               </p>
             ) : (

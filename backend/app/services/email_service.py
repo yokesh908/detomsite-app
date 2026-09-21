@@ -151,6 +151,28 @@ class EmailService:
         return await _deliver(to_email, subject, html, text)
 
     @staticmethod
+    async def send_username_reminder(
+        to_email: str,
+        username: str,
+        role: str = "student",
+    ) -> bool:
+        """Email a forgotten username to the account's registered address."""
+        subject = "Your DETOMSITE username"
+        text = (
+            f"Hi,\n\nYou asked us to remind you of your username.\n\n"
+            f"  Username: {username}\n\n"
+            f"Use it to sign in to your {role} account. If you didn't request "
+            f"this, you can safely ignore this email.\n\n— DETOMSITE"
+        )
+        html = (
+            f"<p>Hi,</p><p>You asked us to remind you of your username.</p>"
+            f"<p style=\"font-size:22px;font-weight:bold;color:#064E3B;\">{username}</p>"
+            f"<p>Use it to sign in to your <b>{role}</b> account. If you didn't "
+            f"request this, you can safely ignore this email.</p><p>— DETOMSITE</p>"
+        )
+        return await _deliver(to_email, subject, html, text)
+
+    @staticmethod
     async def send_order_notification(
         to_email: str,
         order_number: str,

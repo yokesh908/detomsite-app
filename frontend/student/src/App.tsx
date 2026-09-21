@@ -536,8 +536,9 @@ function Login() {
                 <PasswordField value={password} onChange={setPassword} placeholder="Your password" autoComplete="current-password" />
               </div>
               <button type="submit" disabled={loading} className="w-full rounded-btn bg-primary px-6 py-3.5 text-base font-bold text-white transition-all hover:bg-primary-dark active:scale-[0.99] disabled:opacity-40">{loading ? 'Signing in...' : 'Sign In'}</button>
-              <div className="text-center">
-                <Link to="/forgot-password" className="text-xs font-bold text-primary transition-colors hover:text-primary">Forgot password?</Link>
+              <div className="text-center space-y-1.5">
+                <Link to="/forgot-password" className="block text-xs font-bold text-primary transition-colors hover:text-primary">Forgot password?</Link>
+                <Link to="/forgot-username" className="block text-xs font-bold text-primary transition-colors hover:text-primary">Forgot username?</Link>
               </div>
             </form>
             <p className="mt-6 text-center text-sm text-gray-400">Don't have an account? <Link to="/register" className="font-bold text-primary">Register</Link></p>
@@ -642,6 +643,55 @@ function ForgotPassword() {
             <p className="mt-5 text-center">
               <button type="button" onClick={() => { setStep('request'); setErr(''); setInfo(''); }} className="text-xs font-bold text-primary hover:text-primary">← Start over</button>
             </p>
+          )}
+          <p className="mt-5 text-center text-sm text-gray-400">Remembered it? <Link to="/login" className="font-bold text-primary">Sign In</Link></p>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/* Forgot Username — enter your registered email and we email the username.
+   Same single-step pattern as forgot-password, for students AND shopkeepers. */
+function ForgotUsername() {
+  const [email, setEmail] = useState('')
+  const [sent, setSent] = useState(false)
+  const [info, setInfo] = useState('')
+  const [err, setErr] = useState('')
+  const [loading, setLoading] = useState(false)
+  const inputCls = 'w-full rounded-btn border-2 border-gray-200 px-4 py-3 text-sm outline-none transition-all focus:border-primary'
+
+  const submit = async (e: FormEvent) => {
+    e.preventDefault(); setErr(''); setInfo(''); setLoading(true)
+    try {
+      const res = await api.post('/users/forgot-username', { email })
+      setInfo(res.data?.message || 'If that email is registered, your username has been sent to it.')
+      setSent(true)
+    } catch (error: any) { setErr(apiError(error, 'Could not send the reminder — please try again')) }
+    finally { setLoading(false) }
+  }
+
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-gradient-to-br from-emerald-900 via-emerald-800 to-emerald-700 px-4 py-12">
+      <div className="w-full max-w-md">
+        <div className="rounded-card bg-white p-8 shadow-lg border">
+          <div className="mb-6 text-center">
+            <span className="mx-auto flex h-16 w-16 items-center justify-center rounded-card bg-primary text-white shadow-lg">🎓</span>
+            <h1 className="mt-4 text-2xl font-bold text-primary-dark">Forgot Username</h1>
+            <p className="text-sm text-gray-500">We'll email your username to you</p>
+          </div>
+          {err && <div className="mb-4 rounded-btn bg-red-50 border border-red-200 px-4 py-3 text-sm font-medium text-red-600">{err}</div>}
+          {info && <div className="mb-4 rounded-btn bg-primary-light/30 border border-primary-light/50 px-4 py-3 text-sm font-semibold text-primary">{info}</div>}
+          {!sent ? (
+            <form onSubmit={submit} className="space-y-4">
+              <div>
+                <label className="mb-1.5 block text-xs font-bold uppercase tracking-wide text-gray-500">Registered Email</label>
+                <input type="email" value={email} onChange={e => setEmail(e.target.value)} className={inputCls} placeholder="you@campus.edu" required />
+              </div>
+              <button type="submit" disabled={loading} className="w-full rounded-btn bg-primary px-6 py-3.5 text-base font-bold text-white transition-all hover:bg-primary-dark active:scale-[0.99] disabled:opacity-40">{loading ? 'Sending...' : 'Email My Username'}</button>
+            </form>
+          ) : (
+            <p className="text-center text-sm text-gray-500">Check your inbox — it may take a minute to arrive.</p>
           )}
           <p className="mt-5 text-center text-sm text-gray-400">Remembered it? <Link to="/login" className="font-bold text-primary">Sign In</Link></p>
         </div>
@@ -1592,6 +1642,7 @@ export default function App() {
         <Route path="/register" element={<Register />} />
         <Route path="/login" element={<Login />} />
         <Route path="/forgot-password" element={<ForgotPassword />} />
+        <Route path="/forgot-username" element={<ForgotUsername />} />
 
         {/* Everything else requires a valid login */}
         <Route path="/*" element={

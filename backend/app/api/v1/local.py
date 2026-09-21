@@ -1747,13 +1747,68 @@ async def patch_payment_status(payment_id: str, data: LocalPaymentStatusUpdate, 
 
 
 @router.get("/tickets")
-async def tickets(_admin: dict = Depends(_require_admin)):
-    return await _db(db.list_tickets)
+async def tickets(current_user: dict = Depends(get_current_local_user)):
+    """Support tickets — role-aware.
+
+    Admins see every ticket. Students (and shopkeepers) only ever receive
+    THEIR OWN tickets, matched by the authenticated account's email. Name-only
+    matching is used solely for legacy phone-onboarded accounts that have no
+    email address; it is never an OR fallback for email accounts (common names
+    like "Student" would otherwise leak tickets across users)."""
+    all_tickets = await _db(db.list_tickets)
+    if current_user.get("role") == "admin":
+        return all_tickets
+    email = str(current_user.get("email") or "").strip().lower()
+    if email:
+        # Email accounts: strict email match only. Never fall back to name —
+        # two different students can share the same display name.
+        return [
+            t for t in all_tickets
+            if str(t.get("email") or "").strip().lower() == email
+        ]
+    name = str(current_user.get("name") or "").strip().lower()
+    if not name:
+        return []
+    # No-email (phone-onboarded) legacy accounts: match on name AND phone so two
+    # accounts sharing the generic "Student" display name never see each
+    # other's tickets. (Email accounts never reach here — strict email match.)
+    phone = "".join(ch for ch in str(current_user.get("phone") or "") if ch.isdigit())
+    out = []
+    for t in all_tickets:
+        if str(t.get("name") or "").strip().lower() != name:
+            continue
+        if phone:
+            t_phone = "".join(ch for ch in str(t.get("phone_number") or "") if ch.isdigit())
+            # Compare last-10 digits so +91/0 formatting never hides own ticket.
+            if t_phone[-10:] != phone[-10:]:
+                continue
+        out.append(t)
+    return out
 
 
 @router.post("/tickets")
 async def add_ticket(data: LocalTicketCreate, current_user: dict = Depends(get_current_local_user)):
-    return await _db(db.create_ticket, data.model_dump())
+    # Stamp ownership from the authenticated JWT, not the client-supplied form
+    # fields. Otherwise any student could file a ticket with someone else's
+    # email/name (or omit them on purpose) and either impersonate them or make
+    # their own ticket invisible to the role-aware GET above.
+    payload = data.model_dump()
+    if current_user.get("role") != "admin":
+        server_email = str(current_user.get("email") or "").strip()
+        server_name = str(current_user.get("name") or "").strip()
+        server_phone = str(current_user.get("phone") or "").strip()
+        if server_email:
+            payload["email"] = server_email
+        elif not payload.get("email"):
+            # Phone-onboarded accounts have no email: keep the ticket readable
+            # by stamping a stable per-account placeholder (username-based), so
+            # the row still satisfies the NOT NULL email column.
+            payload["email"] = f"{current_user.get('username', 'student')}@phone.local"
+        if server_name:
+            payload["name"] = server_name
+        if server_phone:
+            payload["phone_number"] = server_phone
+    return await _db(db.create_ticket, payload)
 
 
 @router.get("/notifications")

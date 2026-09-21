@@ -130,25 +130,34 @@ class WhatsAppBotService : Service() {
         }
 
         val pending = fetchPending(root, key) ?: return
-        for (i in 0 until pending.length()) {
-            val item = pending.getJSONObject(i)
-            val id = item.optString("id")
-            if (id.isBlank()) continue
-            if (id in delivered) continue
-            val now = System.currentTimeMillis()
-
-            // Already launched recently? Wait for accessibility to finish it.
-            val launched = inFlight[id]
-            if (launched != null && now - launched < 3 * 60_000L) continue
-            if (!canStartFromBackground()) {
-                notifyGuidance("Allow “Display over other apps” so the bot can auto-open WhatsApp.")
-                return
-            }
-            if (launched == null) notifySending(item.optString("sub_order_id"), item.optString("phone"))
-
-            inFlight[id] = now
-            openWhatsApp(id, item.optString("phone"), item.optString("message"))
+        // ONE message per poll cycle. The outbox is a single slot shared with
+        // the accessibility service — firing several WhatsApp intents back to
+        // back overwrote it, so only the LAST shop's message ever reached the
+        // screen (multi-shop orders then retried the same last-shop message on
+        // every later cycle). Sending one, waiting for Send, then polling again
+        // delivers every shop its own message.
+        val item = (0 until pending.length())
+            .map { pending.getJSONObject(it) }
+            .firstOrNull { entry ->
+                val id = entry.optString("id")
+                id.isNotBlank() && id !in delivered && !isRecentlyLaunched(id) &&
+                    normalizePhone(entry.optString("phone")).isNotEmpty()
+            } ?: return
+        val id = item.optString("id")
+        val now = System.currentTimeMillis()
+        if (!canStartFromBackground()) {
+            notifyGuidance("Allow “Display over other apps” so the bot can auto-open WhatsApp.")
+            return
         }
+        if (inFlight[id] == null) notifySending(item.optString("sub_order_id"), item.optString("phone"))
+        inFlight[id] = now
+        openWhatsApp(id, item.optString("phone"), item.optString("message"))
+    }
+
+    /** Launched within the retry window and still waiting for accessibility? */
+    private fun isRecentlyLaunched(id: String): Boolean {
+        val launched = inFlight[id] ?: return false
+        return System.currentTimeMillis() - launched < 3 * 60_000L
     }
 
     private suspend fun fetchPending(root: String, key: String): JSONArray? = withContext(Dispatchers.IO) {
@@ -175,17 +184,28 @@ class WhatsAppBotService : Service() {
     }
 
     private fun normalizePhone(phone: String): String {
-        val digits = phone.filter { it.isDigit() }
+        var digits = phone.filter { it.isDigit() }
+        // Strip a domestic trunk prefix ("09876543210" → "9876543210") and an
+        // explicit country code ("919876543210") down to the 10-digit mobile
+        // before wa.me addressing; otherwise a 12-digit string that is NOT a
+        // valid Indian mobile would be sent as-is and open the wrong chat.
+        if (digits.length == 11 && digits.startsWith("0")) digits = digits.substring(1)
         return when {
             digits.isEmpty() -> ""
             digits.length == 10 -> "91$digits"
-            else -> digits
+            digits.length == 12 && digits.startsWith("91") -> digits
+            else -> ""
         }
     }
 
     private fun openWhatsApp(id: String, phone: String, message: String) {
         val digits = normalizePhone(phone)
-        if (digits.isEmpty()) return
+        if (digits.isEmpty()) {
+            // Poison entry (no usable shop number): record the attempt so this
+            // poll cycle skips it instead of wedging the whole outbox behind it.
+            inFlight[id] = System.currentTimeMillis()
+            return
+        }
         val text = message.let {
             Uri.encode(it)
         }

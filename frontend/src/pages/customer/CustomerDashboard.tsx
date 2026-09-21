@@ -83,11 +83,17 @@ export function CustomerDashboard() {
   }, [])
 
   const load = useCallback(() => {
-    Promise.all([
-      api.get<LocalParentOrder[]>('/local/orders/parent'),
-      api.get<LocalTicket[]>('/local/tickets'),
-    ]).then(([o, t]) => { setOrders(cur => same(cur, o.data) ? cur : o.data); setTickets(cur => same(cur, t.data) ? cur : t.data) })
-      .catch(() => setNotice({ kind: 'error', text: 'Could not load your data — check your network and try again.' }))
+    // Each request fails independently — one bad endpoint must never blank the
+    // whole dashboard (the tickets 403 used to kill the Promise.all and show
+    // "Could not load your data" even on a perfectly good connection).
+    // Failures still surface a notice (with a dismiss) instead of failing
+    // silently and leaving a permanently empty orders list.
+    api.get<LocalParentOrder[]>('/local/orders/parent')
+      .then(o => { setOrders(cur => same(cur, o.data) ? cur : o.data); setNotice(null) })
+      .catch(() => setNotice({ kind: 'error', text: 'Could not load your orders — check your connection and try again.' }))
+    api.get<LocalTicket[]>('/local/tickets')
+      .then(t => setTickets(cur => same(cur, t.data) ? cur : t.data))
+      .catch(() => { /* tickets are secondary; orders notice already covers outages */ })
   }, [])
 
   // Poll every 10s while this tab is visible; background tabs pause and refresh
@@ -103,7 +109,11 @@ export function CustomerDashboard() {
   const active = myOrders.filter(o => orderGroup(o.status) === 'active')
   const completed = myOrders.filter(o => orderGroup(o.status) === 'completed')
   const total = completed.reduce((s, o) => s + o.total, 0)
-  const myTickets = session?.email ? tickets.filter(t => t.email.toLowerCase() === session.email!.toLowerCase()) : tickets
+  // The backend already returns only this account's tickets; keep a defensive
+  // email guard here (null-safe — phone-onboarded sessions have no email).
+  const myTickets = session?.email
+    ? tickets.filter(t => (t.email || '').toLowerCase() === session.email!.toLowerCase())
+    : tickets
 
   const cancelOrder = async (orderId: string) => {
     if (!confirm('Cancel this order? This cannot be undone.')) return

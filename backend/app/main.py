@@ -76,11 +76,12 @@ _RATE_LIMIT_MAX = 60
 
 
 async def rate_limit_middleware(request: Request, call_next):
-    """Rate-limit sensitive endpoints (login, register, forgot-password)."""
+    """Rate-limit sensitive endpoints (login, register, forgot-password/username)."""
     path = request.url.path
     sensitive_prefixes = ("/auth/login", "/auth/register", "/users/login",
                           "/users/register", "/vendor/login", "/vendor/register",
-                          "/admin/login", "/users/forgot-password")
+                          "/admin/login", "/users/forgot-password",
+                          "/users/forgot-username", "/users/reset-password")
     if not any(path.endswith(p) for p in sensitive_prefixes):
         return await call_next(request)
 
@@ -105,12 +106,21 @@ async def rate_limit_middleware(request: Request, call_next):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup and shutdown events"""
-    # Startup — Supabase Postgres is the ONLY database.
+    # Startup — Supabase Postgres is the ONLY database. A failed DB connection
+    # must NOT kill the whole serverless instance: without this lifespan the
+    # single most common production outage is every route returning 404
+    # (DEPLOYMENT_NOT_FOUND) right after a cold Supabase pooler hiccup.
     logger.info("Starting DETOMSITE application")
     from app.core.store import init_store
-    if not await asyncio.to_thread(init_store):
-        raise RuntimeError("Supabase initialization failed; no fallback database is available.")
-    logger.info("Supabase Postgres store initialized")
+    try:
+        ready = await asyncio.to_thread(init_store)
+    except Exception as e:
+        logger.error(f"Supabase init raised during startup (serving anyway): {e}")
+        ready = False
+    if not ready:
+        logger.error("Supabase store not reachable at startup — serving API anyway; requests will retry the connection per-request.")
+    else:
+        logger.info("Supabase Postgres store initialized")
     keep_alive_task = asyncio.create_task(keep_alive_loop())
     auto_delivery_task = asyncio.create_task(auto_delivery_loop())
     

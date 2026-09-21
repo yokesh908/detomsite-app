@@ -241,6 +241,42 @@ async def reset_password(data: ResetPasswordRequest):
     return {"message": "Password updated successfully! You can now sign in with your new password."}
 
 
+# ─── Forgot username — emailed reminder ───
+# Like forgot-password: the student/shopkeeper enters their registered email and
+# the username is emailed to them. The response never reveals whether an
+# account exists (account-enumeration protection).
+
+
+class ForgotUsernameRequest(BaseModel):
+    email: str = Field(..., min_length=3, max_length=120, description="The email the account was registered with")
+
+
+@router.post("/forgot-username")
+async def forgot_username(data: ForgotUsernameRequest):
+    """Email the account's username to its registered address.
+
+    Works for student AND shopkeeper accounts (one email = one account across
+    the whole platform, so at most one username is sent). Admin accounts carry
+    a placeholder DB email, so their reminder is routed to
+    DEFAULT_SUPER_ADMIN_EMAIL like the password-reset flow."""
+    email = (data.email or "").strip()
+    user = await asyncio.to_thread(db.get_user_by_email, email) if email else None
+    if user:
+        admin_email = (settings.DEFAULT_SUPER_ADMIN_EMAIL or "").strip()
+        to_email = (
+            admin_email
+            if user.get("role") == "admin" and admin_email
+            else (user.get("email") or email)
+        )
+        try:
+            await EmailService.send_username_reminder(to_email, user.get("username", ""), user.get("role", "student"))
+            logger.info(f"Username reminder sent to {to_email}")
+        except Exception as e:
+            logger.warning(f"Username reminder email failed: {e}")
+    # Same response either way — never leak which emails are registered.
+    return {"message": "If that email is registered, your username has been sent to it."}
+
+
 @router.post("/login")
 async def login(data: UserLoginRequest):
     """Login as a student."""

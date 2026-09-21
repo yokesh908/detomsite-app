@@ -40,6 +40,9 @@ export function Shops() {
 
   const categories = useMemo(() => ['all', ...new Set(shops.map(s => s.category))], [shops])
   const filtered = shops
+    // Closed shops are hidden entirely — students only browse shops that are
+    // actually accepting orders right now.
+    .filter(s => canOrderFromShop(s))
     .filter(s => filter === 'all' || s.category === filter)
     .filter(s => {
       if (!query) return true
@@ -53,11 +56,13 @@ export function Shops() {
       return b.rating - a.rating
     })
 
-  // Food results from any shop when searching by dish.
+  // Food results: matching AVAILABLE dishes from OPEN shops only — a search must
+  // never surface food that cannot be ordered (unavailable item or closed shop).
+  const openShopIds = useMemo(() => new Set(shops.filter(s => canOrderFromShop(s)).map(s => s.id)), [shops])
   const foodResults = useMemo(() => {
     if (!query) return []
-    return products.filter(p => p.name.toLowerCase().includes(query) && p.available)
-  }, [products, query])
+    return products.filter(p => p.name.toLowerCase().includes(query) && p.available && openShopIds.has(p.shop_id))
+  }, [products, query, openShopIds])
 
   const perPage = 8
   const pages = Math.max(1, Math.ceil(filtered.length / perPage))

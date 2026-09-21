@@ -36,6 +36,13 @@ object AutoSendState {
     }
 
     private fun extractToken(message: String): String {
+        // Multi-shop (combo) orders share ONE order token across every shop's
+        // sub-order — "DETOMSITE order #18" alone could match the WRONG shop's
+        // message and tap Send in the wrong chat. Every message now carries a
+        // unique "Ref: <sub-order id>" line; prefer it and only fall back to
+        // the legacy token for old queued messages.
+        val ref = Regex("Ref:\\s*([A-Za-z0-9_-]+)").find(message)
+        if (ref != null) return "Ref: ${ref.groupValues[1]}"
         val order = Regex("DETOMSITE order #([0-9]+)").find(message)
         if (order != null) return "DETOMSITE order #${order.groupValues[1]}"
         return "DETOMSITE"

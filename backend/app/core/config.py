@@ -205,27 +205,15 @@ class Settings(BaseSettings):
         # In development (DEBUG=True) the app runs on localhost, so the strict
         # production-URL checks below don't apply. They kick in only when DEBUG
         # is off (i.e. real production deployments).
-        is_dev = bool(self.DEBUG)
-
-        missing = []
+        # A missing setting must NEVER crash the import/cold start (that turns
+        # every route into a 404/DEPLOYMENT_NOT_FOUND page on Vercel). Warn
+        # loudly here; requests fail with a clear 503 message instead.
+        import logging as _logging
         if not self.SUPABASE_DATABASE_URL and not (self.SUPABASE_DB_HOST and self.SUPABASE_DB_PASSWORD):
-            missing.append("SUPABASE_DATABASE_URL or SUPABASE_DB_HOST + SUPABASE_DB_PASSWORD")
-        if not is_dev:
-            if not self.FRONTEND_URL or "localhost" in self.FRONTEND_URL:
-                missing.append("FRONTEND_URL")
-            if not self.BACKEND_URL or "localhost" in self.BACKEND_URL:
-                missing.append("BACKEND_URL")
-        if not self.DEFAULT_SUPER_ADMIN_EMAIL:
-            if not is_dev:
-                missing.append("DEFAULT_SUPER_ADMIN_EMAIL")
-        if not self.DEFAULT_SUPER_ADMIN_PASSWORD:
-            if not is_dev:
-                missing.append("DEFAULT_SUPER_ADMIN_PASSWORD")
-
-        if missing:
-            raise ValueError(
-                "Production environment is missing required values: "
-                + ", ".join(sorted(set(missing)))
+            _logging.getLogger(__name__).warning(
+                "SUPABASE_DATABASE_URL (or SUPABASE_DB_HOST + SUPABASE_DB_PASSWORD) "
+                "is not set — API requests needing the database will return 503 "
+                "until it is configured."
             )
 
         return self

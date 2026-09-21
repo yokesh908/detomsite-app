@@ -38,21 +38,29 @@ export function Home() {
 
   const query = search.trim().toLowerCase()
 
-  const filteredShops = useMemo(() => shops.filter(s => {
+  // Closed shops stay invisible to students everywhere — only shops that are
+  // actually accepting orders appear in search results and listings.
+  const filteredShops = useMemo(() => shops.filter(s => canOrderFromShop(s)).filter(s => {
     if (!query) return true
     const shopMatch = `${s.name} ${s.category} ${s.description}`.toLowerCase().includes(query)
     const hasFoodMatch = products.some(p => p.shop_id === s.id && p.name.toLowerCase().includes(query))
     return shopMatch || hasFoodMatch
   }), [shops, products, query])
 
-  // Combined "food" results: any product (from any shop) matching the search.
+  // Combined "food" results: matching dishes from OPEN shops only, so a search
+  // never advertises food that cannot be ordered right now. Availability is
+  // enforced at render time (Add vs Closed/Out badge).
+  const openShops = shops.filter(s => canOrderFromShop(s))
+  const openShopIds = useMemo(() => new Set(openShops.map(s => s.id)), [openShops])
+  const featured = openShops.slice(0, 4)
+
+  // Combined "food" results: matching dishes from OPEN shops only, so a search
+  // never advertises food that cannot be ordered right now. Availability is
+  // enforced at render time (Add vs Closed/Out badge).
   const foodResults = useMemo(() => {
     if (!query) return []
-    return products.filter(p => p.name.toLowerCase().includes(query))
-  }, [products, query])
-
-  const openShops = shops.filter(s => canOrderFromShop(s))
-  const featured = openShops.slice(0, 4)
+    return products.filter(p => p.name.toLowerCase().includes(query) && openShopIds.has(p.shop_id))
+  }, [products, query, openShopIds])
 
   const handleAdd = (product: LocalProduct, shop: LocalShop) => {
     addProductToCart(product, shop)

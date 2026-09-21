@@ -114,13 +114,19 @@ def compose_order_wa(order: dict[str, Any], paid: bool | None = None) -> str:
         paid_label = f"{payment.upper()} ₹{amount} — awaiting payment"
     else:
         paid_label = f"{payment.upper()} paid ₹{amount} ✓"
+    # Unique per-order reference. A multi-shop (combo) order shares ONE token
+    # across all its shop sub-orders, so the token alone cannot tell two
+    # sub-order messages apart — the phone bot uses this Ref to verify the
+    # exact message it is about to send and never taps the wrong chat.
+    ref = or_none(order.get("id"))
+    ref_line = f"\n• Ref: {ref}" if ref else ""
     return (
         f"Hello! New DETOMSITE order #{token} for you 🛵\n\n"
         f"• Student: {student}\n"
         f"• Items: {items}\n"
         f"• Deliver to: {location}\n"
         f"• Slot: {slot}\n"
-        f"• Payment: {paid_label}\n\n"
+        f"• Payment: {paid_label}{ref_line}\n\n"
         f"Please confirm this order in the DETOMSITE shop app. "
         f"Thank you!"
     )
