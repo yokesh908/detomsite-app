@@ -176,11 +176,17 @@ UPLOADS_DIR = get_uploads_dir()
 os.makedirs(UPLOADS_DIR, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=UPLOADS_DIR), name="uploads")
 
-# Configure CORS — restrict methods and headers in production
+# Configure CORS — the API is Bearer-token auth only (tokens travel in the
+# Authorization header; no cookies, no withCredentials anywhere), so
+# credentialed CORS is unnecessary. Allow every frontend origin instead of an
+# exact-match list: the portals run on many hosts (detomsite.in + www,
+# detomsite-frontend/student/admin/shopkeeper .vercel.app URLs, Vercel preview
+# deployments, localhost, mobile webviews). An exact list turns every new host
+# into a failed preflight (HTTP 400, no CORS headers) and a dead login page.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.allowed_origins_list,
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
