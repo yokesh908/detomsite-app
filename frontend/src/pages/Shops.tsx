@@ -5,8 +5,7 @@ import { canOrderFromShop, LocalProduct, LocalShop, shopStatusText } from '../ty
 import { addProductToCart } from '../utils/cart'
 import { usePolling } from '../hooks/usePolling'
 import { same } from '../utils/same'
-
-const gradients = ['from-emerald-500 to-emerald-700', 'from-amber-400 to-orange-500', 'from-emerald-600 to-emerald-800', 'from-teal-400 to-emerald-600']
+import { getShopImage } from '../utils/shopImages'
 
 export function Shops() {
   const [shops, setShops] = useState<LocalShop[]>([])
@@ -81,7 +80,7 @@ export function Shops() {
             <div>
               <p className="text-sm font-semibold uppercase tracking-[0.3em] text-primary/50">Browse campus favorites</p>
               <h1 className="mt-2 text-3xl font-black tracking-tight">Restaurants & cafes</h1>
-              <p className="mt-2 max-w-2xl text-sm font-medium text-primary/50/90">Find the best open spots, compare ratings, and order from the place that fits your mood.</p>
+              <p className="mt-2 max-w-2xl text-sm font-medium text-emerald-50/90">Find the best open spots, compare ratings, and order from the place that fits your mood.</p>
             </div>
             <div className="rounded-card bg-white/10 px-4 py-3 text-sm font-semibold text-emerald-50 backdrop-blur-sm">
               {filtered.length} shops · {foodResults.length} dishes
@@ -142,14 +141,10 @@ export function Shops() {
           <div className="rounded-[24px] border border-primary-light/30 bg-white/80 p-12 text-center text-slate-500 shadow-[0_10px_35px_rgba(15,118,110,0.06)]">Loading...</div>
         ) : (
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            {visible.map((shop, i) => (
+            {visible.map(shop => (
               <Link key={shop.id} to={`/shop/${shop.id}`}
                 className="group overflow-hidden rounded-[24px] border border-primary-light/30 bg-white/90 shadow-[0_10px_35px_rgba(15,118,110,0.08)] transition-all hover:-translate-y-1 hover:shadow-[0_16px_45px_rgba(15,118,110,0.16)]">
-                {shop.shop_image ? (
-                  <img src={shop.shop_image} alt={shop.name} className="h-32 w-full object-cover" />
-                ) : (
-                  <div className={`h-32 bg-gradient-to-br ${gradients[i % gradients.length]}`} />
-                )}
+                <img src={shop.shop_image || getShopImage(shop.category)} alt={`${shop.name} food`} className="h-32 w-full object-cover" onError={event => { event.currentTarget.src = getShopImage() }} />
                 <div className="p-4">
                   <div className="flex items-start justify-between gap-2">
                     <div><h3 className="font-bold text-primary-dark">{shop.name}</h3><p className="text-sm font-medium text-slate-500">{shop.category}</p></div>

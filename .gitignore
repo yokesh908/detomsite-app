@@ -1,40 +1,44 @@
-.env
+# Temp / build artifacts
+*.apk
+*.txt
+*.js
+*.html
+*.png
+bundle-new-*
+fapi.js
+fidx.js
+fvendor.js
+fresh-index.html
+idx-NOW.html
+idx-new.html
+index-live.html
+frontend-api-chunk.js
+frontend-index-chunk.js
+tmp-admin-login.json
+tmp-bundle.js
+nohup.out
+.bundle*
+
+# Vercel deploy artifacts
+.vercel/*.project.json
+.vercel/config.json
+
+# IDE
+.serena/
+
+# Dumps / screenshots
+verification/
+verification2/
+verify-final/
+phone-field-proof.png
+
+# Supabase local
+supabase/
+
+# Local dev database / logs
+detomsite_local.db
+server.log
+tests/.pytest_local.db
+final-admin-login.json
 .env.local
-.env.*.local
-.env.auto
-.deploy-credentials.txt
-backend/.env
-backend/.env.auto
-*.log
-
-__pycache__/
-*.py[cod]
-.pytest_cache/
-.coverage
-htmlcov/
-*.db
-.vercel/
-# Supabase CLI local scratch
-/supabase/
-
-node_modules/
-dist/
-build/
-
-venv/
-.venv/
-env/
-
-# Local duplicate portals (the deployed ones live in frontend/)
-/student/
-/admin/
-/shopkeeper/
-
-.DS_Store
-.idea/
-.vscode/
-*.swp
-*.swo
-*~
-.vercel
-.env*
+backend/tests/.pytest_local.db

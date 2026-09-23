@@ -13,8 +13,7 @@ from app.core.config import settings
 from app.core.rate_limit import allow as rate_allow, reset as rate_reset, client_ip as rate_ip
 from app.core.store import store as db
 from app.core.security import hash_password, verify_password, create_access_token, create_refresh_token, decode_token
-from app.core import ttl_cache
-from app.core import shared_cache
+from app.core import read_cache
 from app.services import push_service
 
 logger = logging.getLogger(__name__)
@@ -169,15 +168,22 @@ async def login(data: AdminLoginRequest, request: Request):
     # account.
     user = await _db(db.get_user_by_username, data.username)
 
+    # PENTEST FIX: identical message whether the admin username exists or
+    # not — "incorrect password" vs "unknown user" would let an attacker
+    # enumerate admin accounts on this dedicated endpoint. A dummy hash also
+    # runs bcrypt for unknown usernames, so timing matches too.
+    bad_admin = "Invalid admin username or password"
     if user and user["role"] == "admin":
         if not verify_password(data.password, user["password_hash"]):
-            raise HTTPException(status_code=401, detail="Incorrect admin password. Please try again.")
+            raise HTTPException(status_code=401, detail=bad_admin)
     else:
+        dummy = await asyncio.to_thread(hash_password, "x" * 16)
+        await asyncio.to_thread(verify_password, data.password, dummy)
         if not settings.DEBUG:
-            raise HTTPException(status_code=401, detail="Invalid admin username or password")
+            raise HTTPException(status_code=401, detail=bad_admin)
         # Dev-only fallback to environment-configured admin credentials.
         if data.username != ADMIN_USERNAME or data.password != ADMIN_PASSWORD:
-            raise HTTPException(status_code=401, detail="Invalid admin username or password")
+            raise HTTPException(status_code=401, detail=bad_admin)
         rate_reset("admin_login", f"{data.username}:{ip}")
         # Return a virtual admin user
         token_data = {
@@ -366,22 +372,18 @@ async def list_all_orders(admin: dict = Depends(verify_admin)):
     """List orders across all shops, newest first — capped at 1500.
     Multi-shop sub-orders are merged in so they show in the admin centre too.
 
-    Both sources are fetched CONCURRENTLY and the merged list is served from a
-    short TTL cache. The old version fetched every shop and then called
-    ``get_shop_sub_orders`` once per shop (3 sequential queries per shop),
-    which is what made the admin orders page feel slow."""
-    key = "admin-orders"
-    hit = ttl_cache.get(key)
-    if hit is None and shared_cache.enabled():
-        hit = await asyncio.to_thread(shared_cache.get, key)
-        if hit is not None:
-            ttl_cache.set(key, hit, 10)
-    if hit is not None:
-        return hit
+    Both sources are fetched CONCURRENTLY and the merged list is served from the
+    shared read cache (memory → Redis → Postgres, 10 s), so the admin centre's
+    polling is answered without re-running the queries. The old version fetched
+    every shop and then called ``get_shop_sub_orders`` once per shop (3
+    sequential queries per shop), which is what made the admin orders page feel
+    slow."""
+    return await read_cache.cached_read(10, "admin-orders", _load_admin_orders_capped)
+
+
+async def _load_admin_orders_capped() -> list[dict]:
+    """Newest 1500 orders — the admin centre never renders more than this."""
     merged = await _load_admin_orders()
-    ttl_cache.set(key, merged, 10)
-    if shared_cache.enabled():
-        await asyncio.to_thread(shared_cache.set_pair, key, merged, 10)
     return merged[:1500]
 
 
@@ -681,19 +683,9 @@ async def vendor_logs(shop_id: str, admin: dict = Depends(verify_admin)):
 @router.get("/notifications")
 async def admin_notifications(admin: dict = Depends(verify_admin)):
     """Get notifications targeted at admins."""
-    key = "admin-notifications"
-    hit = ttl_cache.get(key)
-    if hit is None and shared_cache.enabled():
-        hit = await asyncio.to_thread(shared_cache.get, key)
-        if hit is not None:
-            ttl_cache.set(key, hit, 10)
-    if hit is not None:
-        return hit
-    value = await _db(db.list_notifications, role="admin")
-    ttl_cache.set(key, value, 10)
-    if shared_cache.enabled():
-        await asyncio.to_thread(shared_cache.set_pair, key, value, 10)
-    return value
+    return await read_cache.cached_read(
+        10, "admin-notifications", db.list_notifications, role="admin"
+    )
 
 
 class BroadcastRequest(BaseModel):
@@ -725,9 +717,9 @@ async def broadcast_notification(data: BroadcastRequest, admin: dict = Depends(v
         raise HTTPException(status_code=500, detail="Could not save the broadcast")
     if not notification:
         raise HTTPException(status_code=500, detail="Could not save the broadcast")
-    # Invalidate the shared notification cache so the student bell refreshes fast.
-    if shared_cache.enabled():
-        await asyncio.to_thread(shared_cache.clear)
+    # Invalidate every read-cache layer (memory + Redis + Postgres) so the
+    # student bell refreshes at once on every instance.
+    await read_cache.clear()
     logger.info(f"Admin broadcast: {title!r} to all students")
     return {"message": "Broadcast sent to all students", "notification": notification}
 
@@ -923,19 +915,9 @@ async def list_feedback(
     admin: dict = Depends(verify_admin),
 ):
     """All student bug reports / improvement contributions."""
-    key = f"admin-feedback:{source or ''}"
-    hit = ttl_cache.get(key)
-    if hit is None and shared_cache.enabled():
-        hit = await asyncio.to_thread(shared_cache.get, key)
-        if hit is not None:
-            ttl_cache.set(key, hit, 10)
-    if hit is not None:
-        return hit
-    value = await _db(db.list_site_feedback, source=source or None)
-    ttl_cache.set(key, value, 10)
-    if shared_cache.enabled():
-        await asyncio.to_thread(shared_cache.set_pair, key, value, 10)
-    return value
+    return await read_cache.cached_read(
+        10, "admin-feedback", db.list_site_feedback, source=source or None
+    )
 
 
 @router.patch("/feedback/{feedback_id}")

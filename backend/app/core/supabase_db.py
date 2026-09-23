@@ -1405,26 +1405,6 @@ def set_payment_utr(order_id: str, utr_number: str) -> dict[str, Any] | None:
             return dict(updated) if updated else None
 
 
-def update_payment_record(order_id: str, screenshot_name: str, utr_number: str | None = None) -> dict[str, Any] | None:
-    """Attach a payment screenshot (and optional UTR) to the latest payment for an order."""
-    with _DBContext(_connect()) as connection:
-        with connection.cursor() as cursor:
-            cursor.execute(
-                "SELECT * FROM payments WHERE order_id = %s ORDER BY created_at DESC, id DESC LIMIT 1",
-                (order_id,),
-            )
-            row = cursor.fetchone()
-            if not row:
-                return None
-            cursor.execute(
-                "UPDATE payments SET screenshot_name = %s, utr_number = COALESCE(%s, utr_number) WHERE id = %s",
-                (screenshot_name, utr_number, row["id"]),
-            )
-            cursor.execute("SELECT * FROM payments WHERE id = %s", (row["id"],))
-            updated = cursor.fetchone()
-            return dict(updated) if updated else None
-
-
 def get_payment_by_utr(utr_number: str) -> dict[str, Any] | None:
     """Find the most recent payment record carrying this UTR (student-entered)."""
     if not utr_number:

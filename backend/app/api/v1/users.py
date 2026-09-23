@@ -1,7 +1,7 @@
 """
 User Portal API — Student registration, login, and dashboard
 """
-from fastapi import APIRouter, HTTPException, Depends, Header
+from fastapi import APIRouter, HTTPException, Depends, Header, Request
 from pydantic import BaseModel, Field
 from typing import Optional
 from datetime import datetime
@@ -13,6 +13,7 @@ from app.core.config import settings
 from app.core.store import store as db
 from app.core.security import hash_password, verify_password, create_access_token, create_refresh_token, decode_token
 from app.services.email_service import EmailService
+from app.core.rate_limit import allow as rate_allow, reset as rate_reset, client_ip as rate_ip
 
 logger = logging.getLogger(__name__)
 
@@ -278,15 +279,25 @@ async def forgot_username(data: ForgotUsernameRequest):
 
 
 @router.post("/login")
-async def login(data: UserLoginRequest):
+async def login(data: UserLoginRequest, request: Request):
     """Login as a student."""
+    # PENTEST FIX: this route had no rate limit at all — an unauthenticated
+    # attacker could brute-force student passwords as fast as the network
+    # allowed. Same budget as the local portal login.
+    ip = rate_ip(request)
+    if not rate_allow("login", f"{data.username}:{ip}", max_attempts=40, window_sec=300):
+        raise HTTPException(status_code=429, detail="Too many sign-in attempts — please wait a few minutes and try again.")
+
     user = db.get_user_by_username(data.username)
-    if not user:
-        raise HTTPException(status_code=401, detail="No account found with this username. Check the spelling or register first.")
+    # PENTEST FIX: identical message for "no such user" and "wrong password",
+    # and the password is checked BEFORE the role hint — otherwise the distinct
+    # 401/403 replies let an attacker enumerate which usernames exist.
+    bad_credentials = "Invalid username or password."
+    if not user or not verify_password(data.password, user["password_hash"]):
+        raise HTTPException(status_code=401, detail=bad_credentials)
     if user["role"] != "student":
         raise HTTPException(status_code=403, detail=f"This account is a {user['role']} account — please sign in from the {user['role']} portal instead.")
-    if not verify_password(data.password, user["password_hash"]):
-        raise HTTPException(status_code=401, detail="Incorrect password. Please try again.")
+    rate_reset("login", f"{data.username}:{ip}")
 
     token_data = {
         "sub": str(user["id"]),

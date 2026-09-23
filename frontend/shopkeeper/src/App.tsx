@@ -503,7 +503,7 @@ export default function App() {
 /* Types */
 interface Shop { id: string; name: string; category: string; description: string; rating: number; opening_time: string; closing_time: string; present: number; status: string; approval_status: string; shopkeeper_email: string; shopkeeper_name: string; phone: string; upi_id: string; upi_enabled: number; cod_enabled: number; orders_today: number; revenue_today: number; current_token: number }
 interface Product { id: string; shop_id: string; name: string; description: string; price: number; pending_price: number | null; category: string; inventory: number; prep_time: number; available: number }
-interface Order { id: string; token: number; student_name: string; student_phone: string; shop_id: string; shop_name: string; items: string; total: number; delivery_location: string; delivery_slot: string; status: string; payment_method?: string; created_at: string }
+interface Order { id: string; token: number; student_name: string; student_phone: string; shop_id: string; shop_name: string; items: string; total: number; delivery_location: string; delivery_slot: string; status: string; payment_method?: string; created_at: string; payment?: { utr_number?: string | null; screenshot_name?: string | null } | null }
 
 /* Delivery-window filters — the day is split into TWO time slots instead of
    the old Morning/Afternoon/Evening/Night labels: orders placed before
@@ -1262,13 +1262,11 @@ function VendorMobileApp() {
                       ) : o.status === 'Pending Payment' ? (
                         <div className="mt-3 rounded-sm border border-blue-200 bg-blue-50 p-3">
                           <p className="text-xs font-semibold text-blue-700">Awaiting UPI payment (₹{o.total}) — confirm once it arrives in your UPI app</p>
-                          {o.payment?.screenshot_name && (
+                          {o.payment?.utr_number && (
                             <div className="mt-2 rounded-sm bg-white border border-blue-200 p-2">
-                              <p className="mb-1 text-[10px] font-bold uppercase tracking-wide text-blue-600">Payment screenshot</p>
-                              {o.payment.utr_number && <p className="text-[11px] text-gray-600">UTR: <b>{o.payment.utr_number}</b></p>}
-                              <a href={`/uploads/payments/${o.payment.screenshot_name}`} target="_blank" rel="noopener noreferrer" className="mt-1 block">
-                                <img src={`/uploads/payments/${o.payment.screenshot_name}`} alt="Payment screenshot" className="max-h-36 w-full rounded-sm object-contain border border-blue-100" />
-                              </a>
+                              <p className="mb-1 text-[10px] font-bold uppercase tracking-wide text-blue-600">Student's UTR</p>
+                              <p className="text-[11px] text-gray-600">UTR: <b>{o.payment.utr_number}</b></p>
+                              <p className="mt-1 text-[10px] text-gray-500">Match it against the credit SMS in your UPI/bank app — no screenshot needed.</p>
                             </div>
                           )}
                           <button onClick={() => confirmPayment(o.id)} className="mt-2 w-full rounded-sm bg-primary px-3 py-2 text-sm font-bold text-white hover:bg-primary">Payment Received</button>

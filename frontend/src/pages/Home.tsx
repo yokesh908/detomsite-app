@@ -10,8 +10,7 @@ import {
 } from '../types/localApi'
 import { getLocalSession } from '../utils/session'
 import { addProductToCart } from '../utils/cart'
-
-const gradients = ['from-emerald-500 to-emerald-700', 'from-amber-400 to-orange-500', 'from-emerald-600 to-emerald-800', 'from-teal-400 to-emerald-600']
+import { getShopImage } from '../utils/shopImages'
 
 interface BatchInfo {
   batch_type: 'Afternoon' | 'Night'
@@ -144,14 +143,10 @@ export function Home() {
             <Link to="/shops" className="text-sm font-semibold text-primary hover:text-primary-dark">View all</Link>
           </div>
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            {featured.map((shop, i) => (
+            {featured.map(shop => (
               <Link key={shop.id} to={`/shop/${shop.id}`}
                 className="group overflow-hidden rounded-[24px] border border-primary-light/30 bg-white shadow-[0_10px_35px_rgba(15,118,110,0.08)] transition-all hover:-translate-y-1 hover:shadow-[0_16px_45px_rgba(15,118,110,0.16)]">
-                {shop.shop_image ? (
-                  <img src={shop.shop_image} alt={shop.name} className={`h-28 w-full object-cover`} />
-                ) : (
-                  <div className={`h-28 bg-gradient-to-br ${gradients[i % gradients.length]}`} />
-                )}
+                <img src={shop.shop_image || getShopImage(shop.category)} alt={`${shop.name} food`} className="h-28 w-full object-cover" onError={event => { event.currentTarget.src = getShopImage() }} />
                 <div className="p-4">
                   <div className="flex items-start justify-between gap-2">
                     <div><h3 className="font-bold text-primary-dark">{shop.name}</h3><p className="text-sm font-medium text-slate-500">{shop.category}</p></div>
@@ -178,14 +173,10 @@ export function Home() {
           !query && <div className="rounded-[24px] border border-dashed border-primary-light/50 bg-slate-50 p-10 text-center text-slate-500">No shops have joined DETOMSITE yet.</div>
         ) : (
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            {filteredShops.map((shop, i) => (
+            {filteredShops.map(shop => (
               <Link key={shop.id} to={`/shop/${shop.id}`}
                 className="group overflow-hidden rounded-[24px] border border-primary-light/30 bg-white shadow-[0_10px_35px_rgba(15,118,110,0.08)] transition-all hover:-translate-y-1 hover:shadow-[0_16px_45px_rgba(15,118,110,0.16)]">
-                {shop.shop_image ? (
-                  <img src={shop.shop_image} alt={shop.name} className="h-28 w-full object-cover" />
-                ) : (
-                  <div className={`h-28 bg-gradient-to-br ${gradients[i % gradients.length]}`} />
-                )}
+                <img src={shop.shop_image || getShopImage(shop.category)} alt={`${shop.name} food`} className="h-28 w-full object-cover" onError={event => { event.currentTarget.src = getShopImage() }} />
                 <div className="p-4">
                   <div className="flex items-start justify-between gap-2">
                     <div><h3 className="font-bold text-primary-dark">{shop.name}</h3><p className="text-sm font-medium text-slate-500">{shop.category}</p></div>

@@ -1566,7 +1566,7 @@ function WhatsAppCenter() {
       seenRef.current.add(item.id)
       setPending(p => p.filter(x => x.id !== item.id))
     } catch { setMsg('Could not mark WhatsApp as sent') }
-    finally { setBusy(b => b.filter(x => x.id !== item.id)) }
+    finally { setBusy(b => b.filter(x => x !== item.id)) }
   }
 
   const sendAll = async () => {

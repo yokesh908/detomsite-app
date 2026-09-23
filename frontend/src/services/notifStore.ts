@@ -7,7 +7,7 @@ import { LocalNotification } from '../types/localApi'
    pausing while the tab is hidden stops background traffic entirely. */
 
 let cache: LocalNotification[] = []
-let timer: ReturnType<typeof setInterval> | null = null
+let timer: number | null = null
 let subscriberCount = 0
 let running = false
 let inflight: Promise<void> | null = null

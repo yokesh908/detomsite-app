@@ -5,6 +5,7 @@ import { canOrderFromShop, LocalProduct, LocalShop, shopStatusText } from '../..
 import { addProductToCart, getCart } from '../../utils/cart'
 import { usePolling } from '../../hooks/usePolling'
 import { same } from '../../utils/same'
+import { getShopImage } from '../../utils/shopImages'
 
 export function ShopDetail() {
   const { shopId } = useParams<{ shopId: string }>()
@@ -68,6 +69,7 @@ export function ShopDetail() {
       <div className="bg-gradient-to-br from-emerald-950 via-emerald-900 to-emerald-800 text-white">
         <div className="mx-auto max-w-4xl px-4 pt-6 pb-8">
           <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+            <img src={shop.shop_image || getShopImage(shop.category)} alt={`${shop.name} food`} className="h-28 w-full rounded-card object-cover sm:order-2 sm:h-32 sm:w-48" onError={event => { event.currentTarget.src = getShopImage() }} />
             <div>
               <h1 className="text-3xl font-black tracking-tight">{shop.name}</h1>
               <p className="mt-2 text-sm font-medium text-emerald-100/80">{shop.category} by {shop.shopkeeper_name}</p>

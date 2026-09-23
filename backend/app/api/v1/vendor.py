@@ -225,12 +225,15 @@ def login(data: VendorLoginRequest, request: Request):
     if not rate_allow("vendor_login", f"{data.username}:{ip}", max_attempts=40, window_sec=300):
         raise HTTPException(status_code=429, detail="Too many sign-in attempts — please wait a few minutes and try again.")
     user = db.get_user_by_username(data.username)
-    if not user:
-        raise HTTPException(status_code=401, detail="No account found with this username. Check the spelling or register first.")
+    # PENTEST FIX: identical message for "no such user" and "wrong password",
+    # and the password is checked BEFORE the role hint — otherwise the distinct
+    # 401/403 replies (and their order) let an attacker enumerate which
+    # shop usernames exist on the platform.
+    bad_credentials = "Invalid username or password."
+    if not user or not verify_password(data.password, user["password_hash"]):
+        raise HTTPException(status_code=401, detail=bad_credentials)
     if user["role"] != "shopkeeper":
         raise HTTPException(status_code=403, detail=f"This account is a {user['role']} account — please sign in from the {user['role']} portal instead.")
-    if not verify_password(data.password, user["password_hash"]):
-        raise HTTPException(status_code=401, detail="Incorrect password. Please try again.")
     rate_reset("vendor_login", f"{data.username}:{ip}")
 
     token_data = {
@@ -408,8 +411,9 @@ def get_orders(current_vendor: dict = Depends(get_current_vendor)):
     if not my_shop:
         return []
     orders = _shop_orders_merged(my_shop["id"])
-    # Enrich each order with its payment record (UTR + uploaded screenshot)
-    # so the shop can verify payment screenshots right from the order card.
+    # Enrich each order with its payment record (method, status, UTR) so the
+    # shop can verify the payment right from the order card. The screenshot
+    # upload system was removed — UTR is the only proof the platform accepts.
     # Multi sub-orders pay on the PARENT order id, so resolve that one.
     for o in orders:
         pay_key = o.get("parent_order_id") if o.get("is_sub_order") else o["id"]
@@ -420,7 +424,6 @@ def get_orders(current_vendor: dict = Depends(get_current_vendor)):
                 "method": payment.get("method"),
                 "status": payment.get("status"),
                 "utr_number": payment.get("utr_number"),
-                "screenshot_name": payment.get("screenshot_name"),
                 "amount": payment.get("amount"),
             }
     return orders

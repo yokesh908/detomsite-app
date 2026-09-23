@@ -19,4 +19,10 @@ python-slugify==8.0.1
 razorpay==2.0.1
 psycopg2-binary==2.9.9
 pywebpush==1.14.1
+# The shared read cache speaks the Upstash/Vercel KV REST API over httpx (already
+# a dependency), so no Redis client is required there. Install `redis` only when
+# using a plain REDIS_URL (Redis Cloud / Railway / Render Key Value / self-hosted):
+#   pip install "redis>=5.0"
+# Leave it out and the cache transparently falls back to the Postgres app_cache
+# table; nothing breaks either way (see app/core/redis_cache.py).
 setuptools>=70

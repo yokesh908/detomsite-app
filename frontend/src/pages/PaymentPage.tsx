@@ -1,5 +1,6 @@
 import { FormEvent, useEffect, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
+import QRCode from 'qrcode'
 import api from '../services/api'
 import { LocalPaymentSettings, LocalParentOrder } from '../types/localApi'
 import { clearCart, getCartByShop, toPaymentGroup } from '../utils/cart'
@@ -16,7 +17,7 @@ export function PaymentPage() {
   const [ps, setPs] = useState<LocalPaymentSettings | null>(null)
   const [method, setMethod] = useState<'manual' | 'cod'>('manual')
   const [utr, setUtr] = useState('')
-  const [ssFile, setSsFile] = useState<File | null>(null)
+  const [slot, setSlot] = useState<'Afternoon' | 'Night'>('Afternoon')
   const [loc, setLoc] = useState(session?.default_delivery_location || 'Hostel A Block 201')
   const [phone, setPhone] = useState(session?.phone || '')
   const [locating, setLocating] = useState(false)
@@ -25,6 +26,10 @@ export function PaymentPage() {
   const groups = getCartByShop()
   const total = groups.reduce((sum, g) => sum + g.subtotal, 0)
   const manualReady = Boolean(ps?.manual_enabled && ps.upi_id)
+  const upiUrl = manualReady
+    ? `upi://pay?pa=${encodeURIComponent((ps?.upi_id || '').trim())}&pn=${encodeURIComponent((ps?.receiver_name || 'DETOMSITE').trim())}&am=${upiAmount(total).toFixed(2)}&cu=INR&mode=04&tn=${encodeURIComponent('DETOMSITE Multi-Shop Order')}`
+    : ''
+  const [upiQrCode, setUpiQrCode] = useState('')
 
   useEffect(() => {
     api.get<LocalPaymentSettings>('/local/payment-settings')
@@ -37,6 +42,18 @@ export function PaymentPage() {
   useEffect(() => {
     if (ps && !manualReady && method === 'manual') setMethod('cod')
   }, [ps, manualReady, method])
+
+  useEffect(() => {
+    let active = true
+    if (!upiUrl) {
+      setUpiQrCode('')
+      return () => { active = false }
+    }
+    QRCode.toDataURL(upiUrl, { width: 220, margin: 2, errorCorrectionLevel: 'M' })
+      .then(url => { if (active) setUpiQrCode(url) })
+      .catch(() => { if (active) setUpiQrCode('') })
+    return () => { active = false }
+  }, [upiUrl])
 
   const reverseGeocode = async (lat: number, lon: number): Promise<string> => {
     try {
@@ -82,7 +99,7 @@ export function PaymentPage() {
 
     if (method === 'manual') {
       if (!manualReady) { setError('Manual payment not configured'); return }
-      if (!utr.trim() || !ssFile) { setError('Enter UTR and attach screenshot'); return }
+      if (!utr.trim()) { setError('Enter the UTR from your UPI app — it is the only proof we need'); return }
     }
 
     setLoading(true)
@@ -94,15 +111,15 @@ export function PaymentPage() {
         student_phone: phone,
         student_email: session?.email || '',
         delivery_location: loc,
-        delivery_slot: method === 'cod' ? 'COD' : 'UTR',
+        delivery_slot: slot,
         payment_method: method === 'cod' ? 'COD' : 'UTR',
       })
 
-      // Step 2: If UPI/UTR, submit the payment record and upload the real
-      // screenshot file. Verification is done by the admin/backend (frontend
-      // never decides payment success). If payment delivery fails the ORDER
-      // already exists — never re-submit it (that created duplicate orders),
-      // just flag the payment as pending and let the student retry later.
+      // Step 2: submit the UTR payment record (the UTR is the ONLY proof —
+      // screenshots were removed). Verification is done by the admin/backend
+      // (the frontend never decides payment success). If the save fails the
+      // ORDER already exists — never re-submit it (that created duplicate
+      // orders); flag it so the result page offers a UTR retry.
       let paymentPending = false
       if (method === 'manual') {
         try {
@@ -110,18 +127,12 @@ export function PaymentPage() {
             order_id: order.data.id,
             amount: total,
             method: 'Manual UTR',
-            utr_number: utr,
-            screenshot_name: ssFile?.name,
+            utr_number: utr.trim().toUpperCase(),
           })
-          if (ssFile) {
-            const fd = new FormData()
-            fd.append('file', ssFile)
-            fd.append('order_id', order.data.id)
-            fd.append('utr_number', utr)
-            await api.post('/local/payments/upload', fd)
-          }
-        } catch {
+        } catch (err: any) {
           paymentPending = true
+          const detail = err?.response?.data?.detail || ''
+          if (detail) sessionStorage.setItem('payment_pending_detail', String(detail))
         }
       }
 
@@ -137,7 +148,7 @@ export function PaymentPage() {
 
   const canPay = method === 'cod'
     ? true
-    : manualReady && Boolean(utr.trim()) && Boolean(ssFile)
+    : manualReady && Boolean(utr.trim())
 
   return (
     <div className="min-h-screen bg-white">
@@ -209,22 +220,33 @@ export function PaymentPage() {
                         <p>Pay to: {ps?.receiver_name || 'Merchant'}</p>
                         <p className="font-mono font-bold text-primary">{ps?.upi_id}</p>
                         {ps?.instructions && <p className="mt-1 text-gray-500">{ps.instructions}</p>}
+                        {upiQrCode && (
+                          <div className="mt-4 flex flex-col items-center rounded-btn border border-primary-light/60 bg-white p-4 text-center">
+                            <img src={upiQrCode} alt={`Scan to pay ₹${total}`} className="h-52 w-52" />
+                            <p className="mt-2 text-sm font-bold text-primary-dark">Scan to pay ₹{total}</p>
+                            <p className="mt-1 text-xs text-gray-500">Open your camera or UPI app and scan this code</p>
+                          </div>
+                        )}
                         <a
-                          href={`upi://pay?pa=${encodeURIComponent((ps?.upi_id || '').trim())}&pn=${encodeURIComponent((ps?.receiver_name || 'DETOMSITE').trim())}&am=${upiAmount(total).toFixed(2)}&cu=INR&mode=04&tn=${encodeURIComponent('DETOMSITE Multi-Shop Order')}`}
+                          href={upiUrl}
                           className="mt-3 flex w-full items-center justify-center gap-2 rounded-btn bg-primary px-4 py-3 text-sm font-bold text-white transition-all hover:bg-primary">
                           <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .4 2 .7 2.9a2 2 0 0 1-.4 2.1L8.1 10a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.9.6 2.9.7a2 2 0 0 1 1.6 2Z" /></svg>
                           Pay via UPI App (GPay / PhonePe / Paytm)
                         </a>
-                        <p className="mt-2 text-xs text-primary">Opens your UPI app — pay now, then enter the UTR and upload the screenshot below.</p>
+                        <p className="mt-2 text-xs text-primary">Opens your UPI app — pay now, then enter the UTR below (the only proof we need).</p>
                       </div>
                     ) : <p className="mt-2 text-sm text-gray-400">Admin hasn't configured payment yet</p>}
                   </div>
                   <div className="grid gap-3 md:grid-cols-2">
                     <input value={utr} onChange={e => setUtr(e.target.value)}
                       className="rounded-btn border-2 border-gray-200 px-4 py-2.5 text-sm text-gray-900 placeholder-gray-400 outline-none focus:border-primary focus:shadow-emerald-sm" placeholder="UTR / Transaction ID" required={method === 'manual'} />
-                    <input onChange={e => setSsFile(e.target.files?.[0] || null)}
-                      className="rounded-btn border-2 border-gray-200 px-4 py-2.5 text-sm text-gray-900 outline-none focus:border-primary focus:shadow-emerald-sm" type="file" accept="image/*,.pdf" required={method === 'manual'} />
+                    <select value={slot} onChange={e => setSlot(e.target.value as 'Afternoon' | 'Night')}
+                      className="rounded-btn border-2 border-gray-200 px-4 py-2.5 text-sm text-gray-900 outline-none focus:border-primary">
+                      <option value="Afternoon">Afternoon slot · deliver 1:00 – 1:30 PM</option>
+                      <option value="Night">Night slot · deliver 7:30 – 8:00 PM</option>
+                    </select>
                   </div>
+                  <p className="text-xs text-gray-500">The <b>UTR is the only proof we need</b> — you'll find it in your UPI app's payment-success screen (e.g. UPI ref / txn ID). No screenshot upload.</p>
                 </div>
               )}
 

@@ -67,7 +67,7 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
 interface Shop { id: string; name: string; category: string; description: string; rating: number; opening_time: string; closing_time: string; present: number; status: string; approval_status: string; shopkeeper_email: string; shopkeeper_name: string; phone: string; upi_id: string; upi_enabled: number; cod_enabled: number; orders_today: number; revenue_today: number; current_token: number }
 interface Product { id: string; shop_id: string; name: string; description: string; price: number; pending_price: number | null; category: string; inventory: number; prep_time: number; available: number }
 interface Order { id: string; token: number; student_name: string; student_phone: string; shop_id: string; shop_name: string; items: string; total: number; delivery_location: string; delivery_slot: string; status: string; payment_method?: string; created_at: string }
-interface Payment { id: string; order_id: string; amount: number; method: string; status: string; utr_number: string | null; screenshot_name: string | null; created_at: string }
+interface Payment { id: string; order_id: string; amount: number; method: string; status: string; utr_number: string | null; created_at: string }
 interface CartItem { product_id: string; shop_id: string; shop_name: string; name: string; price: number; category: string }
 interface Notification { id: string; title: string; message: string; order_id: string | null; status: string | null; is_read: number; created_at: string }
 interface PaymentSettings { manual_enabled: boolean; upi_id: string; receiver_name: string; instructions: string }
@@ -1156,7 +1156,7 @@ function PaymentPage() {
         })
         lastOrder = order.data
         /* Record payment for each sub-order */
-        await api.post('/local/payments', { order_id: order.data.id, amount: shopTotal, method: method === 'cod' ? 'COD' : 'Manual UTR', utr_number: '', screenshot_name: '' })
+        await api.post('/local/payments', { order_id: order.data.id, amount: shopTotal, method: method === 'cod' ? 'COD' : 'Manual UTR', utr_number: '' })
       }
 
       if (method === 'cod') {
@@ -1321,7 +1321,6 @@ function OrderResultPage() {
   const { orderId } = useParams()
   const [order, setOrder] = useState<Order | null>(null); const [shop, setShop] = useState<Shop | null>(null); const [ps, setPs] = useState<PaymentSettings | null>(null)
   const [cancelling, setCancelling] = useState(false); const [cancelErr, setCancelErr] = useState('')
-  const [screenshot, setScreenshot] = useState<File | null>(null); const [uploading, setUploading] = useState(false); const [uploadMsg, setUploadMsg] = useState(''); const [uploadErr, setUploadErr] = useState(''); const [screenshotUrl, setScreenshotUrl] = useState('')
   const [utr, setUtr] = useState(''); const [utrSaving, setUtrSaving] = useState(false); const [utrMsg, setUtrMsg] = useState(''); const [utrErr, setUtrErr] = useState('')
   const saveUtr = async () => {
     if (!orderId || !utr.trim()) return
@@ -1334,21 +1333,6 @@ function OrderResultPage() {
       }
     } catch (err: any) { setUtrErr(apiError(err, 'Could not save the UTR — please try again')) }
     finally { setUtrSaving(false) }
-  }
-  const uploadScreenshot = async () => {
-    if (!screenshot || !orderId) return
-    setUploading(true); setUploadMsg(''); setUploadErr('')
-    try {
-      const fd = new FormData(); fd.append('file', screenshot); fd.append('order_id', orderId)
-      if (utr.trim()) fd.append('utr_number', utr.trim().toUpperCase())
-      const res = await api.post('/local/payments/upload', fd)
-      setUploadMsg(res.data?.message || 'Screenshot uploaded — the shop will verify your payment.')
-      setScreenshotUrl(res.data?.screenshot_url || '')
-      setScreenshot(null)
-      if (res.data?.matched) setUtrMsg('UTR matched the bank SMS — your order is confirmed!')
-      const s = await api.get<Order>(`/local/orders/${orderId}`).catch(() => null); if (s?.data) setOrder(s.data)
-    } catch (err: any) { setUploadErr(apiError(err, 'Upload failed — please try again')) }
-    finally { setUploading(false) }
   }
   /* Cancellation follows the delivery window: orders placed inside a window
      (morning → 12:30 PM, afternoon → 6:00 PM) are auto-accepted, and the
@@ -1443,24 +1427,7 @@ function OrderResultPage() {
                 </button>
                 {utrMsg && <p className="mt-1.5 text-[11px] font-semibold text-emerald-700">{utrMsg}</p>}
                 {utrErr && <p className="mt-1.5 text-[11px] font-semibold text-red-600">{utrErr}</p>}
-                <div className="my-3 h-px border-t border-dashed border-gold/30" />
-                <p className="text-xs font-bold text-gold-dark">Or upload the payment screenshot</p>
-                <p className="mt-0.5 text-[11px] leading-relaxed text-gold-dark">Attach the UPI screenshot so the shop can verify it manually.</p>
-                <input
-                  type="file" accept="image/*,.pdf"
-                  onChange={e => { setScreenshot(e.target.files?.[0] || null); setUploadMsg(''); setUploadErr('') }}
-                  className="mt-2 w-full text-xs"
-                />
-                {screenshot && (
-                  <p className="mt-1.5 text-[11px] font-semibold text-emerald-700">Selected: {screenshot.name} ({(screenshot.size / 1024).toFixed(0)} KB)</p>
-                )}
-                <button onClick={() => void uploadScreenshot()} disabled={!screenshot || uploading}
-                  className="mt-2 w-full rounded-btn bg-gold-dark px-4 py-2 text-xs font-bold text-white transition-colors hover:bg-gold disabled:cursor-not-allowed disabled:opacity-40">
-                  {uploading ? 'Uploading…' : (uploadMsg ? 'Screenshot uploaded ✓' : 'Upload Screenshot')}
-                </button>
-                {screenshotUrl && <img src={screenshotUrl} alt="Uploaded payment screenshot" className="mt-2 max-h-40 w-full rounded-card object-contain" />}
-                {uploadMsg && <p className="mt-1.5 text-[11px] font-semibold text-emerald-700">{uploadMsg}</p>}
-                {uploadErr && <p className="mt-1.5 text-[11px] font-semibold text-red-600">{uploadErr}</p>}
+                <p className="mt-2 text-[11px] leading-relaxed text-gold-dark">The <b>UTR is the only proof required</b> — no screenshot upload. You'll find it on your UPI app's payment-success screen (UPI ref / txn ID).</p>
               </div>
             </div>
           )

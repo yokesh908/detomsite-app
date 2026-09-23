@@ -246,16 +246,15 @@ class TestAgentEndpointsFailClosed:
         assert res.status_code not in (401, 503), res.text
 
 
-class TestUploadLimits:
-    async def test_oversized_screenshot_is_rejected(self, client, monkeypatch):
-        from app.api.v1.local import MAX_UPLOAD_BYTES
-
+class TestScreenshotSystemRemoved:
+    async def test_upload_endpoint_is_gone(self, client, monkeypatch):
+        """The screenshot upload system was deleted — the UTR is the only
+        accepted proof. The old /payments/upload route must no longer exist."""
         headers, order, _shop, _product = await _student_with_order(client, monkeypatch)
-        blob = b"\x89PNG\r\n\x1a\n" + b"0" * (MAX_UPLOAD_BYTES + 1024)
         res = await client.post(
             "/api/v1/local/payments/upload",
             headers=headers,
             data={"order_id": order["id"], "utr_number": "UTR9"},
-            files={"file": ("proof.png", blob, "image/png")},
+            files={"file": ("proof.png", b"\x89PNG\r\n\x1a\n12345", "image/png")},
         )
-        assert res.status_code == 413
+        assert res.status_code in (404, 405), res.text

@@ -1,0 +1,36 @@
+# What the Vercel CLI uploads when deploying from the REPOSITORY ROOT.
+#
+# detomsite-frontend (Root Directory "frontend") and detomsite-student (Root
+# Directory "frontend/student") must be deployed from the repo root, otherwise
+# Vercel reports: The specified Root Directory "frontend" does not exist.
+# That upload used to be ~143 MB, almost all of it Android sources and build
+# outputs that no Vite build ever reads — this file cuts it to a few MB and
+# makes those deploys much faster and less flaky.
+#
+# Patterns are anchored with a leading "/" (.gitignore semantics), so nothing
+# inside frontend/ or backend/ is excluded by accident. Deploys that run from
+# ./backend or ./frontend/<portal> do not read this file at all.
+
+# Android app sources + Gradle intermediates (~89 MB). The APKs the sites
+# actually publish live inside frontend/*/public and are deliberately kept.
+/mobile/
+
+# Ad-hoc APK copies at the repo root (the published ones are in frontend/).
+/*.apk
+
+# Deploy/inspection scratch output that was committed or left behind.
+/verification/
+/verification2/
+/verify-final/
+/*.js
+/idx-*.html
+/index-live.html
+/fresh-index.html
+/bundle-name.txt
+/bundle-new-*
+/*-login.json
+/backend-deploy-check.txt
+/backend/backend_commit.txt
+
+# Local build output — Vercel runs the build itself.
+/frontend/*/dist/

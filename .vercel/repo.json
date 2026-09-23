@@ -1,0 +1,11 @@
+{
+  "remoteName": "origin",
+  "projects": [
+    {
+      "id": "prj_cZksr4YVlzwUZXzCBT6jYpEvB9eS",
+      "name": "detomsite-backend",
+      "directory": "backend",
+      "orgId": "team_AeznTxmDmdbQm8nxPjuaibn3"
+    }
+  ]
+}

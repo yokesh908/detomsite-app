@@ -8,11 +8,15 @@ import uuid
 # SQLite DB (app/core/local_demo_db.py, test-only) so no test user/shop/order
 # can leak into the live Supabase project (this happened once; the rows had to
 # be cleaned by hand). The store facade is swapped to the test module via
-# store._use_test_store() in the session fixture below. The shared Redis cache
-# (Vercel KV) is disabled too, so tests never write into a real KV store.
+# store._use_test_store() in the session fixture below. Both shared caches
+# (Redis/Vercel KV and the Supabase app_cache table) are disabled too, so tests
+# never read or write a real cache store.
 os.environ["LOCAL_DB_PATH"] = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".pytest_local.db")
 os.environ["KV_REST_API_URL"] = ""
 os.environ["KV_REST_API_TOKEN"] = ""
+os.environ["UPSTASH_REDIS_REST_URL"] = ""
+os.environ["UPSTASH_REDIS_REST_TOKEN"] = ""
+os.environ["REDIS_URL"] = ""
 # Use explicit dummy settings before importing the app. Never load live DB
 # credentials from backend/.env; the session fixture supplies the test store.
 os.environ["DEBUG"] = "True"

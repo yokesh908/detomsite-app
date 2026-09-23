@@ -83,15 +83,23 @@ class TestFeedback:
             "email": "second@campus.local",
         })
 
-        # Register our own admin (so the test never depends on whatever
-        # admin account/password happens to exist in the active database)
+        # Create our own admin (so the test never depends on whatever
+        # admin account/password happens to exist in the active database).
+        # PENTEST FIX: public registration refuses role=admin now, so the admin
+        # row is created server-side here — exactly how production does it
+        # (ensure_admin_user) — and only the LOGIN goes through the API.
+        from app.core.security import hash_password
+        from app.core.store import store as _dbstore
+
         admin_username = self._unique("feedback_admin")
-        await client.post("/api/v1/local/auth/register", json={
-            "username": admin_username,
-            "password": "admin_pass_123",
-            "name": "Feedback Admin",
-            "role": "admin",
-        })
+        _dbstore.register_user(
+            username=admin_username,
+            password_hash=hash_password("admin_pass_123"),
+            name="Feedback Admin",
+            role="admin",
+            email="",
+            phone="",
+        )
         login = await client.post("/api/v1/admin/login", json={
             "username": admin_username,
             "password": "admin_pass_123",

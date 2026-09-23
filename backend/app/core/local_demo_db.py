@@ -2401,23 +2401,6 @@ def get_payment_by_utr(utr_number: str) -> dict[str, Any] | None:
         return dict(row) if row else None
 
 
-def update_payment_record(order_id: str, screenshot_name: str, utr_number: str | None = None) -> dict[str, Any] | None:
-    """Attach a payment screenshot (and optional UTR) to the latest payment for an order."""
-    with _connect() as connection:
-        row = connection.execute(
-            "SELECT * FROM payments WHERE order_id = ? ORDER BY rowid DESC LIMIT 1",
-            (order_id,),
-        ).fetchone()
-        if not row:
-            return None
-        connection.execute(
-            "UPDATE payments SET screenshot_name = ?, utr_number = COALESCE(?, utr_number) WHERE id = ?",
-            (screenshot_name, utr_number, row["id"]),
-        )
-        updated = connection.execute("SELECT * FROM payments WHERE id = ?", (row["id"],)).fetchone()
-        return dict(updated) if updated else None
-
-
 def get_payment_by_id(payment_id: str) -> dict[str, Any] | None:
     with _connect() as connection:
         row = connection.execute("SELECT * FROM payments WHERE id = ?", (payment_id,)).fetchone()

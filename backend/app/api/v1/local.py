@@ -1,20 +1,16 @@
 """
 API routes backed by Supabase Postgres (the only database).
 """
-from fastapi import APIRouter, HTTPException, Depends, Header, UploadFile, File, Form, Request
+from fastapi import APIRouter, HTTPException, Depends, Header, Request
 from pydantic import BaseModel, EmailStr, Field, field_validator
 from datetime import datetime
 import asyncio
-import os
 import re
 import secrets
-import threading
 
 from app.core.config import settings
-from app.core import ttl_cache
-from app.core import shared_cache
+from app.core import read_cache
 from app.core.rate_limit import allow as rate_allow, reset as rate_reset, client_ip as rate_ip
-from app.core.uploads import ensure_uploads_dir
 from app.core.store import store as db
 from app.core.user_store import persist_user_profile
 from app.core.order_slots import (
@@ -39,10 +35,13 @@ router = APIRouter()
 # hand-crafted request can't inflate a bill/stock row to an absurd value.
 MAX_LINE_QUANTITY = 99
 
-# Largest payment screenshot accepted (bytes). Screenshots are phone photos of a
-# UPI receipt, so 5 MB is generous; the cap stops a hand-crafted request from
-# filling the platform's temp disk.
-MAX_UPLOAD_BYTES = 5 * 1024 * 1024
+# Payment verification is UTR-ONLY: the student pastes the UPI transaction
+# reference (a string stored in the database) and the shop's bank credit SMS
+# carrying the same UTR auto-confirms the order. The old screenshot-upload
+# system was removed — files written to a serverless /tmp directory vanished
+# between invocations (which is why payments "didn't save"), and a UTR is the
+# stronger proof anyway.
+
 
 
 def _clean_payment_method(value: str, allowed: tuple[str, ...]) -> str:
@@ -82,34 +81,15 @@ def _push_admin(title: str, message: str, tag: str = "admin-alert") -> None:
 
 
 async def _cached_read(ttl: float, key: str, loader, *args, **kwargs):
-    """Serve ``loader()`` from a short TTL cache when possible. ``key`` must
-    vary per query params so filtered results never cross wires. The global
-    cache is cleared by the app-level middleware after every successful write.
+    """Serve ``loader()`` from the layered read cache (memory → Redis → Postgres).
 
-    Two layers: the in-process cache (fast when a request reuses the same
-    serverless instance) and the optional shared Redis cache (Vercel KV) so
-    every instance serves warm data at single-digit-ms latency. Falls back to
-    recompute whenever the shared store is unavailable."""
-    cache_key = f"{key}:{args}:{sorted(kwargs.items())}"
-    hit = ttl_cache.get(cache_key)
-    if hit is None and shared_cache.enabled():
-        hit = await asyncio.to_thread(shared_cache.get, cache_key)
-        if hit is not None:
-            ttl_cache.set(cache_key, hit, ttl)
-    if hit is not None:
-        return hit
-    value = await _db(loader, *args, **kwargs)
-    ttl_cache.set(cache_key, value, ttl)
-    if shared_cache.enabled():
-        # Fire-and-forget the cross-instance write so a cold load never waits
-        # on an extra DB round-trip just to refresh the shared cache.
-        try:
-            threading.Thread(
-                target=shared_cache.set_pair, args=(cache_key, value, ttl), daemon=True
-            ).start()
-        except Exception as e:
-            logger.debug(f"shared cache write skipped: {e}")
-    return value
+    Thin wrapper over :func:`app.core.read_cache.cached_read` so every endpoint
+    in this module keeps the same call shape; ``key`` must vary per query params
+    (that happens automatically — the arguments are folded into the cache key) so
+    filtered results never cross wires. Every layer is invalidated after a write
+    by the app-level middleware.
+    """
+    return await read_cache.cached_read(ttl, key, loader, *args, **kwargs)
 
 
 _last_auto_confirm_run = 0.0
@@ -332,7 +312,6 @@ class LocalPaymentCreate(BaseModel):
     amount: int = Field(..., ge=1, le=1_000_000)
     method: str
     utr_number: str | None = None
-    screenshot_name: str | None = None
 
     @field_validator("method")
     @classmethod
@@ -539,6 +518,13 @@ async def local_register(data: LocalAuthRegister, request: Request):
     if not rate_allow("register", rate_ip(request), max_attempts=40, window_sec=3600):
         raise HTTPException(status_code=429, detail="Too many sign-up attempts from this network — try again later.")
 
+    # PENTEST FIX (critical): public registration must never mint an admin.
+    # Previously role="admin" here created a real admin row + JWT, handing the
+    # whole platform to anyone who could POST this endpoint. Admin accounts are
+    # created server-side only (ensure_admin_user from env credentials).
+    if data.role == "admin":
+        raise HTTPException(status_code=403, detail="Admin accounts cannot be created through public registration.")
+
     password_hash_value = await asyncio.to_thread(hash_password, data.password)
     user, conflict = await _db(
         db.register_user,
@@ -583,11 +569,18 @@ async def local_login(data: LocalAuthLogin, request: Request):
         raise HTTPException(status_code=429, detail="Too many sign-in attempts — please wait a few minutes and try again.")
 
     user = await _db(db.get_user_by_username, data.username)
+    # PENTEST FIX: identical message for "no such user" and "wrong password" —
+    # distinct messages let an attacker enumerate which usernames exist. The
+    # dummy hash runs bcrypt even for an unknown username, so both branches
+    # take the same TIME as well as the same message.
+    bad_credentials = "Invalid username or password."
+    if not await asyncio.to_thread(
+        verify_password, data.password,
+        (user or {}).get("password_hash") or await asyncio.to_thread(hash_password, "x" * 16),
+    ):
+        raise HTTPException(status_code=401, detail=bad_credentials)
     if not user:
-        raise HTTPException(status_code=401, detail="No account found with this username. Check the spelling or register first.")
-
-    if not await asyncio.to_thread(verify_password, data.password, user["password_hash"]):
-        raise HTTPException(status_code=401, detail="Incorrect password. Please try again.")
+        raise HTTPException(status_code=401, detail=bad_credentials)
 
     rate_reset("login", f"{data.username}:{ip}")
 
@@ -1229,24 +1222,73 @@ class LocalPaymentUtr(BaseModel):
 
 
 @router.post("/payments/utr")
-async def submit_payment_utr(data: LocalPaymentUtr, current_user: dict = Depends(get_current_local_user)):
+async def submit_payment_utr(data: LocalPaymentUtr, request: Request, current_user: dict = Depends(get_current_local_user)):
     """The student pastes the UPI transaction UTR after paying.
 
     It is stored against the order's payment record. When the shopkeeper's
     bank credit SMS (with the same UTR) arrives via ``/sms/incoming`` the two
     sides match and the order is auto-confirmed. If the bank SMS arrived first,
     an admin must review it; historical UTR-only logs cannot prove the amount.
-    """
-    order = await _db(db.get_order, data.order_id)
-    if not order:
-        raise HTTPException(status_code=404, detail="Order not found")
-    if current_user.get("role") != "admin" and not _same_student(current_user, order):
-        raise HTTPException(status_code=403, detail="You can only confirm payment for your own orders")
 
+    UTR is the ONLY proof the platform accepts now (the screenshot upload
+    system was removed). If the checkout failed to create the payment row
+    (the old "record didn't save" bug), this endpoint creates it on the spot
+    from the SERVER-side order total — a UTR paste always saves.
+    """
+    # PENTEST FIX: bound UTR submissions per student+IP — every call writes to
+    # (or probes) the payment record, so it must not be an unthrottled write
+    # primitive. 12 per 5 minutes is far beyond any real retry pattern.
+    if not rate_allow("utr", f"{current_user.get('id')}:{rate_ip(request)}", max_attempts=12, window_sec=300):
+        raise HTTPException(status_code=429, detail="Too many UTR attempts — please wait a few minutes and try again.")
+
+    # PENTEST FIX: a UTR is an alphanumeric reference (UPI UTRs are 12 digits).
+    # Reject anything else BEFORE touching the order so junk/symbol-laden input
+    # never reaches a query, and the student gets a message they can act on.
     utr = (data.utr_number or "").strip().upper()
+    if not utr.isalnum() or not 6 <= len(utr) <= 40:
+        raise HTTPException(
+            status_code=422,
+            detail="That doesn't look like a UTR — it is usually a 12-digit number with no spaces or symbols.",
+        )
+
+    # Resolve across single orders AND multi-shop parent orders — the multi
+    # checkout pays one bill whose payment row lives on the parent, so the old
+    # orders-only lookup made every parent UTR save 404 ("Order not found").
+    order, is_parent = await _resolve_owned_order(data.order_id, current_user)
+
+    server_total = int(round(float(order.get("total") or 0)))
+
+    # One UTR = one payment: both databases enforce a unique index on
+    # payments.utr_number. Pre-check so a re-used reference gets a FRIENDLY
+    # 409 instead of the raw 500 crash students saw as "it didn't save".
+    existing = await _db(db.get_payment_by_utr, utr)
+    if existing and str(existing.get("order_id") or "") != str(data.order_id):
+        raise HTTPException(
+            status_code=409,
+            detail="This UTR is already saved on another order — double-check the number, or contact support with your token.",
+        )
+
     payment = await _db(db.set_payment_utr, data.order_id, utr)
     if not payment:
-        raise HTTPException(status_code=400, detail="No payment record for this order yet — try again in a moment.")
+        if is_parent:
+            payment = await _db(
+                db.record_parent_payment, data.order_id, server_total, "Manual UTR", utr
+            )
+        else:
+            payment = await _db(
+                db.create_payment, data.order_id, server_total, "Manual UTR", utr
+            )
+    if not payment:
+        raise HTTPException(status_code=400, detail="Could not save the UTR for this order — please try again.")
+
+    # Multi-shop parents have no single bank-SMS hook yet — their UTR is
+    # verified by the admin in the Admin Center. Single orders auto-match.
+    if is_parent:
+        return {
+            "message": "UTR saved — the admin will verify your payment shortly.",
+            "payment": payment,
+            "order": None,
+        }
 
     # Bank SMS may have arrived before the student typed the UTR.
     confirmed = await _confirm_order_via_utr(utr)
@@ -1603,6 +1645,18 @@ async def add_payment(data: LocalPaymentCreate, current_user: dict = Depends(get
                 raise HTTPException(status_code=400, detail="This shop has turned off UPI payments.")
         # Razorpay method is validated in the create-razorpay-order endpoint
 
+    # One UTR = one payment (unique index on payments.utr_number in both DBs).
+    # A re-used reference must fail with a FRIENDLY 409 at checkout too — never
+    # the raw 500 students saw as "it didn't save".
+    utr_claim = (data.utr_number or "").strip().upper()
+    if utr_claim:
+        existing = await _db(db.get_payment_by_utr, utr_claim)
+        if existing and str(existing.get("order_id") or "") != str(data.order_id):
+            raise HTTPException(
+                status_code=409,
+                detail="This UTR is already saved on another order — double-check the number, or leave it empty and submit it on the order page.",
+            )
+
     if not is_parent:
         payment = await _db(
             db.create_payment,
@@ -1610,7 +1664,6 @@ async def add_payment(data: LocalPaymentCreate, current_user: dict = Depends(get
             data.amount,
             data.method,
             data.utr_number,
-            data.screenshot_name,
         )
     else:
         payment = await _db(
@@ -1619,7 +1672,6 @@ async def add_payment(data: LocalPaymentCreate, current_user: dict = Depends(get
             data.amount,
             data.method,
             data.utr_number,
-            data.screenshot_name,
         )
     if not payment:
         raise HTTPException(status_code=400, detail="Unable to create payment")
@@ -1630,8 +1682,8 @@ async def add_payment(data: LocalPaymentCreate, current_user: dict = Depends(get
     # the student paid, it is accepted right now.
     matched = None
     utr = (data.utr_number or "").strip().upper()
-    # Multi-shop parents have no single bank-SMS hook yet — their proof is
-    # verified by the admin from the uploaded screenshot/UTR instead.
+    # Multi-shop parents have no single bank-SMS hook yet — their UTR proof is
+    # verified by the admin in the Admin Center instead.
     if not is_parent and data.method == "Manual UTR" and utr:
         matched = await _confirm_order_via_utr(utr, raw_text=f"UTR:{utr} Paid")
     if matched:
@@ -1647,126 +1699,6 @@ async def add_payment(data: LocalPaymentCreate, current_user: dict = Depends(get
         )
     return payment
 
-
-@router.post("/payments/upload")
-async def upload_payment_screenshot(
-    file: UploadFile = File(...),
-    order_id: str = Form(...),
-    utr_number: str = Form(""),
-    current_user: dict = Depends(get_current_local_user),
-):
-    """Accept a payment screenshot for an order and attach it to the payment record.
-
-    Files are stored under ``/uploads/payments`` and served back at
-    ``/uploads/payments/<name>`` so the student and the shop can both see the
-    screenshot that proves the money was sent.
-    """
-    if not order_id:
-        raise HTTPException(status_code=400, detail="order_id is required")
-
-    # The order must exist before we accept an image for it. Multi-shop parents
-    # live in `parent_orders`, so look there too.
-    order = await _db(db.get_order, order_id)
-    is_parent = False
-    if not order:
-        order = await _db(db.get_parent_order, order_id)
-        is_parent = bool(order)
-    if not order:
-        raise HTTPException(status_code=404, detail="Order not found")
-    if current_user.get("role") != "admin" and not _same_student(current_user, order):
-        raise HTTPException(status_code=403, detail="You can only upload proof for your own orders")
-
-    # Validate the file is an image.
-    filename = (file.filename or "").split("/")[-1].split("\\")[-1]
-    ext = os.path.splitext(filename)[1].lower()
-    if ext not in (".png", ".jpg", ".jpeg", ".webp", ".gif", ".pdf"):
-        raise HTTPException(status_code=400, detail="Only image files (PNG, JPG, WEBP, GIF) or PDFs are allowed")
-    if not file.content_type or not file.content_type.startswith("image/"):
-        if file.content_type != "application/pdf":
-            raise HTTPException(status_code=400, detail="Please upload an image or PDF file")
-
-    # Safe unique name: order id + timestamp + sanitized original name.
-    safe_base = re.sub(r"[^a-zA-Z0-9_-]", "", os.path.splitext(filename)[0]) or "screenshot"
-    safe_base = safe_base[:40]
-    stored_name = f"{order_id}_{int(datetime.now().timestamp())}_{safe_base}{ext}"
-    uploads_dir = ensure_uploads_dir()
-    os.makedirs(uploads_dir, exist_ok=True)
-    dest_path = os.path.join(uploads_dir, stored_name)
-
-    try:
-        # Stream with a hard cap: the old unbounded copyfileobj happily wrote a
-        # multi-gigabyte body to the platform's temp disk.
-        written = 0
-        with open(dest_path, "wb") as out:
-            while True:
-                chunk = file.file.read(1024 * 256)
-                if not chunk:
-                    break
-                written += len(chunk)
-                if written > MAX_UPLOAD_BYTES:
-                    raise HTTPException(
-                        status_code=413,
-                        detail=f"Screenshot is too large — maximum {MAX_UPLOAD_BYTES // (1024 * 1024)} MB.",
-                    )
-                out.write(chunk)
-    except HTTPException:
-        # Don't leave the partial file behind for the truncated upload.
-        try:
-            os.remove(dest_path)
-        except OSError:
-            pass
-        raise
-    except Exception:
-        raise HTTPException(status_code=500, detail="Could not save the uploaded file")
-
-    # Attach the screenshot to the existing payment for this order (if any).
-    utr = (utr_number or "").strip() or None
-    if is_parent:
-        # Multi-shop parent: the ONE-bill payment lives on the parent row.
-        payment = await _db(
-            db.record_parent_payment,
-            order_id,
-            int(order.get("total", 0)),
-            "Manual UTR",
-            utr,
-            stored_name,
-        )
-    else:
-        payment = await _db(db.get_payment_by_order_id, order_id)
-        if payment:
-            payment = await _db(db.update_payment_record, order_id, stored_name, utr)
-        else:
-            payment = await _db(db.create_payment, order_id, int(order.get("total", 0)), "Manual UTR", utr, stored_name)
-
-    # If the UTR was attached with the screenshot, try the UTR auto-match too —
-    # the bank SMS may already have arrived (this only confirms when it did).
-    matched = None
-    if payment and utr:
-        matched = await _confirm_order_via_utr(utr)
-        if matched:
-            return {
-                "message": "Payment matched the bank's credit SMS — your order is confirmed!",
-                "payment": payment,
-                "order": matched,
-                "screenshot_url": f"/uploads/payments/{stored_name}",
-                "matched": {"utr": utr},
-            }
-
-    # Screenshot uploaded but not auto-matched — the proof needs eyeballing.
-    if payment and not matched:
-        _push_admin(
-            "New payment proof to verify",
-            f"{current_user.get('name') or current_user.get('username')} uploaded a payment screenshot"
-            f"{f' (UTR {utr})' if utr else ''} — verify in Admin Center → Payments.",
-            tag="payment-verify",
-        )
-
-    return {
-        "message": "Payment screenshot uploaded — the shop will verify your payment.",
-        "payment": payment,
-        "screenshot_url": f"/uploads/payments/{stored_name}",
-        "order": matched,
-    }
 
 
 # ─── Razorpay endpoints ───
@@ -1924,7 +1856,6 @@ async def verify_razorpay_payment(
                 amount=amount_rupees,
                 method="Razorpay",
                 utr_number=data.razorpay_payment_id,
-                screenshot_name=None,
             )
         if not payment:
             raise HTTPException(status_code=400, detail="Could not save payment record")
@@ -1956,13 +1887,14 @@ async def payment_settings():
 
 
 @router.patch("/payment-settings")
-async def patch_payment_settings(data: LocalPaymentSettings, authorization: Optional[str] = Header(None)):
-    """Update payment settings. Only an authenticated admin may change them."""
-    payload = None
-    if authorization and authorization.lower().startswith("bearer "):
-        payload = decode_token(authorization.split(" ", 1)[1].strip())
-    if not payload or payload.get("role") != "admin":
-        raise HTTPException(status_code=403, detail="Admin access required")
+async def patch_payment_settings(data: LocalPaymentSettings, _admin: dict = Depends(_require_admin)):
+    """Update payment settings. Only an authenticated admin may change them.
+
+    PENTEST FIX: this used to decode the JWT and trust its ``role`` claim
+    alone — unlike every other admin route — so a removed or downgraded admin
+    kept write access to payment details until the token expired. It now goes
+    through ``_require_admin``, which re-checks the account in the database.
+    """
     return await _db(db.update_payment_settings, data.model_dump(exclude_unset=True))
 
 
@@ -2119,19 +2051,15 @@ async def my_feedback(authorization: Optional[str] = Header(None)):
 # ──────────────────────────────────────────────────────────────────
 
 
-@router.get("/batch")
-async def current_batch():
-    """Which delivery batch is accepting orders right now + stock info."""
-    hit = ttl_cache.get("batch")
-    if hit is None and shared_cache.enabled():
-        hit = await asyncio.to_thread(shared_cache.get, "batch")
-        if hit is not None:
-            ttl_cache.set("batch", hit, 5)
-    if hit is not None:
-        return hit
+def _load_current_batch() -> dict:
+    """Live batch window + token info.
+
+    The 30-minute auto-confirm sweep rides along with this read (it is the most
+    polled endpoint) — and only on a cache miss, exactly as before.
+    """
     _process_due_auto_confirm()
     batch_type = db.get_current_batch()
-    value = {
+    return {
         "batch_type": batch_type,
         "token_starts_at": 18,
         "next_token": db.get_next_token(),
@@ -2139,33 +2067,34 @@ async def current_batch():
         "accepted_until": "12:30" if batch_type == "Afternoon" else "18:00",
         "delivery_window": "13:00-13:30" if batch_type == "Afternoon" else "19:30-19:45",
     }
-    ttl_cache.set("batch", value, 5)
-    if shared_cache.enabled():
-        await asyncio.to_thread(shared_cache.set_pair, "batch", value, 5)
-    return value
+
+
+@router.get("/batch")
+async def current_batch():
+    """Which delivery batch is accepting orders right now + stock info."""
+    return await _cached_read(5, "batch", _load_current_batch)
+
+
+def _load_products_with_stock() -> list[dict]:
+    """Every product annotated with the remaining stock for the live batch.
+
+    One worker-thread hop for all three store reads (they used to be awaited one
+    after another on the event loop).
+    """
+    batch_type = db.get_current_batch()
+    products = db.list_products()
+    date_key = db._day_key()
+    stocks = db.get_product_stocks(batch_type, date_key)
+    for p in products:
+        p["batch_type"] = batch_type
+        p["stock_left"] = stocks.get(p["id"], 0)
+    return products
 
 
 @router.get("/products/stock")
 async def products_with_stock(_user: dict = Depends(get_current_local_user)):
     """Every product with its per-batch remaining stock."""
-    hit = ttl_cache.get("products-stock")
-    if hit is None and shared_cache.enabled():
-        hit = await asyncio.to_thread(shared_cache.get, "products-stock")
-        if hit is not None:
-            ttl_cache.set("products-stock", hit, 5)
-    if hit is not None:
-        return hit
-    batch_type = db.get_current_batch()
-    products = await _db(db.list_products)
-    date_key = db._day_key()
-    stocks = await _db(db.get_product_stocks, batch_type, date_key)
-    for p in products:
-        p["batch_type"] = batch_type
-        p["stock_left"] = stocks.get(p["id"], 0)
-    ttl_cache.set("products-stock", products, 5)
-    if shared_cache.enabled():
-        await asyncio.to_thread(shared_cache.set_pair, "products-stock", products, 5)
-    return products
+    return await _cached_read(5, "products-stock", _load_products_with_stock)
 
 
 @router.post("/orders/multi")

@@ -24,3 +24,14 @@ services:
         sync: false
       - key: DEFAULT_SUPER_ADMIN_PASSWORD
         sync: false
+      # Read cache. Use Render's "Key Value" instance for REDIS_URL (add the
+      # optional `redis` package), or an Upstash/Vercel KV REST URL + token.
+      # Leave all four empty to run without a shared cache.
+      - key: REDIS_URL
+        sync: false
+      - key: KV_REST_API_URL
+        sync: false
+      - key: KV_REST_API_TOKEN
+        sync: false
+      - key: REDIS_KEY_PREFIX
+        value: "detomsite:"

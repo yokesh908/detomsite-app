@@ -5,11 +5,9 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import JSONResponse
-from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 from contextlib import asynccontextmanager
 from app.core.config import settings
-from app.core.uploads import get_uploads_dir
 import asyncio
 import logging
 import os
@@ -167,28 +165,33 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# ─── Uploaded files (payment screenshots) ───
-# Served under /uploads so the student portal can show the screenshot back.
-# Payment screenshots are served at /uploads/payments/<name>. The backing
-# directory lives in the platform's writable temp dir (never the app tree —
-# serverless filesystems are read-only there).
-UPLOADS_DIR = get_uploads_dir()
-os.makedirs(UPLOADS_DIR, exist_ok=True)
-app.mount("/uploads", StaticFiles(directory=UPLOADS_DIR), name="uploads")
-
 # Configure CORS — the API is Bearer-token auth only (tokens travel in the
 # Authorization header; no cookies, no withCredentials anywhere), so
-# credentialed CORS is unnecessary. Allow every frontend origin instead of an
-# exact-match list: the portals run on many hosts (detomsite.in + www,
-# detomsite-frontend/student/admin/shopkeeper .vercel.app URLs, Vercel preview
-# deployments, localhost, mobile webviews). An exact list turns every new host
-# into a failed preflight (HTTP 400, no CORS headers) and a dead login page.
+# credentialed CORS stays off. PENTEST FIX: this was ``allow_origins=["*"]``,
+# which echoes ANY origin. It now honours the ALLOWED_ORIGINS env var and
+# always merges the known portal hosts + local dev ports, so no portal breaks
+# while arbitrary origins receive no CORS headers. (Bearer auth is the real
+# lock — CORS is defence in depth.) Vercel preview URLs are deliberately not
+# wildcarded; add any extra host to ALLOWED_ORIGINS instead.
+_CORS_PORTAL_ORIGINS = [
+    "https://detomsite.in",
+    "https://www.detomsite.in",
+    "https://detomsite-frontend.vercel.app",
+    "https://detomsite-student.vercel.app",
+    "https://detomsite-shopkeeper.vercel.app",
+    "https://detomsite-admin.vercel.app",
+    "http://localhost:5173",
+    "http://localhost:5174",
+    "http://localhost:5175",
+    "http://localhost:3000",
+]
+_allow_origins = list(dict.fromkeys([*settings.allowed_origins_list, *_CORS_PORTAL_ORIGINS]))
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_allow_origins,
     allow_credentials=False,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["*"],
+    allow_headers=["Authorization", "Content-Type", "Accept"],
 )
 
 # Compress every JSON response ≥ 500 bytes — cuts transfer ~80% on the big
@@ -196,17 +199,17 @@ app.add_middleware(
 app.add_middleware(GZipMiddleware, minimum_size=500)
 
 
-# Drop the read TTL-cache after any successful write, so cached portals
-# (admin/shopkeeper lists) never show stale rows once an action lands.
-from app.core import ttl_cache, shared_cache
+# Drop every read-cache layer after any successful write, so cached portals
+# (admin/shopkeeper lists) never show stale rows once an action lands. The clear
+# is awaited: the response would otherwise race the invalidation, and on a
+# serverless host the instance can freeze the moment the response is sent.
+from app.core import read_cache, redis_cache, shared_cache
 
 
 async def cache_invalidation_middleware(request: Request, call_next):
     response = await call_next(request)
     if request.method in ("POST", "PUT", "PATCH", "DELETE") and response.status_code < 400:
-        ttl_cache.clear()
-        if shared_cache.enabled():
-            await asyncio.to_thread(shared_cache.clear)
+        await read_cache.clear()
     return response
 
 
@@ -270,7 +273,14 @@ async def health_check():
     return {
         "status": "healthy",
         "app": settings.APP_NAME,
-        "version": settings.APP_VERSION
+        "version": settings.APP_VERSION,
+        # Read-cache state, so a deploy can be verified with one request:
+        # ``redis.transport`` is "rest" (Upstash/Vercel KV), "resp" (REDIS_URL)
+        # or None when no shared cache is configured. No secrets are exposed.
+        "cache": {
+            "redis": redis_cache.status(),
+            "postgres": shared_cache.enabled(),
+        },
     }
 
 

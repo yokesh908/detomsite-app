@@ -85,10 +85,17 @@ export function OrderResultPage() {
   const [order, setOrder] = useState<LocalParentOrder | null>(null)
   const [loading, setLoading] = useState(true)
   const [paymentPending, setPaymentPending] = useState(false)
+  const [pendingDetail, setPendingDetail] = useState('')
+  const [retryUtr, setRetryUtr] = useState('')
+  const [retryBusy, setRetryBusy] = useState(false)
+  const [retryMsg, setRetryMsg] = useState('')
+  const [retryErr, setRetryErr] = useState('')
 
   useEffect(() => {
     const flag = sessionStorage.getItem('payment_pending')
     if (flag) { sessionStorage.removeItem('payment_pending'); setPaymentPending(true) }
+    const detail = sessionStorage.getItem('payment_pending_detail')
+    if (detail) { sessionStorage.removeItem('payment_pending_detail'); setPendingDetail(detail) }
   }, [])
 
   const load = useCallback(() => {
@@ -102,6 +109,32 @@ export function OrderResultPage() {
   // auto-accepted; background tabs pause and refresh instantly on switch-back.
   usePolling(load, 5000, [orderId])
 
+  /* Recovery path for the old "record didn't save" bug: the UTR is the only
+     proof, and /payments/utr creates the payment row on the spot (it works for
+     multi-shop parents too), so the student can always (re)submit it here. */
+  const submitRetryUtr = async () => {
+    if (!orderId || !retryUtr.trim()) return
+    setRetryBusy(true); setRetryMsg(''); setRetryErr('')
+    try {
+      const res = await api.post<{ message?: string }>('/local/payments/utr', {
+        order_id: orderId, utr_number: retryUtr.trim().toUpperCase(),
+      })
+      setRetryMsg(res.data?.message || 'UTR saved — the admin will verify your payment shortly.')
+      setPaymentPending(false)
+      setRetryUtr('')
+      load()
+    } catch (err: any) {
+      setRetryErr(err?.response?.data?.detail || 'Could not save the UTR — please try again')
+    } finally {
+      setRetryBusy(false)
+    }
+  }
+
+  const needsUtr = order
+    && String(order.payment_method || '').toUpperCase() !== 'COD'
+    && String(order.payment_status || '').toUpperCase() !== 'PAID'
+    && order.status !== 'Cancelled'
+
   const parentStyle = order ? statusStyles[order.status] || statusStyles.Pending : statusStyles.Pending
 
   return (
@@ -113,8 +146,9 @@ export function OrderResultPage() {
           <div className="rounded-btn bg-white p-6 shadow-gold-lg text-center">
             {paymentPending && (
               <div className="mb-5 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-left text-sm text-amber-700">
-                <p className="font-bold">⚠️ Payment proof received but the record didn't save.</p>
-                <p className="mt-1">Your order <b>was placed</b> — contact support with your token <b>#{order.token}</b> to submit your UTR and screenshot.</p>
+                <p className="font-bold">⚠️ Your order was placed, but the payment record didn't save.</p>
+                {pendingDetail && <p className="mt-1 text-xs">{pendingDetail}</p>}
+                <p className="mt-1">No problem — just paste your UTR in the box below and it will save now.</p>
               </div>
             )}
             <p className="text-xs font-bold uppercase tracking-wider text-gray-500">Order Result</p>
@@ -152,6 +186,30 @@ export function OrderResultPage() {
               <p className="font-semibold text-primary">₹{order.total}</p>
               <p className="text-gray-500">Payment: {order.payment_method} · {order.payment_status}</p>
             </div>
+
+            {needsUtr && (
+              <div className="mt-4 rounded-card border-2 border-dashed border-gold/40 bg-amber-50/60 p-4 text-left">
+                <p className="text-sm font-bold text-gold-dark">Confirm your payment (UTR)</p>
+                <p className="mt-0.5 text-[11px] leading-relaxed text-gold-dark">
+                  After paying via UPI, paste the <b>UTR / transaction ID</b> from your UPI app's success screen. It's the only proof we need — the admin verifies it and your order is confirmed.
+                </p>
+                <input
+                  value={retryUtr}
+                  onChange={e => { setRetryUtr(e.target.value); setRetryMsg(''); setRetryErr('') }}
+                  placeholder="Enter UTR here (e.g. THQ42010724961)"
+                  autoCapitalize="characters"
+                  className="mt-2 w-full rounded-btn border-2 border-gold-light px-3 py-2 text-xs font-semibold tracking-wide text-gold-dark outline-none focus:border-gold"
+                />
+                <button
+                  onClick={() => void submitRetryUtr()}
+                  disabled={!retryUtr.trim() || retryBusy}
+                  className="mt-2 w-full rounded-btn bg-gold-dark px-4 py-2 text-xs font-bold text-white transition-colors hover:bg-gold disabled:cursor-not-allowed disabled:opacity-40">
+                  {retryBusy ? 'Saving…' : 'Submit UTR'}
+                </button>
+                {retryMsg && <p className="mt-1.5 text-[11px] font-semibold text-emerald-700">{retryMsg}</p>}
+                {retryErr && <p className="mt-1.5 text-[11px] font-semibold text-red-600">{retryErr}</p>}
+              </div>
+            )}
 
             <div className="mt-6 flex justify-center gap-3">
               <Link to="/customer-dashboard" className="rounded-btn bg-primary px-5 py-2.5 text-sm font-bold text-white shadow-gold-sm hover:bg-primary-dark">Track Orders →</Link>
