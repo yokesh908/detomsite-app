@@ -32,6 +32,7 @@ export function Login() {
         : '/users/login'
       const body = role === 'admin'
         ? { username: email.trim(), password }
+        : role === 'shopkeeper' ? { username: email.trim(), password }
         : { email: email.trim(), password }
       const response = await api.post(endpoint, body)
       const data = response.data

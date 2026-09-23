@@ -72,7 +72,7 @@ export const MainLayout: React.FC<LayoutProps> = ({ children, className = '' }) 
         <div className="mx-auto flex max-w-7xl items-center justify-between px-4 py-3">
           <Link to="/" className="flex items-center gap-2">
             <span className="flex h-10 w-10 items-center justify-center rounded-card bg-gradient-to-br from-emerald-800 to-emerald-600 text-base font-black text-gold shadow-lg shadow-emerald-900/20">D</span>
-            <span className="text-lg font-black tracking-wide text-primary-dark max-sm:hidden">DETOMSITE</span>
+            <span className="text-xl font-black tracking-widest text-primary-dark">DETOMSITE</span>
           </Link>
 
           <div className="hidden items-center gap-1 md:flex">
