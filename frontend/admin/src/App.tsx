@@ -533,7 +533,10 @@ function VendorsPage() {
   const [vendorFilter, setVendorFilter] = useState<'approved' | 'pending' | 'suspended' | 'removed'>('approved')
   const [todayOrders, setTodayOrders] = useState<any[]>([]); const [todayShop, setTodayShop] = useState(''); const [todayCount, setTodayCount] = useState(0); const [todayShopName, setTodayShopName] = useState('')
   const [settingsShop, setSettingsShop] = useState(''); const [settingsForm, setSettingsForm] = useState({ upi_id: '', upi_enabled: true, cod_enabled: true, phone: '' }); const [settingsSaving, setSettingsSaving] = useState(false)
-  const [editProduct, setEditProduct] = useState<any>(null); const [productForm, setProductForm] = useState({ name: '', price: '', category: 'Food', description: '', inventory: '0', prep_time: '10', available: true }); const [productSaving, setProductSaving] = useState(false); const [productShopId, setProductShopId] = useState('')
+  const [editProduct, setEditProduct] = useState<any>(null); const [productForm, setProductForm] = useState({ name: '', price: '', category: 'Food', description: '', inventory: '0', prep_time: '10', available: true, is_combo: false, combo_items: '' }); const [productSaving, setProductSaving] = useState(false); const [productShopId, setProductShopId] = useState('')
+  /* Blank product form (also used by the Cancel buttons) — one place to keep in
+     sync when a new field is added. */
+  const blankProductForm = { name: '', price: '', category: 'Food', description: '', inventory: '0', prep_time: '10', available: true, is_combo: false, combo_items: '' }
   const load = async () => {
     setLoading(true)
     try { const r = await api.get('/admin/vendors'); setVendors(r.data || []) } catch {}
@@ -575,15 +578,25 @@ function VendorsPage() {
     if (!productForm.name || !productForm.price) { setMsg('Name and price are required'); return }
     setProductSaving(true)
     try {
-      const body = { ...productForm, price: parseInt(productForm.price) || 0, inventory: parseInt(productForm.inventory) || 0, prep_time: parseInt(productForm.prep_time) || 10 }
+      /* Combo = ONE product row, ONE price, MANY items (free text, one per
+         line). The category is forced to "Combo" server-side as well, so the
+         student menu always groups combos together. */
+      const body = {
+        ...productForm,
+        category: productForm.is_combo ? 'Combo' : productForm.category,
+        price: parseInt(productForm.price) || 0,
+        inventory: parseInt(productForm.inventory) || 0,
+        prep_time: parseInt(productForm.prep_time) || 10,
+        combo_items: productForm.is_combo ? productForm.combo_items : '',
+      }
       if (editProduct) {
         await api.patch(`/admin/vendors/${shopId}/products/${editProduct.id}`, body)
         setMsg('Product updated!')
       } else {
         await api.post(`/admin/vendors/${shopId}/products`, body)
-        setMsg('Product added!')
+        setMsg(productForm.is_combo ? 'Combo added!' : 'Product added!')
       }
-      setEditProduct(null); setProductForm({ name: '', price: '', category: 'Food', description: '', inventory: '0', prep_time: '10', available: true })
+      setEditProduct(null); setProductForm(blankProductForm)
       const r = await api.get(`/admin/vendors/${shopId}/products`); setProducts(r.data || [])
     } catch { setMsg('Could not save product') }
     finally { setProductSaving(false) }
@@ -810,23 +823,41 @@ function VendorsPage() {
                   <div className="flex items-center justify-between mb-3">
                     <h4 className="text-sm font-bold text-gray-400">Products ({products.length})</h4>
                     {!editProduct && (
-                      <button onClick={() => { setEditProduct(null); setProductForm({ name: '', price: '', category: 'Food', description: '', inventory: '0', prep_time: '10', available: true }); setProductShopId(v.id) }} className="rounded-sm bg-primary px-3 py-1.5 text-xs font-bold text-white hover:bg-primary">+ Add Product</button>
+                      <button onClick={() => { setEditProduct(null); setProductForm(blankProductForm); setProductShopId(v.id) }} className="rounded-sm bg-primary px-3 py-1.5 text-xs font-bold text-white hover:bg-primary">+ Add Product</button>
                     )}
                   </div>
                   {(productShopId === v.id && (editProduct || productForm.name !== '' || !editProduct)) && selectedShop === v.id && (
                     <div className="mb-3 rounded-sm border border-amber-900/40 bg-amber-900/10 p-4 space-y-2">
                       <p className="text-xs font-bold text-gold">{editProduct ? 'Edit Product' : 'Add New Product'}</p>
                       <div className="grid gap-2 sm:grid-cols-2">
-                        <input value={productForm.name} onChange={e => setProductForm({ ...productForm, name: e.target.value })} placeholder="Product name" className="rounded-sm border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-white outline-none focus:border-amber-500" />
-                        <input type="number" value={productForm.price} onChange={e => setProductForm({ ...productForm, price: e.target.value })} placeholder="Price (₹)" className="rounded-sm border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-white outline-none focus:border-amber-500" />
+                        <input value={productForm.name} onChange={e => setProductForm({ ...productForm, name: e.target.value })} placeholder={productForm.is_combo ? 'Combo name (e.g. Full Meal Combo)' : 'Product name'} className="rounded-sm border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-white outline-none focus:border-amber-500" />
+                        <input type="number" value={productForm.price} onChange={e => setProductForm({ ...productForm, price: e.target.value })} placeholder={productForm.is_combo ? 'Combo price (₹)' : 'Price (₹)'} className="rounded-sm border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-white outline-none focus:border-amber-500" />
                         <input value={productForm.description} onChange={e => setProductForm({ ...productForm, description: e.target.value })} placeholder="Description" className="rounded-sm border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-white outline-none focus:border-amber-500" />
-                        <select value={productForm.category} onChange={e => setProductForm({ ...productForm, category: e.target.value })} className="rounded-sm border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-white outline-none focus:border-amber-500">
-                          {['Food', 'Drinks', 'Snacks', 'Dessert', 'Other'].map(c => <option key={c} value={c}>{c}</option>)}
-                        </select>
+                        {productForm.is_combo ? (
+                          <div className="flex items-center rounded-sm border border-dashed border-amber-900/60 bg-amber-900/10 px-3 py-2 text-xs font-bold text-gold">Category: Combo</div>
+                        ) : (
+                          <select value={productForm.category} onChange={e => setProductForm({ ...productForm, category: e.target.value })} className="rounded-sm border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-white outline-none focus:border-amber-500">
+                            {['Food', 'Drinks', 'Snacks', 'Dessert', 'Other'].map(c => <option key={c} value={c}>{c}</option>)}
+                          </select>
+                        )}
                       </div>
+                      {/* Combo toggle — one price for many items */}
+                      <label className="flex cursor-pointer items-start gap-2 rounded-sm border border-gray-700 bg-gray-900/60 px-3 py-2.5">
+                        <input type="checkbox" checked={productForm.is_combo} onChange={e => setProductForm({ ...productForm, is_combo: e.target.checked, combo_items: e.target.checked ? productForm.combo_items : '' })} className="mt-0.5 h-4 w-4 rounded accent-amber-500" />
+                        <span>
+                          <span className="block text-xs font-bold text-white">This is a combo (one price, many items)</span>
+                          <span className="block text-[11px] text-gray-400">Students see each item listed under the combo on the menu.</span>
+                        </span>
+                      </label>
+                      {productForm.is_combo && (
+                        <div>
+                          <label className="mb-1 block text-[11px] font-bold text-gray-400">Items in this combo (one per line)</label>
+                          <textarea value={productForm.combo_items} onChange={e => setProductForm({ ...productForm, combo_items: e.target.value })} rows={3} placeholder={'Chicken Biryani\n1 Fast Food item (Burger/ Roll)\n1 Soft Drink'} className="w-full rounded-sm border border-gray-700 bg-gray-900 px-3 py-2 text-sm text-white outline-none focus:border-amber-500" />
+                        </div>
+                      )}
                       <div className="flex items-center gap-3">
                         <button onClick={() => saveProduct(v.id)} disabled={productSaving} className="rounded-sm bg-gold px-4 py-1.5 text-xs font-bold text-black hover:bg-gold disabled:opacity-40">{productSaving ? 'Saving...' : editProduct ? 'Update' : 'Add'}</button>
-                        <button onClick={() => { setEditProduct(null); setProductForm({ name: '', price: '', category: 'Food', description: '', inventory: '0', prep_time: '10', available: true }) }} className="rounded-sm bg-gray-800 px-4 py-1.5 text-xs font-semibold text-gray-300 hover:bg-gray-700">Cancel</button>
+                        <button onClick={() => { setEditProduct(null); setProductForm(blankProductForm) }} className="rounded-sm bg-gray-800 px-4 py-1.5 text-xs font-semibold text-gray-300 hover:bg-gray-700">Cancel</button>
                       </div>
                     </div>
                   )}
@@ -835,13 +866,21 @@ function VendorsPage() {
                       {products.map((p: any) => (
                         <div key={p.id} className="rounded-sm bg-gray-800/50 p-3">
                           <div className="flex items-start justify-between">
-                            <div>
-                              <p className="font-semibold text-white">{p.name}</p>
+                            <div className="min-w-0">
+                              <p className="flex flex-wrap items-center gap-1.5 font-semibold text-white">
+                                <span className="truncate">{p.name}</span>
+                                {!!p.is_combo && <span className="rounded-pill bg-amber-900/40 px-2 py-0.5 text-[10px] font-black uppercase tracking-wide text-gold">Combo</span>}
+                              </p>
                               <p className="text-xs text-gray-400">₹{p.price} · {p.category}</p>
+                              {!!p.is_combo && p.combo_items && (
+                                <ul className="mt-0.5 space-y-0.5 text-[11px] text-gray-500">
+                                  {(p.combo_items as string).split(/[\n,]+/).map(i => i.trim()).filter(Boolean).map((i, n) => <li key={n}>• {i}</li>)}
+                                </ul>
+                              )}
                               <p className="text-xs text-gray-500"><span className={`mr-1 inline-block h-1.5 w-1.5 rounded-pill ${p.available ? 'bg-primary' : 'bg-red-500'}`} />{p.available ? 'Available' : 'Unavailable'}</p>
                             </div>
                             <div className="flex gap-1">
-                              <button onClick={() => { setEditProduct(p); setProductForm({ name: p.name, price: String(p.price), category: p.category, description: p.description || '', inventory: String(p.inventory || 0), prep_time: String(p.prep_time || 10), available: !!p.available }); setProductShopId(v.id) }} className="rounded bg-gray-700 px-2 py-1 text-[10px] font-bold text-gray-300 hover:bg-gray-600">Edit</button>
+                              <button onClick={() => { setEditProduct(p); setProductForm({ name: p.name, price: String(p.price), category: p.category, description: p.description || '', inventory: String(p.inventory || 0), prep_time: String(p.prep_time || 10), available: !!p.available, is_combo: !!p.is_combo, combo_items: p.combo_items || '' }); setProductShopId(v.id) }} className="rounded bg-gray-700 px-2 py-1 text-[10px] font-bold text-gray-300 hover:bg-gray-600">Edit</button>
                               <button onClick={() => deleteProduct(v.id, p.id)} className="rounded bg-red-900/40 px-2 py-1 text-[10px] font-bold text-red-300 hover:bg-red-900/60">Del</button>
                             </div>
                           </div>
@@ -1267,11 +1306,19 @@ function RevenuePage() {
 }
 
 /* Settings — the admin only needs their UPI ID. Vendors' "Pay" button opens a
-   UPI app directed to this account to settle their ₹10-per-order monthly share. */
+   UPI app directed to this account to settle their ₹10-per-order monthly share.
+   The same page carries the STUDENT INFO BANNER: a green block every student
+   sees at the top of their home page (announcements, holiday timings, offers). */
 function SettingsPage() {
   const [upiId, setUpiId] = useState('')
   const [msg, setMsg] = useState(''); const [err, setErr] = useState(''); const [loading, setLoading] = useState(true); const [saving, setSaving] = useState(false)
-  useEffect(() => { api.get('/local/payment-settings').then(r => { setUpiId(r.data?.upi_id || '') }).catch(() => {}).finally(() => setLoading(false)) }, [])
+  /* Student info banner (site-wide green block on the student home page) */
+  const [noticeText, setNoticeText] = useState(''); const [noticeOn, setNoticeOn] = useState(false)
+  const [noticeSaving, setNoticeSaving] = useState(false); const [noticeMsg, setNoticeMsg] = useState(''); const [noticeErr, setNoticeErr] = useState('')
+  useEffect(() => {
+    api.get('/local/payment-settings').then(r => { setUpiId(r.data?.upi_id || '') }).catch(() => {}).finally(() => setLoading(false))
+    api.get('/local/student-notice').then(r => { setNoticeText(r.data?.text || ''); setNoticeOn(!!r.data?.enabled) }).catch(() => {})
+  }, [])
   const save = async (e: FormEvent) => {
     e.preventDefault(); setMsg(''); setErr('')
     const value = upiId.trim()
@@ -1284,6 +1331,24 @@ function SettingsPage() {
     }
     catch (err: any) { setErr(apiError(err, 'Failed to save')) }
     finally { setSaving(false) }
+  }
+  /* The banner needs real text before it can go live — an empty message would
+     just be a green box with nothing in it on every student's phone. */
+  const saveNotice = async (e: FormEvent) => {
+    e.preventDefault(); setNoticeMsg(''); setNoticeErr('')
+    const value = noticeText.trim()
+    if (noticeOn && !value) { setNoticeErr('Write the message students should read, or turn the banner off.'); return }
+    setNoticeSaving(true)
+    try {
+      const r = await api.patch('/local/student-notice', { enabled: noticeOn, text: value })
+      setNoticeText(r.data?.text || value)
+      setNoticeOn(!!r.data?.enabled)
+      setNoticeMsg(r.data?.enabled
+        ? 'Student info banner is LIVE — every student sees it on their home page.'
+        : 'Student info banner is hidden — students no longer see it.')
+    }
+    catch (err: any) { setNoticeErr(apiError(err, 'Failed to save the banner')) }
+    finally { setNoticeSaving(false) }
   }
   return (
     <div className="mx-auto max-w-3xl px-4 py-6">
@@ -1306,6 +1371,34 @@ function SettingsPage() {
           </form>
           <p className="mt-4 rounded-btn border border-gray-800 bg-gray-900/50 px-4 py-3 text-xs leading-relaxed text-gray-400">Students pay the shop by <b>scanning a UPI QR</b> (or Cash on Delivery) — the shop confirms each payment in the vendor app. Your UPI ID here is only the account vendors use to pay their <b>₹10-per-order share</b>.</p>
           </>
+        )}
+      </div>
+
+      {/* Student info banner — the green block on every student's home page */}
+      <div className="mt-6 rounded-btn border border-gray-800 bg-gray-900/50 p-6">
+        <h2 className="text-lg font-bold text-white">Student Info Banner</h2>
+        <p className="mt-1 text-xs text-gray-400">Shown as a green block at the top of the student home page — use it for timings, holidays, offers or any notice every student should read.</p>
+        <form onSubmit={saveNotice} className="mt-5 space-y-4">
+          {noticeMsg && <div className="rounded-btn bg-primary-dark/30 border border-primary/20 px-4 py-3 text-sm text-primary">{noticeMsg}</div>}
+          {noticeErr && <div className="rounded-btn bg-red-900/30 border border-red-900/50 px-4 py-3 text-sm text-red-400">{noticeErr}</div>}
+          <label className="flex cursor-pointer items-center gap-2">
+            <input type="checkbox" checked={noticeOn} onChange={e => setNoticeOn(e.target.checked)} className="h-4 w-4 rounded accent-amber-500" />
+            <span className="text-sm font-semibold text-white">Show this banner to students</span>
+          </label>
+          <div>
+            <label className="mb-1 block text-xs font-bold text-gray-400">Message</label>
+            <textarea value={noticeText} onChange={e => setNoticeText(e.target.value)} rows={3} maxLength={500}
+              placeholder="e.g. Food court closes at 9 PM today. Pre-order before 8:30 PM."
+              className="w-full rounded-btn border border-gray-700 bg-gray-900 px-4 py-2.5 text-sm text-white outline-none focus:border-amber-500" />
+            <p className="mt-1 text-right text-[11px] text-gray-500">{noticeText.length}/500 · line breaks are kept</p>
+          </div>
+          <button type="submit" disabled={noticeSaving} className="rounded-btn bg-gold px-5 py-3 text-sm font-bold text-black hover:bg-gold disabled:opacity-40">{noticeSaving ? 'Saving...' : noticeOn ? 'Save & Publish Banner' : 'Save (Banner Hidden)'}</button>
+        </form>
+        {noticeOn && noticeText.trim() && (
+          <div className="mt-5">
+            <p className="mb-1 text-[11px] font-bold uppercase tracking-wide text-gray-500">Student preview</p>
+            <div className="flex items-start gap-2.5 rounded-btn border border-primary/30 bg-primary-dark/20 px-4 py-3.5 text-sm font-semibold text-primary whitespace-pre-line">{noticeText.trim()}</div>
+          </div>
         )}
       </div>
     </div>

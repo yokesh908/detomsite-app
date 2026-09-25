@@ -112,6 +112,9 @@ class AdminProductCreate(BaseModel):
     inventory: int = 0
     prep_time: int = 10
     available: bool = True
+    # Combo: ONE price for MANY items — combo_items holds the item list text.
+    is_combo: bool = False
+    combo_items: str = ""
 
 
 class AdminProductUpdate(BaseModel):
@@ -122,6 +125,8 @@ class AdminProductUpdate(BaseModel):
     inventory: int | None = None
     prep_time: int | None = None
     available: bool | None = None
+    is_combo: bool | None = None
+    combo_items: str | None = None
 
 
 # ─── Helper ───
@@ -613,10 +618,12 @@ async def admin_add_product(shop_id: str, data: AdminProductCreate, admin: dict 
             "name": data.name,
             "description": data.description,
             "price": data.price,
-            "category": data.category,
+            "category": "Combo" if data.is_combo else data.category,
             "inventory": data.inventory,
             "prep_time": data.prep_time,
             "available": data.available,
+            "is_combo": data.is_combo,
+            "combo_items": data.combo_items,
         })
     except Exception as e:
         logger.error(f"Admin product creation failed for shop {shop_id}: {e}")

@@ -112,7 +112,10 @@ export function Shops() {
                 return (
                   <div key={product.id} className="flex items-center justify-between rounded-btn border border-primary-light/30 bg-white p-3 shadow-[0_8px_25px_rgba(15,118,110,0.08)]">
                     <div className="min-w-0">
-                      <h3 className="truncate text-sm font-bold text-primary-dark">{product.name}</h3>
+                      <h3 className="truncate text-sm font-bold text-primary-dark">
+                        {product.name}
+                        {Boolean(product.is_combo) && <span className="ml-1.5 rounded-pill bg-gold-100 px-1.5 py-0.5 text-[10px] font-black uppercase text-gold-700">Combo</span>}
+                      </h3>
                       <p className="truncate text-xs font-semibold text-slate-500">{shop.name} · ₹{product.price}</p>
                     </div>
                     {orderable && product.inventory > 0 ? (

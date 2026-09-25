@@ -6,11 +6,18 @@ import {
   LocalAnnouncement,
   LocalProduct,
   LocalShop,
+  LocalStudentNotice,
   shopStatusText,
 } from '../types/localApi'
 import { getLocalSession } from '../utils/session'
 import { addProductToCart } from '../utils/cart'
 import { getShopImage } from '../utils/shopImages'
+
+/* Combo items are free text (one per line, commas also work) — split them for
+   display and never render an empty bullet. */
+function comboItems(product: LocalProduct): string[] {
+  return (product.combo_items || '').split(/[\n,]+/).map(item => item.trim()).filter(Boolean)
+}
 
 interface BatchInfo {
   batch_type: 'Afternoon' | 'Night'
@@ -24,6 +31,10 @@ export function Home() {
   const [shops, setShops] = useState<LocalShop[]>([])
   const [products, setProducts] = useState<LocalProduct[]>([])
   const [announcements, setAnnouncements] = useState<LocalAnnouncement[]>([])
+  /* Admin-written info block (Admin Centre → Settings → Student Info Banner).
+     The backend only reports enabled=true when there is real text, so a blank
+     message can never paint an empty green box here. */
+  const [notice, setNotice] = useState<LocalStudentNotice | null>(null)
   const [batch, setBatch] = useState<BatchInfo | null>(null)
   const [search, setSearch] = useState('')
   const [activeCategory, setActiveCategory] = useState<string | null>(null)
@@ -40,6 +51,7 @@ export function Home() {
       .then(setShops).catch(() => setShops([]))
     apiCached.get<LocalProduct[]>('/local/products', undefined, 10000).then(setProducts).catch(() => setProducts([]))
     apiCached.get<LocalAnnouncement[]>('/local/announcements', undefined, 10000).then(setAnnouncements).catch(() => setAnnouncements([]))
+    apiCached.get<LocalStudentNotice>('/local/student-notice', undefined, 30000).then(setNotice).catch(() => setNotice(null))
     apiCached.get<BatchInfo>('/local/batch', undefined, 10000).then(setBatch).catch(() => setBatch(null))
   }, [])
 
@@ -69,7 +81,11 @@ export function Home() {
       if (!openShopIds.has(p.shop_id)) continue
       const cat = (p.category || '').toLowerCase()
       const name = (p.name || '').toLowerCase()
-      if (cat.includes('fried') || cat.includes('fries') || cat.includes('pakora') || cat.includes('fried rice') || cat.includes('roll') || name.includes('fried') || name.includes('fries') || name.includes('pakora')) {
+      // The server-side flag wins: a combo is a combo no matter what its name
+      // or category looks like.
+      if (p.is_combo) {
+        map.combo.push(p)
+      } else if (cat.includes('fried') || cat.includes('fries') || cat.includes('pakora') || cat.includes('fried rice') || cat.includes('roll') || name.includes('fried') || name.includes('fries') || name.includes('pakora')) {
         map.fried.push(p)
       } else if (cat.includes('biryani') || name.includes('biryani')) {
         map.biryani.push(p)
@@ -129,6 +145,17 @@ export function Home() {
         </div>
       </div>
 
+      {/* Admin info banner — the green block every student reads (Admin Centre →
+          Settings → Student Info Banner). Hidden when switched off or blank. */}
+      {notice?.enabled && notice.text && (
+        <div className="mx-auto max-w-7xl px-4 pt-5">
+          <div className="flex items-start gap-2.5 rounded-[20px] border border-primary-light/50 bg-primary-light/25 px-4 py-3.5 text-sm font-semibold text-primary-dark whitespace-pre-line">
+            <span aria-hidden className="mt-0.5 shrink-0 text-primary">📢</span>
+            <span className="leading-relaxed">{notice.text}</span>
+          </div>
+        </div>
+      )}
+
       {/* Search food results */}
       {foodResults.length > 0 && (
         <section className="mx-auto max-w-7xl px-4 py-6">
@@ -140,7 +167,10 @@ export function Home() {
               return (
                 <div key={product.id} className="flex items-center justify-between rounded-btn border border-primary-light/30 bg-white p-3 shadow-[0_8px_25px_rgba(15,118,110,0.08)]">
                   <div className="min-w-0">
-                    <h3 className="truncate text-sm font-bold text-primary-dark">{product.name}</h3>
+                    <h3 className="truncate text-sm font-bold text-primary-dark">
+                      {product.name}
+                      {Boolean(product.is_combo) && <span className="ml-1.5 rounded-pill bg-gold-100 px-1.5 py-0.5 text-[10px] font-black uppercase text-gold-700">Combo</span>}
+                    </h3>
                     <p className="text-xs font-semibold text-slate-500">{shop.name} - Rs.{product.price}</p>
                   </div>
                   {canOrderFromShop(shop) && Boolean(product.available) && product.inventory > 0 ? (
@@ -251,10 +281,22 @@ export function Home() {
                     </div>
                     <div className="p-4">
                       <div className="mb-1 flex items-start justify-between gap-2">
-                        <h3 className="line-clamp-2 font-bold text-primary-dark text-sm leading-snug">{product.name}</h3>
-                        <span className="shrink-0 rounded-pill bg-gold-50 px-2 py-0.5 text-xs font-bold text-gold-700">Rs. {product.price}</span>
+                        <h3 className="line-clamp-2 font-bold text-primary-dark text-sm leading-snug">
+                          {product.name}
+                          {Boolean(product.is_combo) && (
+                            <span className="ml-1.5 align-middle rounded-pill bg-gold-100 px-2 py-0.5 text-[10px] font-black uppercase tracking-wide text-gold-700">Combo</span>
+                          )}
+                        </h3>
+                        <span className="shrink-0 rounded-pill bg-gold-50 px-2 py-0.5 text-xs font-bold text-gold-700">Rs. {product.price}{Boolean(product.is_combo) && <span className="ml-1 font-semibold text-[10px] text-slate-500">full combo</span>}</span>
                       </div>
                       {product.description && <p className="text-xs font-medium text-slate-500 line-clamp-2 mb-2">{product.description}</p>}
+                      {/* Combo contents — one bullet per item so the student
+                          knows exactly what the single price includes. */}
+                      {Boolean(product.is_combo) && comboItems(product).length > 0 && (
+                        <ul className="mb-2 space-y-0.5 text-[11px] font-medium text-slate-500">
+                          {comboItems(product).map((item, i) => <li key={i}>• {item}</li>)}
+                        </ul>
+                      )}
                       <div className="flex items-center justify-between text-[10px] font-semibold text-slate-400 mb-2">
                         <span>{shop ? shop.name : 'Shop'}</span>
                         {product.inventory > 0 ? <span className="text-emerald-600">Available</span> : <span className="text-red-500">Out of stock</span>}

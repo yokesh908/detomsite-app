@@ -109,19 +109,22 @@ export function OrderResultPage() {
   // auto-accepted; background tabs pause and refresh instantly on switch-back.
   usePolling(load, 5000, [orderId])
 
-  /* Recovery path for the old "record didn't save" bug: the UTR is the only
-     proof, and /payments/utr creates the payment row on the spot (it works for
-     multi-shop parents too), so the student can always (re)submit it here. */
+  /* Recovery path for the old "record didn't save" bug: the UTR is asked ONCE
+     at checkout (order page shows no QR and no open UTR box). This stays
+     hidden behind a "didn't save?" link so normal orders never see a second
+     ask. */
+  const [showRecovery, setShowRecovery] = useState(false)
   const submitRetryUtr = async () => {
     if (!orderId || !retryUtr.trim()) return
     setRetryBusy(true); setRetryMsg(''); setRetryErr('')
     try {
       const res = await api.post<{ message?: string }>('/local/payments/utr', {
-        order_id: orderId, utr_number: retryUtr.trim().toUpperCase(),
+        order_id: orderId, utr_number: retryUtr.trim().toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 22),
       })
       setRetryMsg(res.data?.message || 'UTR saved — the admin will verify your payment shortly.')
       setPaymentPending(false)
       setRetryUtr('')
+      setShowRecovery(false)
       load()
     } catch (err: any) {
       setRetryErr(err?.response?.data?.detail || 'Could not save the UTR — please try again')
@@ -188,15 +191,17 @@ export function OrderResultPage() {
             </div>
 
             {needsUtr && (
-              <div className="mt-4 rounded-card border-2 border-dashed border-gold/40 bg-amber-50/60 p-4 text-left">
-                <p className="text-sm font-bold text-gold-dark">Confirm your payment (UTR)</p>
-                <p className="mt-0.5 text-[11px] leading-relaxed text-gold-dark">
-                  After paying via UPI, paste the <b>UTR / transaction ID</b> from your UPI app's success screen. It's the only proof we need — the admin verifies it and your order is confirmed.
-                </p>
+              <div className="mt-4 rounded-card border border-emerald-200 bg-emerald-50/60 p-4 text-left">
+                <p className="text-sm font-bold text-primary">✓ UTR already attached at checkout — no need to pay again.</p>
+                <p className="mt-0.5 text-[11px] leading-relaxed text-primary">Your order carries the payment proof. The admin verifies it and your order is confirmed. Do NOT scan any other QR.</p>
+                {!showRecovery ? (
+                  <button onClick={() => setShowRecovery(true)} className="mt-2 text-xs font-bold text-primary underline">Payment didn't save? Paste UTR again</button>
+                ) : (
+                <>
                 <input
                   value={retryUtr}
-                  onChange={e => { setRetryUtr(e.target.value); setRetryMsg(''); setRetryErr('') }}
-                  placeholder="Enter UTR here (e.g. THQ42010724961)"
+                  onChange={e => { setRetryUtr(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 22)); setRetryMsg(''); setRetryErr('') }}
+                  placeholder="UTR (12-digit, only if checkout failed)"
                   autoCapitalize="characters"
                   className="mt-2 w-full rounded-btn border-2 border-gold-light px-3 py-2 text-xs font-semibold tracking-wide text-gold-dark outline-none focus:border-gold"
                 />
@@ -206,6 +211,8 @@ export function OrderResultPage() {
                   className="mt-2 w-full rounded-btn bg-gold-dark px-4 py-2 text-xs font-bold text-white transition-colors hover:bg-gold disabled:cursor-not-allowed disabled:opacity-40">
                   {retryBusy ? 'Saving…' : 'Submit UTR'}
                 </button>
+                </>
+                )}
                 {retryMsg && <p className="mt-1.5 text-[11px] font-semibold text-emerald-700">{retryMsg}</p>}
                 {retryErr && <p className="mt-1.5 text-[11px] font-semibold text-red-600">{retryErr}</p>}
               </div>

@@ -42,3 +42,4 @@ tests/.pytest_local.db
 final-admin-login.json
 .env.local
 backend/tests/.pytest_local.db
+.env*

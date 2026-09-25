@@ -502,7 +502,7 @@ export default function App() {
 
 /* Types */
 interface Shop { id: string; name: string; category: string; description: string; rating: number; opening_time: string; closing_time: string; present: number; status: string; approval_status: string; shopkeeper_email: string; shopkeeper_name: string; phone: string; upi_id: string; upi_enabled: number; cod_enabled: number; orders_today: number; revenue_today: number; current_token: number }
-interface Product { id: string; shop_id: string; name: string; description: string; price: number; pending_price: number | null; category: string; inventory: number; prep_time: number; available: number }
+interface Product { id: string; shop_id: string; name: string; description: string; price: number; pending_price: number | null; category: string; inventory: number; prep_time: number; available: number; is_combo?: number; combo_items?: string }
 interface Order { id: string; token: number; student_name: string; student_phone: string; shop_id: string; shop_name: string; items: string; total: number; delivery_location: string; delivery_slot: string; status: string; payment_method?: string; created_at: string; payment?: { utr_number?: string | null; screenshot_name?: string | null } | null }
 
 /* Delivery-window filters — the day is split into TWO time slots instead of
@@ -614,7 +614,11 @@ function VendorMobileApp() {
   const [products, setProducts] = useState<Product[]>([])
   const [stats, setStats] = useState<any>({})
   const [msg, setMsg] = useState(''); const [err, setErr] = useState('')
-  const [productForm, setProductForm] = useState({ name: '', price: '', category: 'Food', description: '', inventory: '10', prep_time: '10' })
+  /* Combo products: ONE row, ONE price, MANY items (e.g. Biryani + Fast Food +
+     a drink). ``combo_items`` is free text — one item per line — so the vendor
+     can describe any mix without the admin setting anything up. */
+  const [productForm, setProductForm] = useState({ name: '', price: '', category: 'Food', description: '', inventory: '10', prep_time: '10', is_combo: false, combo_items: '' })
+  const blankProductForm = { name: '', price: '', category: 'Food', description: '', inventory: '10', prep_time: '10', is_combo: false, combo_items: '' }
   const [upiId, setUpiId] = useState('')
   const [upiEnabled, setUpiEnabled] = useState(true)
   const [codEnabled, setCodEnabled] = useState(true)
@@ -988,12 +992,17 @@ function VendorMobileApp() {
   const addProduct = async (e: FormEvent) => {
     e.preventDefault()
     try {
+      /* Combos are priced ONCE and grouped under the "Combo" category so the
+         student menu lists every combo together (the backend forces the same). */
       await api.post('/vendor/products', {
-        name: productForm.name, price: parseInt(productForm.price), category: productForm.category,
+        name: productForm.name, price: parseInt(productForm.price),
+        category: productForm.is_combo ? 'Combo' : productForm.category,
         description: productForm.description, inventory: parseInt(productForm.inventory) || 10,
         prep_time: parseInt(productForm.prep_time) || 10,
+        is_combo: productForm.is_combo,
+        combo_items: productForm.is_combo ? productForm.combo_items : '',
       })
-      setMsg('Product added!'); setProductForm({ name: '', price: '', category: 'Food', description: '', inventory: '10', prep_time: '10' })
+      setMsg(productForm.is_combo ? 'Combo added!' : 'Product added!'); setProductForm(blankProductForm)
       loadProducts()
     } catch (err: any) { setErr(apiError(err, 'Failed to add product')) }
   }
@@ -1378,13 +1387,33 @@ function VendorMobileApp() {
               <form onSubmit={addProduct} className="rounded-btn bg-white p-4 shadow-sm border mb-4">
                 <h3 className="font-bold text-sm mb-3">Add New Product</h3>
                 <div className="space-y-2">
-                  <input type="text" value={productForm.name} onChange={e => setProductForm({...productForm, name: e.target.value})} className="w-full rounded-sm border px-3 py-2 text-sm outline-none" placeholder="Product name" required />
+                  <input type="text" value={productForm.name} onChange={e => setProductForm({...productForm, name: e.target.value})} className="w-full rounded-sm border px-3 py-2 text-sm outline-none" placeholder={productForm.is_combo ? 'Combo name (e.g. Full Meal Combo)' : 'Product name'} required />
                   <div className="grid grid-cols-2 gap-2">
-                    <input type="number" value={productForm.price} onChange={e => setProductForm({...productForm, price: e.target.value})} className="w-full rounded-sm border px-3 py-2 text-sm outline-none" placeholder="Price ₹" required />
-                    <select value={productForm.category} onChange={e => setProductForm({...productForm, category: e.target.value})} className="w-full rounded-sm border px-3 py-2 text-sm outline-none">
-                      <option value="Food">Food</option><option value="Beverages">Beverages</option><option value="Starters">Starters</option><option value="Desserts">Desserts</option>
-                    </select>
+                    <input type="number" value={productForm.price} onChange={e => setProductForm({...productForm, price: e.target.value})} className="w-full rounded-sm border px-3 py-2 text-sm outline-none" placeholder={productForm.is_combo ? 'Combo price ₹' : 'Price ₹'} required />
+                    {productForm.is_combo ? (
+                      <div className="flex items-center justify-center rounded-sm border border-dashed border-primary/50 bg-primary-light/30 px-3 py-2 text-xs font-bold text-primary">Category: Combo</div>
+                    ) : (
+                      <select value={productForm.category} onChange={e => setProductForm({...productForm, category: e.target.value})} className="w-full rounded-sm border px-3 py-2 text-sm outline-none">
+                        <option value="Food">Food</option><option value="Beverages">Beverages</option><option value="Starters">Starters</option><option value="Desserts">Desserts</option>
+                      </select>
+                    )}
                   </div>
+                  {/* Combo toggle — one price for many items. Off = a normal
+                      single product (the field below is ignored). */}
+                  <label className="flex cursor-pointer items-start gap-2 rounded-sm border border-gray-200 bg-gray-50 px-3 py-2.5">
+                    <input type="checkbox" checked={productForm.is_combo} onChange={e => setProductForm({...productForm, is_combo: e.target.checked, combo_items: e.target.checked ? productForm.combo_items : ''})} className="mt-0.5 h-4 w-4 accent-amber-500" />
+                    <span>
+                      <span className="block text-sm font-bold text-primary-dark">This is a combo</span>
+                      <span className="block text-xs text-gray-500">One price for many items. Students see every item in the combo under the "Combo" category.</span>
+                    </span>
+                  </label>
+                  {productForm.is_combo && (
+                    <div>
+                      <label className="mb-1 block text-xs font-bold text-gray-500">Items in this combo (one per line)</label>
+                      <textarea value={productForm.combo_items} onChange={e => setProductForm({...productForm, combo_items: e.target.value})} rows={3} className="w-full rounded-sm border px-3 py-2 text-sm outline-none" placeholder={'Chicken Biryani\n1 Fast Food item (Burger/ Roll)\n1 Soft Drink'} />
+                      <p className="mt-1 text-[11px] text-gray-500">Leave blank if you only want the combo name shown to students.</p>
+                    </div>
+                  )}
                   <div className="grid grid-cols-2 gap-2">
                     <div>
                       <label className="mb-1 block text-xs font-bold text-gray-500">Stock (per batch)</label>
@@ -1396,7 +1425,7 @@ function VendorMobileApp() {
                     </div>
                   </div>
                   <input type="text" value={productForm.description} onChange={e => setProductForm({...productForm, description: e.target.value})} className="w-full rounded-sm border px-3 py-2 text-sm outline-none" placeholder="Description" />
-                  <button type="submit" className="w-full rounded-sm bg-primary px-3 py-2 text-sm font-bold text-white">Add Product +</button>
+                  <button type="submit" className="w-full rounded-sm bg-primary px-3 py-2 text-sm font-bold text-white">{productForm.is_combo ? 'Add Combo +' : 'Add Product +'}</button>
                 </div>
               </form>
             )}
@@ -1414,9 +1443,19 @@ function VendorMobileApp() {
             <div className="space-y-2">
               {products.map(p => (
                 <div key={p.id} className="rounded-btn bg-white p-4 shadow-sm border flex items-center justify-between">
-                  <div>
-                    <h3 className="font-bold text-primary-dark">{p.name}</h3>
+                  <div className="min-w-0">
+                    <h3 className="font-bold text-primary-dark flex flex-wrap items-center gap-1.5">
+                      <span className="truncate">{p.name}</span>
+                      {!!p.is_combo && <span className="rounded-pill bg-gold-light/40 px-2 py-0.5 text-[10px] font-black uppercase tracking-wide text-gold-dark">Combo</span>}
+                    </h3>
                     <p className="text-xs text-gray-500">₹{p.price} · {p.category}{p.inventory > 0 ? ` · Stock: ${p.inventory}` : ''}</p>
+                    {!!p.is_combo && p.combo_items && (
+                      <ul className="mt-1 space-y-0.5 text-[11px] text-gray-500">
+                        {p.combo_items.split(/[\n,]+/).map(item => item.trim()).filter(Boolean).map((item, i) => (
+                          <li key={i}>• {item}</li>
+                        ))}
+                      </ul>
+                    )}
                   </div>
                   <div className="flex gap-2">
                     <button onClick={() => updateProductAvailable(p.id, !p.available)} className={`rounded-sm px-2 py-1 text-xs font-bold ${p.available ? 'bg-gray-100 text-gray-500' : 'bg-primary-light text-primary'}`}>{p.available ? 'Hide' : 'Show'}</button>

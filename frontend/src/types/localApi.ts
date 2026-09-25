@@ -35,6 +35,18 @@ export interface LocalProduct {
   available: number
   batch_type?: string
   stock_left?: number
+  /* Combo: ONE price for MANY items. `is_combo` marks the row (and always puts
+     it in the "Combo" category server-side); `combo_items` is the free-text
+     item list shown to the student. */
+  is_combo?: boolean | number
+  combo_items?: string
+}
+
+/* Admin-written info block shown at the top of the student home page
+   (Admin Centre → Settings → Student Info Banner). */
+export interface LocalStudentNotice {
+  enabled: boolean
+  text: string
 }
 
 export interface LocalOrder {

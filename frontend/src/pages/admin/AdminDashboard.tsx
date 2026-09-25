@@ -12,6 +12,7 @@ import {
   LocalRefund,
   LocalSettlement,
   LocalShop,
+  LocalStudentNotice,
   LocalSummary,
 } from '../../types/localApi'
 import { getLocalSession } from '../../utils/session'
@@ -60,6 +61,9 @@ export function AdminDashboard() {
   const [payments, setPayments] = useState<LocalPayment[]>([])
   const [summary, setSummary] = useState<LocalSummary | null>(null)
   const [paymentSettings, setPaymentSettings] = useState<LocalPaymentSettings | null>(null)
+  /* Site-wide info banner students read on the home page (settings tab). */
+  const [notice, setNotice] = useState<LocalStudentNotice>({ enabled: false, text: '' })
+  const [noticeSaving, setNoticeSaving] = useState(false)
   const [complaints, setComplaints] = useState<LocalComplaint[]>([])
   const [refunds, setRefunds] = useState<LocalRefund[]>([])
   const [settlements, setSettlements] = useState<LocalSettlement[]>([])
@@ -89,7 +93,7 @@ export function AdminDashboard() {
       setSummary(cur => same(cur, su) ? cur : su)
 
       // Load remaining data in parallel with shorter timeouts
-      const [p, o, pa, ps, cm, re, se, mc] = await Promise.all([
+      const [p, o, pa, ps, cm, re, se, mc, nt] = await Promise.all([
         apiCached.get<LocalProduct[]>('/local/products', undefined, 8000),
         apiCached.get<LocalOrder[]>('/local/orders', undefined, 8000),
         apiCached.get<LocalPayment[]>('/local/payments', undefined, 8000),
@@ -98,6 +102,7 @@ export function AdminDashboard() {
         apiCached.get<LocalRefund[]>('/local/refunds', undefined, 8000),
         api.get<LocalSettlement[]>('/local/settlements'),
         api.get<LocalMenuChangeRequest[]>('/local/menu-change-requests'),
+        api.get<LocalStudentNotice>('/local/student-notice'),
       ])
       setProducts(cur => same(cur, p) ? cur : p)
       setOrders(cur => same(cur, o) ? cur : o)
@@ -107,6 +112,7 @@ export function AdminDashboard() {
       setRefunds(cur => same(cur, re) ? cur : re)
       setSettlements(cur => same(cur, se.data) ? cur : se.data)
       setMenuChanges(cur => same(cur, mc.data) ? cur : mc.data)
+      setNotice(cur => same(cur, nt.data) ? cur : nt.data)
     } catch {
       setError('Backend not reachable')
     }
@@ -852,6 +858,7 @@ export function AdminDashboard() {
         )}
 
         {tab === 'settings' && (
+          <>
           <section className="rounded-btn bg-white p-5 shadow-card">
             <h2 className="mb-4 text-lg font-bold text-primary">Payment Settings</h2>
             {paymentSettings && (
@@ -912,6 +919,66 @@ export function AdminDashboard() {
               </form>
             )}
           </section>
+
+          {/* Student info banner — the green block on the student home page.
+              A blank message can never go live (the server reports it off). */}
+          <section className="mt-5 rounded-btn bg-white p-5 shadow-card">
+            <h2 className="mb-1 text-lg font-bold text-primary">Student Info Banner</h2>
+            <p className="mb-4 text-xs font-medium text-slate-500">
+              Shown as a green block at the top of the student home page — timings, holidays, offers, any notice every student should read.
+            </p>
+            <form
+              onSubmit={e => {
+                e.preventDefault()
+                const text = notice.text.trim()
+                if (notice.enabled && !text) { setError('Write the message students should read, or turn the banner off.'); return }
+                setError('')
+                setNoticeSaving(true)
+                setMessage('Saving...')
+                api
+                  .patch<LocalStudentNotice>('/local/student-notice', { enabled: notice.enabled, text })
+                  .then(r => {
+                    setNotice(cur => same(cur, r.data) ? cur : r.data)
+                    setMessage(r.data.enabled ? 'Banner is LIVE — students now see it on their home page.' : 'Banner hidden — students no longer see it.')
+                  })
+                  .catch(() => setMessage('Failed to save the banner'))
+                  .finally(() => setNoticeSaving(false))
+              }}
+              className="max-w-md space-y-4"
+            >
+              <label className="flex cursor-pointer items-center gap-2 text-sm font-semibold text-gray-700">
+                <input
+                  type="checkbox"
+                  checked={notice.enabled}
+                  onChange={e => setNotice({ ...notice, enabled: e.target.checked })}
+                  className="h-4 w-4 accent-emerald-600"
+                />
+                Show this banner to students
+              </label>
+              <div>
+                <label className="mb-1 block text-sm font-medium text-gray-600">Message</label>
+                <textarea
+                  value={notice.text}
+                  onChange={e => setNotice({ ...notice, text: e.target.value })}
+                  maxLength={500}
+                  rows={3}
+                  className="w-full rounded-btn border-2 border-gray-200 px-4 py-2.5 text-sm text-gray-900 outline-none focus:border-primary focus:shadow-emerald-sm"
+                  placeholder="e.g. Food court closes at 9 PM today. Pre-order before 8:30 PM."
+                />
+                <p className="mt-1 text-right text-[11px] font-medium text-slate-400">{notice.text.length}/500 · line breaks are kept</p>
+              </div>
+              <button disabled={noticeSaving} className="rounded-btn bg-primary px-5 py-2.5 text-sm font-bold text-white shadow-gold-sm hover:bg-primary-dark disabled:opacity-50">
+                {noticeSaving ? 'Saving...' : notice.enabled ? 'Save & Publish Banner' : 'Save (Banner Hidden)'}
+              </button>
+              {notice.enabled && notice.text.trim() && (
+                <div>
+                  <p className="mb-1 text-[11px] font-bold uppercase tracking-wide text-slate-400">Student preview</p>
+                  <div className="whitespace-pre-line rounded-btn border border-primary-light/50 bg-primary-light/25 px-4 py-3.5 text-sm font-semibold text-primary-dark">{notice.text.trim()}</div>
+                </div>
+              )}
+            </form>
+          </section>
+          </>
         )}
       </div>
     </div>

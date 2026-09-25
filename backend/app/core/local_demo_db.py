@@ -357,6 +357,8 @@ def init_local_demo_db() -> None:
                 inventory INTEGER NOT NULL,
                 prep_time INTEGER NOT NULL,
                 available INTEGER NOT NULL,
+                is_combo INTEGER NOT NULL DEFAULT 0,
+                combo_items TEXT NOT NULL DEFAULT '',
                 FOREIGN KEY (shop_id) REFERENCES shops(id)
             );
 
@@ -778,6 +780,12 @@ def init_local_demo_db() -> None:
             connection.execute("ALTER TABLE shops ADD COLUMN is_featured INTEGER NOT NULL DEFAULT 0")
         if not _column_exists(connection, "shops", "shop_image"):
             connection.execute("ALTER TABLE shops ADD COLUMN shop_image TEXT DEFAULT ''")
+        # Combo products: ONE price for MANY items (e.g. Biryani + Coke + Fries
+        # = ₹199). is_combo marks it; combo_items stores the item list as text.
+        if not _column_exists(connection, "products", "is_combo"):
+            connection.execute("ALTER TABLE products ADD COLUMN is_combo INTEGER NOT NULL DEFAULT 0")
+        if not _column_exists(connection, "products", "combo_items"):
+            connection.execute("ALTER TABLE products ADD COLUMN combo_items TEXT NOT NULL DEFAULT ''")
         for table in ("orders", "parent_orders"):
             if not _column_exists(connection, table, "owner_user_id"):
                 connection.execute(f"ALTER TABLE {table} ADD COLUMN owner_user_id TEXT NOT NULL DEFAULT ''")
@@ -1246,13 +1254,17 @@ def create_product(values: dict[str, Any]) -> dict[str, Any]:
             "SELECT COALESCE(MAX(CAST(substr(id, 2) AS INTEGER)), 0) + 1 FROM products"
         ).fetchone()[0]
         product_id = values.get("id") or f"p{next_num}"
+        # Combo: force category to Combo + mark is_combo so students see the
+        # combo badge; normal products pass through untouched.
+        is_combo = bool(values.get("is_combo"))
+        category = "Combo" if is_combo else values["category"]
         connection.execute(
             """
             INSERT INTO products (
                 id, shop_id, name, description, price, pending_price,
-                category, inventory, prep_time, available
+                category, inventory, prep_time, available, is_combo, combo_items
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 product_id,
@@ -1261,10 +1273,12 @@ def create_product(values: dict[str, Any]) -> dict[str, Any]:
                 values.get("description", ""),
                 values["price"],
                 values.get("pending_price"),
-                values["category"],
+                category,
                 values.get("inventory", 0),
                 values.get("prep_time", 10),
                 1 if values.get("available", True) else 0,
+                1 if is_combo else 0,
+                str(values.get("combo_items", "") or ""),
             ),
         )
         row = connection.execute("SELECT * FROM products WHERE id = ?", (product_id,)).fetchone()
@@ -1281,6 +1295,8 @@ def update_product(product_id: str, values: dict[str, Any]) -> dict[str, Any] | 
         "inventory",
         "prep_time",
         "available",
+        "is_combo",
+        "combo_items",
     }
     updates = {key: value for key, value in values.items() if key in allowed_fields and (value is not None or key == "pending_price")}
     if not updates:
@@ -1288,6 +1304,12 @@ def update_product(product_id: str, values: dict[str, Any]) -> dict[str, Any] | 
 
     if "available" in updates:
         updates["available"] = 1 if updates["available"] else 0
+    if "is_combo" in updates:
+        updates["is_combo"] = 1 if updates["is_combo"] else 0
+        # Turning a product into a combo forces the Combo category so the
+        # student menu groups it under Combos automatically.
+        if updates["is_combo"] and "category" not in updates:
+            updates["category"] = "Combo"
 
     assignments = ", ".join(f"{field} = ?" for field in updates)
     params = [*updates.values(), product_id]
@@ -2546,6 +2568,44 @@ def update_payment_settings(values: dict[str, Any]) -> dict[str, Any]:
                 (key, stored_value),
             )
     return get_payment_settings()
+
+
+# ─── Student info notice (site-wide banner on the student home page) ───
+
+
+def get_student_notice() -> dict[str, Any]:
+    """The info block students see on their home page, edited from the Admin
+    Centre. Stored in ``app_settings`` (no extra table/migration needed):
+    ``student_notice_enabled`` = "true"/"false", ``student_notice_text`` = the
+    message. An empty message can never render — ``enabled`` is False whenever
+    the text is blank."""
+    with _connect() as connection:
+        rows = connection.execute(
+            "SELECT key, value FROM app_settings "
+            "WHERE key IN ('student_notice_text', 'student_notice_enabled')"
+        ).fetchall()
+    values = {row["key"]: row["value"] for row in rows}
+    text = str(values.get("student_notice_text", "") or "").strip()
+    return {
+        "enabled": values.get("student_notice_enabled", "false") == "true" and bool(text),
+        "text": text,
+    }
+
+
+def update_student_notice(values: dict[str, Any]) -> dict[str, Any]:
+    """Save the student info notice (admin only — see the local API routes)."""
+    columns = {"enabled": "student_notice_enabled", "text": "student_notice_text"}
+    with _connect() as connection:
+        for field, key in columns.items():
+            if field not in values or values[field] is None:
+                continue
+            value = values[field]
+            stored_value = ("true" if value else "false") if isinstance(value, bool) else str(value)
+            connection.execute(
+                "INSERT OR REPLACE INTO app_settings (key, value) VALUES (?, ?)",
+                (key, stored_value),
+            )
+    return get_student_notice()
 
 
 def create_ticket(values: dict[str, Any]) -> dict[str, Any]:

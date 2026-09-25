@@ -80,6 +80,8 @@ create table if not exists public.products (
   inventory integer not null default 0,
   prep_time integer not null default 10,
   available boolean not null default true,
+  is_combo boolean not null default false,
+  combo_items text not null default '',
   created_at timestamptz not null default now()
 );
 

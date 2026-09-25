@@ -208,6 +208,10 @@ _MIGRATIONS = [
     # the vendor's "Add Product" fails in production (500) while local SQLite
     # works (local auto-creates the schema on startup).
     "ALTER TABLE products ADD COLUMN IF NOT EXISTS pending_price integer",
+    # Combo products: ONE price for MANY items (Biryani + Fast Food + drink =
+    # one combo row). is_combo marks it; combo_items stores the item list text.
+    "ALTER TABLE products ADD COLUMN IF NOT EXISTS is_combo boolean NOT NULL DEFAULT false",
+    "ALTER TABLE products ADD COLUMN IF NOT EXISTS combo_items text NOT NULL DEFAULT ''",
     # Remove the sold column from product_stock — we now track stock by directly
     # decrementing/incrementing total_stock instead of maintaining a separate sold counter.
     "ALTER TABLE product_stock DROP COLUMN IF EXISTS sold",
@@ -693,9 +697,9 @@ def _create_product_impl(values: dict[str, Any]) -> dict[str, Any]:
                 """
                 INSERT INTO products (
                     id, shop_id, name, description, price, pending_price,
-                    category, inventory, prep_time, available
+                    category, inventory, prep_time, available, is_combo, combo_items
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """,
                 (
                     product_id,
@@ -704,10 +708,12 @@ def _create_product_impl(values: dict[str, Any]) -> dict[str, Any]:
                     values.get("description", ""),
                     values["price"],
                     values.get("pending_price"),
-                    values["category"],
+                    "Combo" if values.get("is_combo") else values["category"],
                     values.get("inventory", 0),
                     values.get("prep_time", 10),
                     bool(values.get("available", True)),
+                    bool(values.get("is_combo", False)),
+                    str(values.get("combo_items", "") or ""),
                 ),
             )
             cursor.execute("SELECT * FROM products WHERE id = %s", (product_id,))
@@ -725,6 +731,8 @@ def update_product(product_id: str, values: dict[str, Any]) -> dict[str, Any] | 
         "inventory",
         "prep_time",
         "available",
+        "is_combo",
+        "combo_items",
     }
     updates = {key: value for key, value in values.items() if key in allowed_fields and (value is not None or key == "pending_price")}
     if not updates:
@@ -732,6 +740,10 @@ def update_product(product_id: str, values: dict[str, Any]) -> dict[str, Any] | 
 
     if "available" in updates:
         updates["available"] = bool(updates["available"])
+    if "is_combo" in updates:
+        updates["is_combo"] = bool(updates["is_combo"])
+        if updates["is_combo"] and "category" not in updates:
+            updates["category"] = "Combo"
 
     assignments = ", ".join(f"{field} = %s" for field in updates)
     params = [*updates.values(), product_id]
@@ -1454,6 +1466,53 @@ def update_payment_settings(values: dict[str, Any]) -> dict[str, Any]:
                     (key, stored_value),
                 )
     return get_payment_settings()
+
+
+# ─── Student info notice (site-wide banner on the student home page) ───
+
+
+def get_student_notice() -> dict[str, Any]:
+    """The info block students see on their home page, edited from the Admin
+    Centre. Stored in the shared ``app_settings`` key/value table so no new
+    table (or migration) is needed:
+
+    * ``student_notice_enabled`` — "true" / "false"
+    * ``student_notice_text``    — the message the student reads
+
+    An empty message can never render, so ``enabled`` is reported as False
+    whenever the text is blank — the admin can't leave a blank green block on
+    the student app by accident.
+    """
+    with _DBContext(_connect()) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT key, value FROM app_settings "
+                "WHERE key IN ('student_notice_text', 'student_notice_enabled')"
+            )
+            values = {row["key"]: row["value"] for row in cursor.fetchall()}
+    text = str(values.get("student_notice_text", "") or "").strip()
+    return {
+        "enabled": values.get("student_notice_enabled", "false") == "true" and bool(text),
+        "text": text,
+    }
+
+
+def update_student_notice(values: dict[str, Any]) -> dict[str, Any]:
+    """Save the student info notice (admin only — see the local API routes)."""
+    columns = {"enabled": "student_notice_enabled", "text": "student_notice_text"}
+    with _DBContext(_connect()) as connection:
+        with connection.cursor() as cursor:
+            for field, key in columns.items():
+                if field not in values or values[field] is None:
+                    continue
+                value = values[field]
+                stored_value = ("true" if value else "false") if isinstance(value, bool) else str(value)
+                cursor.execute(
+                    "INSERT INTO app_settings (key, value) VALUES (%s, %s) "
+                    "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = now()",
+                    (key, stored_value),
+                )
+    return get_student_notice()
 
 
 # ─── Tickets ───

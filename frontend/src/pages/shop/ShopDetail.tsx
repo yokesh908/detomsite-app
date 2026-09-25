@@ -7,6 +7,11 @@ import { usePolling } from '../../hooks/usePolling'
 import { same } from '../../utils/same'
 import { getShopImage } from '../../utils/shopImages'
 
+/* Combo items are free text (one per line, commas also work). */
+function comboItems(product: LocalProduct): string[] {
+  return (product.combo_items || '').split(/[\n,]+/).map(item => item.trim()).filter(Boolean)
+}
+
 export function ShopDetail() {
   const { shopId } = useParams<{ shopId: string }>()
   const [shop, setShop] = useState<LocalShop | null>(null)
@@ -100,10 +105,21 @@ export function ShopDetail() {
                 return (
                   <div key={product.id} className={"flex items-start justify-between gap-3 rounded-card border p-4 transition-all " + (isOrderable ? "border-primary-light/30 bg-white shadow" : "border-primary-light/20 bg-white/70 opacity-60")}>
                     <div className="min-w-0 flex-1">
-                      <h3 className="font-bold text-primary-dark">{product.name}</h3>
+                      <h3 className="font-bold text-primary-dark">
+                        {product.name}
+                        {Boolean(product.is_combo) && (
+                          <span className="ml-1.5 align-middle rounded-pill bg-gold-100 px-2 py-0.5 text-[10px] font-black uppercase tracking-wide text-gold-700">Combo</span>
+                        )}
+                      </h3>
                       {product.description && <p className="mt-0.5 text-xs text-slate-500 leading-relaxed">{product.description}</p>}
+                      {/* Combo contents — what the ONE price buys */}
+                      {Boolean(product.is_combo) && comboItems(product).length > 0 && (
+                        <ul className="mt-1 space-y-0.5 text-[11px] font-medium text-slate-500">
+                          {comboItems(product).map((item, i) => <li key={i}>• {item}</li>)}
+                        </ul>
+                      )}
                       <div className="mt-2 flex flex-wrap items-center gap-2 text-xs font-semibold">
-                        <span className="font-bold text-primary">Rs.{product.price}</span>
+                        <span className="font-bold text-primary">Rs.{product.price}{Boolean(product.is_combo) && <span className="ml-1 text-[10px] font-semibold text-slate-400">full combo</span>}</span>
                         {product.pending_price ? <span className="text-gold-600">Pending: Rs.{product.pending_price}</span> : null}
                         <span className="text-slate-400">Prep: {product.prep_time} min</span>
                       </div>

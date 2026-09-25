@@ -47,7 +47,7 @@ async def test_cod_multi_shop_order_notifies_each_shop_individually(client, monk
             {"shop_id": shop_b["id"], "items": [{"product_id": prod_b["id"], "quantity": 2}]},
         ],
         "student_name": "WA Student", "student_phone": "+919876543210",
-        "delivery_location": "Test location", "payment_method": "COD",
+        "delivery_location": "VIT-AP Test location", "payment_method": "COD",
     })
     assert res.status_code == 200, res.text
     subs = res.json()["sub_orders"]
@@ -71,9 +71,9 @@ async def test_cod_multi_shop_order_notifies_each_shop_individually(client, monk
 
 def test_compose_order_wa_ref_is_unique_per_sub_order():
     order_a = {"id": "p20260921-18-1", "token": 18, "items": "1x Biryani", "total": 100,
-               "payment_method": "COD", "student_name": "S", "delivery_location": "L"}
+               "payment_method": "COD", "student_name": "S", "delivery_location": "VIT-AP L"}
     order_b = {"id": "p20260921-18-2", "token": 18, "items": "1x Dosa", "total": 100,
-               "payment_method": "COD", "student_name": "S", "delivery_location": "L"}
+               "payment_method": "COD", "student_name": "S", "delivery_location": "VIT-AP L"}
     msg_a, msg_b = local.sms_service.compose_order_wa(order_a), local.sms_service.compose_order_wa(order_b)
     assert "Ref: p20260921-18-1" in msg_a
     assert "Ref: p20260921-18-2" in msg_b

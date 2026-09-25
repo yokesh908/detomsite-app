@@ -95,21 +95,30 @@ def get_current_vendor(authorization: Optional[str] = Header(None)) -> dict:
     return user
 
 
-def _my_shop(current_vendor: dict) -> dict:
-    """Find the vendor's shop by their email. Some shops are auto-created with
-    the shopkeeper's real email, others with ``{username}@campus.local``, so
-    check both (indexed, single query each) before failing."""
-    candidates = (
-        current_vendor.get("email") or "",
-        f"{current_vendor['username']}@campus.local",
-    )
-    for vendor_email in candidates:
+def _find_shop(current_vendor: dict) -> dict | None:
+    """The vendor's shop, or ``None``.
+
+    Some shops are auto-created with the shopkeeper's real email, others with
+    ``{username}@campus.local`` — so check both (one indexed lookup each) before
+    giving up. Every vendor endpoint used to look up ONLY the campus.local
+    address, which meant a vendor who registered with their real email got
+    "Shop not found" from the product, order and dashboard routes.
+    """
+    for vendor_email in (current_vendor.get("email") or "", f"{current_vendor['username']}@campus.local"):
         if not vendor_email:
             continue
         shop = db.get_shop_by_shopkeeper_email(vendor_email)
         if shop:
             return shop
-    raise HTTPException(status_code=404, detail="Shop not found")
+    return None
+
+
+def _my_shop(current_vendor: dict) -> dict:
+    """The vendor's shop — 404 when the account has no shop attached."""
+    shop = _find_shop(current_vendor)
+    if not shop:
+        raise HTTPException(status_code=404, detail="Shop not found")
+    return shop
 
 
 def _sub_order_shape(sub: dict) -> dict:
@@ -258,7 +267,7 @@ def login(data: VendorLoginRequest, request: Request):
 @router.get("/dashboard")
 def dashboard(current_vendor: dict = Depends(get_current_vendor)):
     """Get vendor dashboard with shop details, orders, and admin dues (₹10 per order)."""
-    my_shop = db.get_shop_by_shopkeeper_email(f"{current_vendor['username']}@campus.local")
+    my_shop = _find_shop(current_vendor)
 
     if not my_shop:
         return {
@@ -407,7 +416,7 @@ def pay_admin_dues(data: AdminDuesPayment, current_vendor: dict = Depends(get_cu
 @router.get("/orders")
 def get_orders(current_vendor: dict = Depends(get_current_vendor)):
     """Get all orders for this vendor's shop (single + multi-shop sub-orders)."""
-    my_shop = db.get_shop_by_shopkeeper_email(f"{current_vendor['username']}@campus.local")
+    my_shop = _find_shop(current_vendor)
     if not my_shop:
         return []
     orders = _shop_orders_merged(my_shop["id"])
@@ -447,7 +456,7 @@ def lookup_order_by_code(code: str = Query(..., min_length=1, max_length=200), c
     if not order:
         raise HTTPException(status_code=404, detail="Order not found. Check the code and try again.")
 
-    my_shop = db.get_shop_by_shopkeeper_email(f"{current_vendor['username']}@campus.local")
+    my_shop = _find_shop(current_vendor)
     if not my_shop or order["shop_id"] != my_shop["id"]:
         raise HTTPException(status_code=403, detail="This order belongs to another shop.")
 
@@ -497,7 +506,7 @@ def vendor_history(
         to_date = datetime.now(_KOLKATA_TZ).strftime("%Y-%m-%d")
         from_date = (datetime.now(_KOLKATA_TZ) - timedelta(days=6)).strftime("%Y-%m-%d")
 
-    my_shop = db.get_shop_by_shopkeeper_email(f"{current_vendor['username']}@campus.local")
+    my_shop = _find_shop(current_vendor)
     if not my_shop:
         return {"orders": [], "daily": [], "revenue": 0, "count": 0}
 
@@ -547,7 +556,7 @@ def update_order_status(order_id: str, data: dict, current_vendor: dict = Depend
         order = db.get_sub_order(order_id)
         is_sub = bool(order)
 
-    my_shop = db.get_shop_by_shopkeeper_email(f"{current_vendor['username']}@campus.local")
+    my_shop = _find_shop(current_vendor)
     if not order or not my_shop or order["shop_id"] != my_shop["id"]:
         raise HTTPException(status_code=403, detail="You don't own this order")
 
@@ -583,7 +592,7 @@ def confirm_payment_received(order_id: str, current_vendor: dict = Depends(get_c
     if not order:
         raise HTTPException(status_code=404, detail="Order not found")
 
-    my_shop = db.get_shop_by_shopkeeper_email(f"{current_vendor['username']}@campus.local")
+    my_shop = _find_shop(current_vendor)
     if not my_shop or order["shop_id"] != my_shop["id"]:
         raise HTTPException(status_code=403, detail="You don't own this order")
 
@@ -655,6 +664,12 @@ class ProductCreate(BaseModel):
     inventory: int = 0
     prep_time: int = 10
     available: bool = True
+    # Combo: ONE price for MANY items (Biryani + Fast Food + drink). When
+    # is_combo is true the category is forced to "Combo" and combo_items holds
+    # the item list text (one per line or comma-separated). Bounded so a vendor
+    # can't store an unbounded blob that every student's menu then downloads.
+    is_combo: bool = False
+    combo_items: str = Field(default="", max_length=500)
 
 
 class ProductUpdate(BaseModel):
@@ -665,12 +680,14 @@ class ProductUpdate(BaseModel):
     inventory: int | None = None
     prep_time: int | None = None
     available: bool | None = None
+    is_combo: bool | None = None
+    combo_items: str | None = Field(default=None, max_length=500)
 
 
 @router.get("/products")
 def list_my_products(current_vendor: dict = Depends(get_current_vendor)):
     """List products for this vendor's shop."""
-    my_shop = db.get_shop_by_shopkeeper_email(f"{current_vendor['username']}@campus.local")
+    my_shop = _find_shop(current_vendor)
     if not my_shop:
         return []
     return db.list_products(my_shop["id"])
@@ -679,7 +696,7 @@ def list_my_products(current_vendor: dict = Depends(get_current_vendor)):
 @router.post("/products", status_code=201)
 def create_product(data: ProductCreate, current_vendor: dict = Depends(get_current_vendor)):
     """Add a new product to this vendor's shop."""
-    my_shop = db.get_shop_by_shopkeeper_email(f"{current_vendor['username']}@campus.local")
+    my_shop = _find_shop(current_vendor)
 
     if not my_shop:
         raise HTTPException(status_code=404, detail="Shop not found")
@@ -688,15 +705,21 @@ def create_product(data: ProductCreate, current_vendor: dict = Depends(get_curre
         raise HTTPException(status_code=403, detail="Shop not approved. Cannot add products.")
 
     try:
+        # A combo is ONE menu row holding MANY items at one price — the category
+        # is forced so students always find every combo together under "Combo"
+        # (the DB layer enforces the same rule, so no path can bypass it).
+        is_combo = bool(data.is_combo)
         product = db.create_product({
             "shop_id": my_shop["id"],
             "name": data.name,
             "description": data.description,
             "price": data.price,
-            "category": data.category,
+            "category": "Combo" if is_combo else data.category,
             "inventory": data.inventory,
             "prep_time": data.prep_time,
             "available": data.available,
+            "is_combo": is_combo,
+            "combo_items": data.combo_items if is_combo else "",
         })
     except Exception as e:
         # Full details go to the server log (Render) — the vendor only gets a
@@ -733,7 +756,7 @@ def update_product(product_id: str, data: ProductUpdate, current_vendor: dict = 
         raise HTTPException(status_code=404, detail="Product not found")
 
     # Verify this vendor owns the product's shop
-    my_shop = db.get_shop_by_shopkeeper_email(f"{current_vendor['username']}@campus.local")
+    my_shop = _find_shop(current_vendor)
     if not my_shop or product["shop_id"] != my_shop["id"]:
         raise HTTPException(status_code=403, detail="You don't own this product")
 
@@ -760,7 +783,7 @@ def delete_product(product_id: str, current_vendor: dict = Depends(get_current_v
     if not product:
         raise HTTPException(status_code=404, detail="Product not found")
 
-    my_shop = db.get_shop_by_shopkeeper_email(f"{current_vendor['username']}@campus.local")
+    my_shop = _find_shop(current_vendor)
     if not my_shop or product["shop_id"] != my_shop["id"]:
         raise HTTPException(status_code=403, detail="You don't own this product")
 

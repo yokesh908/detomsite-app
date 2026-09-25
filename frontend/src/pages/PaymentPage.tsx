@@ -11,6 +11,10 @@ const UPI_LIMIT = 100000
 
 function upiAmount(am: number) { const n = Number(am); return Number.isFinite(n) ? Math.round(n * 100) / 100 : 0 }
 
+/* VIT-AP campus only — off-campus delivery areas removed. */
+const VITAP_LOCS = ['VIT-AP Hostel A Block', 'VIT-AP Hostel B Block', 'VIT-AP Academic Block', 'VIT-AP Food Court', 'VIT-AP Library']
+function isVitAp(v: string) { return /vit[\s-]*ap/i.test(v || '') }
+
 export function PaymentPage() {
   const navigate = useNavigate()
   const session = getLocalSession()
@@ -18,16 +22,15 @@ export function PaymentPage() {
   const [method, setMethod] = useState<'manual' | 'cod'>('manual')
   const [utr, setUtr] = useState('')
   const [slot, setSlot] = useState<'Afternoon' | 'Night'>('Afternoon')
-  const [loc, setLoc] = useState(session?.default_delivery_location || 'Hostel A Block 201')
+  const [loc, setLoc] = useState('VIT-AP Hostel A Block')
   const [phone, setPhone] = useState(session?.phone || '')
-  const [locating, setLocating] = useState(false)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const groups = getCartByShop()
   const total = groups.reduce((sum, g) => sum + g.subtotal, 0)
   const manualReady = Boolean(ps?.manual_enabled && ps.upi_id)
   const upiUrl = manualReady
-    ? `upi://pay?pa=${encodeURIComponent((ps?.upi_id || '').trim())}&pn=${encodeURIComponent((ps?.receiver_name || 'DETOMSITE').trim())}&am=${upiAmount(total).toFixed(2)}&cu=INR&mode=04&tn=${encodeURIComponent('DETOMSITE Multi-Shop Order')}`
+    ? `upi://pay?pa=${encodeURIComponent((ps?.upi_id || '').trim())}&pn=${encodeURIComponent((ps?.receiver_name || 'DETOMSITE').trim())}&am=${upiAmount(total).toFixed(2)}&cu=INR&tn=${encodeURIComponent(`Detomsite ${total}`)}`
     : ''
   const [upiQrCode, setUpiQrCode] = useState('')
 
@@ -55,51 +58,21 @@ export function PaymentPage() {
     return () => { active = false }
   }, [upiUrl])
 
-  const reverseGeocode = async (lat: number, lon: number): Promise<string> => {
-    try {
-      const r = await fetch(`https://api.bigdatacloud.net/data/reverse-geocode-client?latitude=${lat}&longitude=${lon}&localityLanguage=en`)
-      if (r.ok) {
-        const d = await r.json()
-        const parts = [d.locality, d.city, d.principalSubdivision, d.countryName].filter((x: any) => x && String(x).trim())
-        if (parts.length) return parts.join(', ')
-      }
-    } catch { /* try the fallback below */ }
-    try {
-      const r = await fetch(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=${lat}&lon=${lon}&zoom=18&addressdetails=1`)
-      if (r.ok) {
-        const d = await r.json()
-        if (d?.display_name) return String(d.display_name)
-      }
-    } catch { /* give up */ }
-    return ''
-  }
-
-  const useMyLocation = () => {
-    if (!navigator.geolocation) { setError('Location is not supported in this browser — please type it manually.'); return }
-    setLocating(true)
-    setError('')
-    navigator.geolocation.getCurrentPosition(
-      async (pos) => {
-        const lat = pos.coords.latitude, lon = pos.coords.longitude
-        setLoc(`${lat.toFixed(4)}, ${lon.toFixed(4)}`)
-        const address = await reverseGeocode(lat, lon)
-        setLoc(address || `${lat.toFixed(4)}, ${lon.toFixed(4)}`)
-        setLocating(false)
-      },
-      () => { setLocating(false); setError('Could not get your location — please type it manually.') },
-      { enableHighAccuracy: true, timeout: 10000 },
-    )
-  }
+  /* GPS "use my location" removed: delivery is VIT-AP campus only, and a GPS
+     reverse-geocode (city/state/country) would push off-campus text into the
+     order. The VIT-AP select below is the only delivery input. */
 
   const submit = async (e: FormEvent) => {
     e.preventDefault()
     setError('')
     if (!groups.length) { setError('Cart empty'); return }
     if (!isValidMobile(phone)) { setError('Please enter a valid 10-digit mobile number'); return }
+    if (!isVitAp(loc)) { setError('Delivery is VIT-AP campus only — please pick a VIT-AP location.'); return }
 
     if (method === 'manual') {
       if (!manualReady) { setError('Manual payment not configured'); return }
-      if (!utr.trim()) { setError('Enter the UTR from your UPI app — it is the only proof we need'); return }
+      const clean = utr.trim().toUpperCase().replace(/[^A-Z0-9]/g, '')
+      if (clean.length < 12) { setError('Pay in your UPI app first, then paste the 12-digit UTR from the success screen.'); return }
     }
 
     setLoading(true)
@@ -148,7 +121,7 @@ export function PaymentPage() {
 
   const canPay = method === 'cod'
     ? true
-    : manualReady && Boolean(utr.trim())
+    : manualReady && utr.trim().replace(/[^A-Za-z0-9]/g, '').length >= 12
 
   return (
     <div className="min-h-screen bg-white">
@@ -167,16 +140,17 @@ export function PaymentPage() {
         ) : (
           <form onSubmit={submit} className="grid gap-6 lg:grid-cols-[1fr_340px]">
             <div className="rounded-btn bg-white p-5 shadow-card">
-              <h2 className="mb-4 text-lg font-bold text-primary-dark">Delivery Details</h2>
+              <h2 className="mb-4 text-lg font-bold text-primary-dark">Delivery Details · VIT-AP only</h2>
               <div className="space-y-4 mb-6">
-                <div className="flex gap-2">
-                  <input value={loc} onChange={e => setLoc(e.target.value)}
-                    className="w-full rounded-btn border-2 border-gray-200 px-4 py-2.5 text-sm text-gray-900 placeholder-gray-400 outline-none focus:border-primary focus:shadow-emerald-sm" placeholder="Delivery location" required />
-                  <button type="button" onClick={useMyLocation} disabled={locating}
-                    className="shrink-0 rounded-btn border-2 border-primary-light/50 bg-primary-light/30 px-3 py-2 text-xs font-bold text-primary transition-all hover:bg-primary-light disabled:opacity-50">
-                    <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 21s-7-5.5-7-11a7 7 0 0 1 14 0c0 5.5-7 11-7 11Z" /><circle cx="12" cy="10" r="2.5" /></svg>
-                    {locating ? 'Locating...' : 'Use my location'}
-                  </button>
+                <div>
+                  <label className="mb-1 block text-sm font-bold text-gray-500">Delivery location (VIT-AP campus only)</label>
+                  <select value={VITAP_LOCS.includes(loc) ? loc : VITAP_LOCS[0]} onChange={e => setLoc(e.target.value)}
+                    className="w-full rounded-btn border-2 border-gray-200 px-4 py-2.5 text-sm text-gray-900 outline-none focus:border-primary focus:shadow-emerald-sm" required>
+                    {VITAP_LOCS.map(l => <option key={l} value={l}>{l}</option>)}
+                  </select>
+                  <input value={loc.startsWith('VIT-AP') ? loc.replace(/^VIT-AP\s*/, '') : loc} onChange={e => setLoc(`VIT-AP ${e.target.value}`.trim())}
+                    className="mt-2 w-full rounded-btn border-2 border-gray-200 px-4 py-2.5 text-sm text-gray-900 placeholder-gray-400 outline-none focus:border-primary focus:shadow-emerald-sm" placeholder="Room / block detail (e.g. Hostel A Block, Room 204)" />
+                  <p className="mt-1.5 text-[11px] font-semibold text-primary">📍 Delivery only inside VIT-AP campus. Outside areas are not served.</p>
                 </div>
                 <PhoneInput value={phone} onChange={setPhone} placeholder="98765 43210" required />
               </div>
@@ -214,17 +188,17 @@ export function PaymentPage() {
                     </div>
                   )}
                   <div className="rounded-btn bg-primary-light/30 border border-primary-light/50 p-4">
-                    <p className="text-sm font-semibold text-primary">UPI Payment — Pay ₹{total} (one bill for {groups.length} shop{groups.length > 1 ? 's' : ''})</p>
+                    <p className="text-sm font-semibold text-primary">UPI Payment — Pay ₹{total} ONCE (one bill for {groups.length} shop{groups.length > 1 ? 's' : ''})</p>
                     {manualReady ? (
                       <div className="mt-2 text-sm text-gray-600">
-                        <p>Pay to: {ps?.receiver_name || 'Merchant'}</p>
+                        <p>Pay to: {ps?.receiver_name || 'Merchant'} — if your UPI app shows a DIFFERENT name, STOP and pay via mobile number instead</p>
                         <p className="font-mono font-bold text-primary">{ps?.upi_id}</p>
                         {ps?.instructions && <p className="mt-1 text-gray-500">{ps.instructions}</p>}
                         {upiQrCode && (
                           <div className="mt-4 flex flex-col items-center rounded-btn border border-primary-light/60 bg-white p-4 text-center">
-                            <img src={upiQrCode} alt={`Scan to pay ₹${total}`} className="h-52 w-52" />
-                            <p className="mt-2 text-sm font-bold text-primary-dark">Scan to pay ₹{total}</p>
-                            <p className="mt-1 text-xs text-gray-500">Open your camera or UPI app and scan this code</p>
+                            <img src={upiQrCode} alt={`Scan ONCE to pay ₹${total}`} className="h-52 w-52" />
+                            <p className="mt-2 text-sm font-bold text-primary-dark">Scan ONCE to pay ₹{total} — then paste UTR below (no second scan)</p>
+                            <p className="mt-1 text-xs text-gray-500">This is the ONLY QR — the order-result page shows no second QR. Pay once.</p>
                           </div>
                         )}
                         <a
@@ -233,20 +207,21 @@ export function PaymentPage() {
                           <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .4 2 .7 2.9a2 2 0 0 1-.4 2.1L8.1 10a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.9.6 2.9.7a2 2 0 0 1 1.6 2Z" /></svg>
                           Pay via UPI App (GPay / PhonePe / Paytm)
                         </a>
-                        <p className="mt-2 text-xs text-primary">Opens your UPI app — pay now, then enter the UTR below (the only proof we need).</p>
+                        <p className="mt-2 text-xs text-primary">Pay FIRST in your UPI app, then paste the 12-digit UTR below — order is placed with proof attached (no second ask).</p>
+                        <p className="mt-1 text-[11px] text-amber-700">If the app warns "THIS PAYMENT MAY FAIL AS PER UPI RISK POLICY": STOP — the VPA name check failed. Pay the same VPA via mobile number instead, or verify receiver name. Do NOT retry blindly.</p>
                       </div>
                     ) : <p className="mt-2 text-sm text-gray-400">Admin hasn't configured payment yet</p>}
                   </div>
                   <div className="grid gap-3 md:grid-cols-2">
-                    <input value={utr} onChange={e => setUtr(e.target.value)}
-                      className="rounded-btn border-2 border-gray-200 px-4 py-2.5 text-sm text-gray-900 placeholder-gray-400 outline-none focus:border-primary focus:shadow-emerald-sm" placeholder="UTR / Transaction ID" required={method === 'manual'} />
+                    <input value={utr} onChange={e => setUtr(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 22))}
+                      className="rounded-btn border-2 border-gray-200 px-4 py-2.5 text-sm font-bold tracking-widest text-gray-900 placeholder-gray-400 outline-none focus:border-primary focus:shadow-emerald-sm" placeholder="UTR (12-digit, required before order)" required={method === 'manual'} />
                     <select value={slot} onChange={e => setSlot(e.target.value as 'Afternoon' | 'Night')}
                       className="rounded-btn border-2 border-gray-200 px-4 py-2.5 text-sm text-gray-900 outline-none focus:border-primary">
                       <option value="Afternoon">Afternoon slot · deliver 1:00 – 1:30 PM</option>
                       <option value="Night">Night slot · deliver 7:30 – 8:00 PM</option>
                     </select>
                   </div>
-                  <p className="text-xs text-gray-500">The <b>UTR is the only proof we need</b> — you'll find it in your UPI app's payment-success screen (e.g. UPI ref / txn ID). No screenshot upload.</p>
+                  <p className="text-xs text-gray-500">The <b>UTR is asked BEFORE the order is placed</b> so you never think twice — you'll find it in your UPI app's payment-success screen (UPI ref / txn ID). No screenshot upload. No second QR/UTR ask after.</p>
                 </div>
               )}
 
@@ -276,7 +251,7 @@ export function PaymentPage() {
               </div>
               <button type="submit" disabled={loading || !canPay}
                 className="mt-5 w-full rounded-btn bg-primary px-5 py-3 text-sm font-bold text-white shadow-gold transition-all hover:bg-primary-dark disabled:opacity-40">
-                {loading ? 'Placing order...' : method === 'cod' ? `Place COD Order · ₹${total}` : `Pay ₹${total} via UPI`}
+                {loading ? 'Placing order...' : method === 'cod' ? `Place COD Order · ₹${total}` : (utr.trim().replace(/[^A-Za-z0-9]/g, '').length >= 12 ? `Place Order with UTR · ₹${total}` : `Enter UTR above to place order`)}
               </button>
               {!manualReady && method === 'manual' && (
                 <p className="mt-3 text-center text-xs font-medium text-gray-400">UPI not configured — use COD instead.</p>

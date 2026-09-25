@@ -185,6 +185,11 @@ class LocalProductCreate(BaseModel):
     inventory: int = 0
     prep_time: int = 10
     available: bool = True
+    # Combo: ONE price for MANY items (Biryani + Fast Food + drink). When
+    # is_combo is true the category is forced to "Combo" and combo_items holds
+    # the item list text (one per line or comma-separated).
+    is_combo: bool = False
+    combo_items: str = ""
 
 
 class LocalProductUpdate(BaseModel):
@@ -196,6 +201,23 @@ class LocalProductUpdate(BaseModel):
     inventory: int | None = None
     prep_time: int | None = None
     available: bool | None = None
+    is_combo: bool | None = None
+    combo_items: str | None = None
+
+
+def _require_vitap_location(value: str) -> str:
+    """Delivery is VIT-AP campus only — reject anything outside it.
+
+    The GPS "use my location" button and off-campus presets were removed from
+    the UI, but a hand-crafted request could still send "Guntur" etc. This is
+    the server-side guard: every order/payments path normalises through here.
+    """
+    loc = (value or "").strip()
+    if not loc:
+        raise ValueError("delivery_location is required")
+    if not re.search(r"vit[\s-]*ap", loc, re.I):
+        raise ValueError("Delivery is VIT-AP campus only — please choose a VIT-AP location.")
+    return loc
 
 
 class LocalOrderStatusUpdate(BaseModel):
@@ -221,6 +243,11 @@ class LocalOrderCreate(BaseModel):
     pending_payment: bool = False
     payment_method: str = "UPI"  # 'UPI' | 'COD' | 'Razorpay'
 
+    @field_validator("delivery_location")
+    @classmethod
+    def _validate_location(cls, value: str) -> str:
+        return _require_vitap_location(value)
+
     @field_validator("payment_method")
     @classmethod
     def _validate_payment_method(cls, value: str) -> str:
@@ -237,6 +264,11 @@ class LocalMultiShopOrder(BaseModel):
     delivery_location: str
     delivery_slot: str = ""
     payment_method: str = "UTR"  # 'UTR' | 'COD'
+
+    @field_validator("delivery_location")
+    @classmethod
+    def _validate_location(cls, value: str) -> str:
+        return _require_vitap_location(value)
 
     @field_validator("payment_method")
     @classmethod
@@ -281,6 +313,13 @@ class LocalAnnouncementCreate(BaseModel):
 
 class LocalAnnouncementToggle(BaseModel):
     is_active: int = 1
+
+
+class LocalStudentNoticeUpdate(BaseModel):
+    """Site-wide info block on the student home page (admin editor)."""
+
+    enabled: bool | None = None
+    text: str | None = Field(default=None, max_length=500)
 
 
 class LocalMenuChangeCreate(BaseModel):
@@ -1896,6 +1935,26 @@ async def patch_payment_settings(data: LocalPaymentSettings, _admin: dict = Depe
     through ``_require_admin``, which re-checks the account in the database.
     """
     return await _db(db.update_payment_settings, data.model_dump(exclude_unset=True))
+
+
+@router.get("/student-notice")
+async def student_notice():
+    """Public info block shown at the top of the student home page.
+
+    Returns ``{"enabled": bool, "text": str}`` — the student app only renders a
+    green banner when ``enabled`` is true AND the text is non-empty, so the
+    admin can switch it off (or clear the text) and students immediately stop
+    seeing it. Cached 30 s; any admin write clears the read cache.
+    """
+    return await _cached_read(30, "student-notice", db.get_student_notice)
+
+
+@router.patch("/student-notice")
+async def patch_student_notice(data: LocalStudentNoticeUpdate, _admin: dict = Depends(_require_admin)):
+    """Set the student info block text / on-off switch. Admin-only — the same
+    DB-backed audit as every other admin write (``_require_admin`` re-checks the
+    account instead of trusting the token's ``role`` claim)."""
+    return await _db(db.update_student_notice, data.model_dump(exclude_unset=True))
 
 
 @router.patch("/payments/{payment_id}/status")
