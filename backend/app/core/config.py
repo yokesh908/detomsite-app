@@ -49,7 +49,7 @@ _PLACEHOLDER_PASSWORDS = {
 class Settings(BaseSettings):
     # Application
     APP_NAME: str = "DETOMSITE"
-    APP_VERSION: str = "3.3.1"
+    APP_VERSION: str = "3.3.2"
     DEBUG: bool = False
 
     # Frontend / Supabase
