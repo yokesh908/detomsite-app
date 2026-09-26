@@ -379,6 +379,23 @@ async def clear() -> None:
     _succeed()
 
 
+def reset_client() -> None:
+    """Forget any memoised RESP client so the next call re-reads ``REDIS_URL``.
+
+    Needed when the URL is filled in *after* this module was first touched — the
+    embedded server (see ``app/core/embedded_redis.py``) starts during lifespan
+    startup, by which time an early ``transport()`` call may already have
+    latched ``_resp_unavailable = True`` for a URL that did not exist yet.
+    """
+    global _resp, _resp_unavailable, _failures, _open_until
+    with _resp_lock:
+        _resp = None
+        _resp_unavailable = False
+    with _lock:
+        _failures = 0
+        _open_until = 0.0
+
+
 def status() -> dict:
     """Non-sensitive cache state for ``/health`` (no URLs, tokens or keys)."""
     with _lock:

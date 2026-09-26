@@ -1,17 +1,23 @@
-"""Redis read-cache tests — no Redis server required.
+"""Redis read-cache tests — no Redis server required by default.
 
 The app supports the Upstash/Vercel KV REST transport (``httpx``) and the raw
-RESP transport (optional ``redis`` package). These tests start a tiny in-process
-server that speaks the Upstash REST protocol and wire the cache to it over real
-HTTP, so request handling, JSON value encoding, TTL propagation, prefix-scoped
+RESP transport (``redis``). These tests start a tiny in-process server that
+speaks the Upstash REST protocol and wire the cache to it over real HTTP, so
+request handling, JSON value encoding, TTL propagation, prefix-scoped
 invalidation, argument-digest cache keys and the layered ``read_cache`` order are
 all exercised end to end. The RESP transport is covered by protocol-level tests
 over a stub client.
+
+``app/core/embedded_redis.py`` (a real redis-server inside the process, used
+when no external Redis is configured) has its decision logic tested here, and its
+end-to-end round trip behind the opt-in flag below — forking a server on every
+test run would slow the suite down and leak a child process.
 """
 from __future__ import annotations
 
 import asyncio
 import json
+import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -19,7 +25,7 @@ import pytest
 from starlette.requests import Request as StarletteRequest
 from starlette.responses import Response
 
-from app.core import read_cache, redis_cache, ttl_cache
+from app.core import embedded_redis, read_cache, redis_cache, ttl_cache
 from app.main import cache_invalidation_middleware
 
 
@@ -205,6 +211,140 @@ async def test_health_reports_the_memory_layer(client):
     memory = r.json()["cache"]["memory"]
     assert set(memory) == {"entries", "hits", "misses", "expired", "hit_rate"}
     assert memory["hit_rate"] is None or 0 <= memory["hit_rate"] <= 1
+
+
+# ─── embedded Redis (the no-credential path) ───────────────────────────────
+
+
+def test_embedded_redis_is_off_during_tests():
+    """conftest pins the switch off — assert it, or the suite starts a server."""
+    assert embedded_redis.wanted() is False
+    assert embedded_redis.start() == ""
+    assert embedded_redis.status()["running"] is False
+
+
+@pytest.mark.parametrize("value", ["0", "off", "false", "no", "OFF"])
+def test_embedded_redis_respects_every_off_spelling(monkeypatch, value):
+    monkeypatch.setattr(embedded_redis.settings, "REDIS_URL", "", raising=False)
+    monkeypatch.setattr(embedded_redis.settings, "KV_REST_API_URL", "", raising=False)
+    monkeypatch.setenv(embedded_redis.ENV_FLAG, value)
+    assert embedded_redis.wanted() is False
+
+
+def test_embedded_redis_yields_to_an_external_redis(monkeypatch):
+    """A real REDIS_URL / Upstash pair must always shadow the bundled server."""
+    monkeypatch.delenv(embedded_redis.ENV_FLAG, raising=False)
+    monkeypatch.setattr(embedded_redis.settings, "REDIS_URL", "rediss://default:pw@cache.example.com:6379")
+    assert embedded_redis.wanted() is False
+
+    monkeypatch.setattr(embedded_redis.settings, "REDIS_URL", "")
+    monkeypatch.setattr(embedded_redis.settings, "KV_REST_API_URL", "https://x.upstash.io")
+    assert embedded_redis.wanted() is False
+
+
+def test_embedded_redis_wanted_when_nothing_is_configured(monkeypatch):
+    monkeypatch.delenv(embedded_redis.ENV_FLAG, raising=False)
+    for name in ("REDIS_URL", "KV_REST_API_URL", "UPSTASH_REDIS_REST_URL"):
+        monkeypatch.setattr(embedded_redis.settings, name, "", raising=False)
+    assert embedded_redis.wanted() is True
+
+
+@pytest.mark.skipif(
+    os.environ.get("DETOMSITE_TEST_EMBEDDED_REDIS") != "1",
+    reason="forks a real redis-server; run with DETOMSITE_TEST_EMBEDDED_REDIS=1",
+)
+async def test_embedded_redis_serves_the_shared_layer_end_to_end(monkeypatch):
+    """The real thing: a live redis-server, a round trip, and a clean teardown."""
+    pytest.importorskip("redislite")
+    pytest.importorskip("redis")
+    for name in ("REDIS_URL", "KV_REST_API_URL", "UPSTASH_REDIS_REST_URL"):
+        monkeypatch.setattr(embedded_redis.settings, name, "", raising=False)
+    monkeypatch.delenv(embedded_redis.ENV_FLAG, raising=False)
+    monkeypatch.setattr(redis_cache.settings, "REDIS_KEY_PREFIX", "detomsite:")
+
+    url = embedded_redis.start()
+    try:
+        assert url.startswith("unix://"), url
+        monkeypatch.setattr(redis_cache.settings, "REDIS_URL", url)
+        redis_cache.reset_client()
+        assert redis_cache.transport() == "resp"
+        assert redis_cache.enabled() is True
+
+        payload = {"products": [{"id": 3, "name": "Filter Coffee"}], "stock_left": 4}
+        await redis_cache.set_pair("products:shop-9", payload, 30)
+        assert await redis_cache.get("products:shop-9") == payload
+
+        # The key must be namespaced and invalidation prefix-scoped, exactly as
+        # for an external Redis — the embedded server is not a special case.
+        client = redis_cache._resp_client()
+        assert "detomsite:products:shop-9" in client.keys("detomsite:*")
+        client.set("other-app:keep", "1", ex=30)
+        await redis_cache.clear()
+        assert client.keys("detomsite:*") == []
+        assert client.get("other-app:keep") == "1"
+    finally:
+        embedded_redis.stop()
+        redis_cache.reset_client()
+        monkeypatch.setattr(redis_cache.settings, "REDIS_URL", "")
+
+
+def _no_background_work():
+    """Stand-in for keep_alive/auto_delivery loops in lifespan tests."""
+    import asyncio
+
+    async def _idle():
+        await asyncio.Event().wait()
+
+    return _idle()
+
+
+@pytest.mark.skipif(
+    os.environ.get("DETOMSITE_TEST_EMBEDDED_REDIS") != "1",
+    reason="forks a real redis-server; run with DETOMSITE_TEST_EMBEDDED_REDIS=1",
+)
+async def test_lifespan_turns_the_embedded_cache_on(monkeypatch, client):
+    """The production wiring: booting the app must leave Redis live.
+
+    Without this, a module that works perfectly could still never be reached
+    from a real request, and ``/health`` would keep reporting a dead cache.
+    """
+    pytest.importorskip("redislite")
+    pytest.importorskip("redis")
+    import app.main as main
+    from app.core import store as store_module
+
+    for name in ("REDIS_URL", "KV_REST_API_URL", "UPSTASH_REDIS_REST_URL"):
+        monkeypatch.setattr(main.settings, name, "", raising=False)
+    monkeypatch.delenv(embedded_redis.ENV_FLAG, raising=False)
+    monkeypatch.setattr(store_module, "init_store", lambda: True)
+    monkeypatch.setattr(main, "keep_alive_loop", _no_background_work)
+    monkeypatch.setattr(main, "auto_delivery_loop", _no_background_work)
+
+    async with main.lifespan(main.app):
+        response = await client.get("/health")
+        assert response.status_code == 200
+        cache = response.json()["cache"]
+        assert cache["embedded_redis"] is True
+        assert cache["redis"]["enabled"] is True
+        assert cache["redis"]["transport"] == "resp"
+        assert cache["redis"]["breaker_open"] is False
+
+        # A cached read must now round trip through the live server.
+        calls = []
+
+        def loader():
+            calls.append(1)
+            return [{"id": 1}]
+
+        ttl_cache.clear()
+        assert await read_cache.cached_read(30, "embedded-check", loader) == [{"id": 1}]
+        await _drain_cache_writes()
+        # The second read is served by memory, and then by Redis — loader untouched.
+        assert await read_cache.cached_read(30, "embedded-check", loader) == [{"id": 1}]
+        assert len(calls) == 1
+    embedded_redis.stop()
+    redis_cache.reset_client()
+    monkeypatch.setattr(main.settings, "REDIS_URL", "")
 
 
 # ─── configuration: the portal must run fine with no Redis at all ─────────

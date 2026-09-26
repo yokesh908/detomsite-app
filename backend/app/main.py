@@ -119,12 +119,32 @@ async def lifespan(app: FastAPI):
         logger.error("Supabase store not reachable at startup — serving API anyway; requests will retry the connection per-request.")
     else:
         logger.info("Supabase Postgres store initialized")
+
+    # Shared read cache. When no external Redis is configured, run one inside
+    # this process (unix socket, no network, no credential) so the shared layer
+    # is real instead of dormant. Any failure leaves the Postgres cache in
+    # place — startup is never blocked by the cache.
+    try:
+        url = embedded_redis.start()
+        if url:
+            settings.REDIS_URL = url
+            # The transport may have latched "unavailable" while REDIS_URL was
+            # still empty, so hand it a clean slate now that there is a server.
+            redis_cache.reset_client()
+            logger.info(f"Read cache: {redis_cache.status()['transport']} (embedded)")
+    except Exception as e:
+        logger.warning(f"Embedded cache setup skipped ({e}) — reads use the Postgres cache")
+
     keep_alive_task = asyncio.create_task(keep_alive_loop())
     auto_delivery_task = asyncio.create_task(auto_delivery_loop())
     
     yield
 
     # Shutdown — cancel background tasks so the process can exit cleanly.
+    try:
+        embedded_redis.stop()
+    except Exception as e:
+        logger.debug(f"Embedded cache shutdown notice: {e}")
     keep_alive_task.cancel()
     auto_delivery_task.cancel()
     try:
@@ -203,7 +223,7 @@ app.add_middleware(GZipMiddleware, minimum_size=500)
 # (admin/shopkeeper lists) never show stale rows once an action lands. The clear
 # is awaited: the response would otherwise race the invalidation, and on a
 # serverless host the instance can freeze the moment the response is sent.
-from app.core import read_cache, redis_cache, shared_cache, ttl_cache
+from app.core import embedded_redis, read_cache, redis_cache, shared_cache, ttl_cache
 
 
 async def cache_invalidation_middleware(request: Request, call_next):
@@ -288,6 +308,9 @@ async def health_check():
             "redis": redis_cache.status(),
             "postgres": shared_cache.enabled(),
             "memory": ttl_cache.stats(),
+            # True when the in-process Redis is serving the shared layer because
+            # no external Redis is configured (app/core/embedded_redis.py).
+            "embedded_redis": embedded_redis.status()["running"],
         },
     }
 

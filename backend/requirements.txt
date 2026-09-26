@@ -24,8 +24,13 @@ pywebpush==1.14.1
 #     over httpx (already a dependency above).
 #   * Raw RESP — REDIS_URL=rediss://… for Render Key Value / Redis Cloud /
 #     Railway / self-hosted. That transport needs the client below.
+# With neither configured, app/core/embedded_redis.py boots a real redis-server
+# inside the process on a unix socket (redislite bundles the binary), so the
+# shared layer works with no credential at all. Set DETOMSITE_EMBEDDED_REDIS=0
+# to keep it off, or supply a real REDIS_URL to shadow it.
 # The import is guarded and every call is best-effort, so an unreachable or
 # unconfigured Redis can never break a request: reads fall back to the Postgres
 # app_cache table. Leave the env vars empty and everything still works.
 redis>=5.0
+redislite==6.2.912183
 setuptools>=70

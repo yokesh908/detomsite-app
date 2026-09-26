@@ -17,6 +17,10 @@ os.environ["KV_REST_API_TOKEN"] = ""
 os.environ["UPSTASH_REDIS_REST_URL"] = ""
 os.environ["UPSTASH_REDIS_REST_TOKEN"] = ""
 os.environ["REDIS_URL"] = ""
+# Never boot the in-process redis-server during tests (app/core/embedded_redis.py):
+# a real test would fork a server, slow the suite down and leave a child process
+# behind. The opt-in integration test flips this itself.
+os.environ["DETOMSITE_EMBEDDED_REDIS"] = "0"
 # Use explicit dummy settings before importing the app. Never load live DB
 # credentials from backend/.env; the session fixture supplies the test store.
 os.environ["DEBUG"] = "True"
