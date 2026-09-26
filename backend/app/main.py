@@ -203,7 +203,7 @@ app.add_middleware(GZipMiddleware, minimum_size=500)
 # (admin/shopkeeper lists) never show stale rows once an action lands. The clear
 # is awaited: the response would otherwise race the invalidation, and on a
 # serverless host the instance can freeze the moment the response is sent.
-from app.core import read_cache, redis_cache, shared_cache
+from app.core import read_cache, redis_cache, shared_cache, ttl_cache
 
 
 async def cache_invalidation_middleware(request: Request, call_next):
@@ -277,9 +277,17 @@ async def health_check():
         # Read-cache state, so a deploy can be verified with one request:
         # ``redis.transport`` is "rest" (Upstash/Vercel KV), "resp" (REDIS_URL)
         # or None when no shared cache is configured. No secrets are exposed.
+        #
+        # ``memory.hit_rate`` is the number that settles the "do we need Redis?"
+        # question: on a single-instance host it sits high (repeat reads never
+        # leave the process), which is exactly the case where a network hop to a
+        # shared Redis would cost latency instead of saving it. Redis earns its
+        # keep once ``hit_rate`` collapses — i.e. requests are landing on
+        # different instances (serverless / a scaled service).
         "cache": {
             "redis": redis_cache.status(),
             "postgres": shared_cache.enabled(),
+            "memory": ttl_cache.stats(),
         },
     }
 

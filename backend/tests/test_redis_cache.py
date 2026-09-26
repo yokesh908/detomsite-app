@@ -168,6 +168,45 @@ def _request(method: str = "POST", path: str = "/api/v1/local/orders") -> Starle
     )
 
 
+# ─── visibility: is the cache doing any work? ───────────────────────────────
+
+
+def test_memory_cache_counters_track_hits_and_misses(monkeypatch):
+    """`/health` reports memory hit_rate, so it has to be right — a wrong
+    number is worse than none (it would drive the Redis decision)."""
+    monkeypatch.setattr(ttl_cache, "_hits", 0)
+    monkeypatch.setattr(ttl_cache, "_misses", 0)
+    monkeypatch.setattr(ttl_cache, "_evictions", 0)
+    ttl_cache.clear()
+
+    assert ttl_cache.stats()["hit_rate"] is None      # no reads yet
+    ttl_cache.set("k", {"n": 1}, 30)
+    assert ttl_cache.get("k") == {"n": 1}             # hit
+    assert ttl_cache.get("missing") is None           # miss
+
+    stats = ttl_cache.stats()
+    assert (stats["hits"], stats["misses"]) == (1, 1)
+    assert stats["hit_rate"] == 0.5
+    assert stats["entries"] == 1
+
+    # An expired entry counts as a miss (and is dropped), never as a stale hit.
+    ttl_cache.set("old", 1, -1)
+    assert ttl_cache.get("old") is None
+    assert ttl_cache.stats()["expired"] == 1
+    assert ttl_cache.stats()["entries"] == 1           # "old" was evicted
+
+    ttl_cache.clear()
+    assert ttl_cache.stats()["entries"] == 0
+
+
+async def test_health_reports_the_memory_layer(client):
+    r = await client.get("/health")
+    assert r.status_code == 200
+    memory = r.json()["cache"]["memory"]
+    assert set(memory) == {"entries", "hits", "misses", "expired", "hit_rate"}
+    assert memory["hit_rate"] is None or 0 <= memory["hit_rate"] <= 1
+
+
 # ─── configuration: the portal must run fine with no Redis at all ─────────
 
 

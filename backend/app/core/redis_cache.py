@@ -32,6 +32,26 @@ Design rules (a cache must never take the portal down):
 * ``clear()`` deletes only keys under ``REDIS_KEY_PREFIX`` — a shared Redis is
   never wiped with FLUSHDB.
 * Values are JSON; a value that cannot be serialised simply skips the cache.
+
+Do we actually need Redis? (read this before adding it)
+------------------------------------------------------
+It depends on the *deployment*, not on taste, and the current production setup
+does not need it:
+
+* **Single-instance host (Render free — what is live today).** Every repeat read
+  is already served by the in-process ``ttl_cache`` in microseconds, and the
+  Postgres ``app_cache`` table covers the cold start after an idle sleep. A
+  shared Redis would add a network hop on top of a cache that is not missing.
+  ``/health`` → ``cache.memory.hit_rate`` stays high here, which is the proof.
+* **Serverless / multi-instance (Vercel functions, or a service scaled to 2+
+  replicas).** Consecutive requests land on *different* instances, so the
+  in-process layer is cold almost every time and the heavy list queries re-run on
+  every poll. ``hit_rate`` collapses, and that is exactly when a shared Redis
+  starts paying for itself.
+
+So: check ``/health`` first. Enable Redis (see ``scripts/enable-redis.sh``) when
+``cache.memory.hit_rate`` is low **and** requests are spread over more than one
+instance — not simply because the code supports it.
 """
 from __future__ import annotations
 
