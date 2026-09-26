@@ -30,7 +30,7 @@ def _generate_jwt_secret() -> str:
 class Settings(BaseSettings):
     # Application
     APP_NAME: str = "DETOMSITE"
-    APP_VERSION: str = "3.3.0"
+    APP_VERSION: str = "3.3.1"
     DEBUG: bool = False
 
     # Frontend / Supabase
