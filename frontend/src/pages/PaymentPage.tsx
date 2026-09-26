@@ -12,9 +12,7 @@ const UPI_LIMIT = 100000
 function upiAmount(am: number) { const n = Number(am); return Number.isFinite(n) ? Math.round(n * 100) / 100 : 0 }
 
 /* Delivery is a single fixed drop point: the VIT-AP main gate (enforced
-   server-side too). Kept as a list of one so the <select> shape stays intact
-   if a second gate is ever allowed. */
-const VITAP_LOCS = ['VIT-AP Main Gate']
+   server-side too), so the checkout shows it as a read-only field. */
 const DEFAULT_LOC = 'VIT-AP Main Gate'
 function isVitAp(v: string) { return /vit[\s-]*ap/i.test(v || '') && /main[\s-]*gate/i.test(v || '') }
 
@@ -29,12 +27,8 @@ export function PaymentPage() {
      in — the "we get out and come back" case. The session wins when it has a
      value, and the profile fills the gap. */
   const [remembered] = useState(() => getCheckoutProfile())
-  const [loc, setLoc] = useState(() => {
-    const fromSession = session?.default_delivery_location || ''
-    if (fromSession && isVitAp(fromSession)) return DEFAULT_LOC
-    if (remembered.location && isVitAp(remembered.location)) return DEFAULT_LOC
-    return DEFAULT_LOC
-  })
+  // One fixed drop point, so the location is constant rather than user-editable.
+  const loc = DEFAULT_LOC
   const [phone, setPhone] = useState(() => session?.phone || remembered.phone || '')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
@@ -160,14 +154,15 @@ export function PaymentPage() {
               <h2 className="mb-4 text-lg font-bold text-primary-dark">Delivery Details · VIT-AP only</h2>
               <div className="space-y-4 mb-6">
                 <div>
-                  <label className="mb-1 block text-sm font-bold text-gray-500">Delivery location (VIT-AP campus only)</label>
-                  <select value={VITAP_LOCS.includes(loc) ? loc : VITAP_LOCS[0]} onChange={e => setLoc(e.target.value)}
-                    className="w-full rounded-btn border-2 border-gray-200 px-4 py-2.5 text-sm text-gray-900 outline-none focus:border-primary focus:shadow-emerald-sm" required>
-                    {VITAP_LOCS.map(l => <option key={l} value={l}>{l}</option>)}
-                  </select>
-                  <input value={loc.startsWith('VIT-AP') ? loc.replace(/^VIT-AP\s*/, '') : loc} onChange={e => setLoc(`VIT-AP ${e.target.value}`.trim())}
-                    className="mt-2 w-full rounded-btn border-2 border-gray-200 px-4 py-2.5 text-sm text-gray-900 placeholder-gray-400 outline-none focus:border-primary focus:shadow-emerald-sm" placeholder="Room / block detail (e.g. Hostel A Block, Room 204)" />
-                  <p className="mt-1.5 text-[11px] font-semibold text-primary">📍 Delivery only inside VIT-AP campus. Outside areas are not served.</p>
+                  <label className="mb-1 block text-sm font-bold text-gray-500">Delivery location (VIT-AP main gate)</label>
+                  {/* One fixed drop point: a read-only field, not a picker. A
+                      free-text "room / block" box here could only produce a
+                      value the server now rejects, so it is gone. */}
+                  <div className="flex w-full items-center justify-between rounded-btn border-2 border-gray-200 bg-gray-50 px-4 py-2.5 text-sm text-gray-900">
+                    <span className="font-semibold">{DEFAULT_LOC}</span>
+                    <span className="text-[11px] font-bold text-gray-500">Collect at the gate</span>
+                  </div>
+                  <p className="mt-1.5 text-[11px] font-semibold text-primary">📍 Every order is collected at the VIT-AP main gate.</p>
                 </div>
                 <PhoneInput value={phone} onChange={setPhone} placeholder="98765 43210" required />
               </div>

@@ -1279,12 +1279,15 @@ function PaymentPage() {
             <h2 className="mb-4 text-lg font-bold">Delivery Details · VIT-AP only</h2>
             <div className="space-y-4 mb-6">
               <div>
-                <label className="mb-1 block text-xs font-bold text-gray-500">Delivery location (VIT-AP campus only)</label>
-                <select value={QUICK_LOCATIONS.includes(loc) ? loc : 'VIT-AP Hostel A Block'} onChange={e => setLoc(e.target.value)} className="w-full rounded-btn border-2 px-4 py-2.5 text-sm outline-none focus:border-primary-light/200" required>
-                  {QUICK_LOCATIONS.map(ql => <option key={ql} value={ql}>{ql}</option>)}
-                </select>
-                <input value={loc.startsWith('VIT-AP') ? loc.replace(/^VIT-AP\s*/, '') : loc} onChange={e => setLoc(`VIT-AP ${e.target.value}`.trim())} className="mt-2 w-full rounded-btn border-2 px-4 py-2.5 text-sm outline-none focus:border-primary-light/200" placeholder="Room / block detail (e.g. Hostel A Block, Room 204)" />
-                <p className="mt-1.5 text-[11px] font-semibold text-primary">📍 Delivery only inside VIT-AP campus. Outside areas are not served.</p>
+                <label className="mb-1 block text-xs font-bold text-gray-500">Delivery location (VIT-AP main gate)</label>
+                {/* One fixed drop point, so this is a read-only field rather than a
+                    picker: there is nothing to choose, and a free-text box here
+                    could only produce a value the server rejects. */}
+                <div className="flex w-full items-center justify-between rounded-btn border-2 border-gray-200 bg-gray-50 px-4 py-2.5 text-sm text-gray-900">
+                  <span className="font-semibold">{MAIN_GATE}</span>
+                  <span className="text-[11px] font-bold text-gray-500">Collect at the gate</span>
+                </div>
+                <p className="mt-1.5 text-[11px] font-semibold text-primary">📍 Every order is collected at the VIT-AP main gate.</p>
               </div>
               <div>
                 <label className="mb-1 block text-xs font-bold text-gray-500">Phone (10-digit mobile)</label>
