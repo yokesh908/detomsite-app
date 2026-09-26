@@ -27,6 +27,25 @@ def _generate_jwt_secret() -> str:
     return secret
 
 
+# Passwords that appear verbatim in this repo's docs, deployment output or
+# scratch environment dumps. Seeding the super admin with one of these means the
+# admin account is effectively public, so it is called out at startup.
+_PLACEHOLDER_PASSWORDS = {
+    "8989",
+    "1234",
+    "12345678",
+    "admin",
+    "admin123",
+    "password",
+    "password123",
+    "change-me",
+    "changeme",
+    "change-me-before-use-123",
+    "your-password",
+    "test",
+}
+
+
 class Settings(BaseSettings):
     # Application
     APP_NAME: str = "DETOMSITE"
@@ -272,6 +291,22 @@ class Settings(BaseSettings):
                 "SUPABASE_DATABASE_URL (or SUPABASE_DB_HOST + SUPABASE_DB_PASSWORD) "
                 "is not set — API requests needing the database will return 503 "
                 "until it is configured."
+            )
+
+        # A weak or placeholder seed password for the super admin is the single
+        # most damaging misconfiguration in this app: that account can read and
+        # settle every student's order, payment, UTR and phone number. Warn
+        # loudly — deliberately do NOT raise, because crashing the cold start
+        # turns every route into a 404 and is a worse incident than a weak
+        # password; a warning in the deploy logs is what gets this noticed.
+        admin_pw = (self.DEFAULT_SUPER_ADMIN_PASSWORD or "").strip()
+        if admin_pw and (len(admin_pw) < 12 or admin_pw.lower() in _PLACEHOLDER_PASSWORDS):
+            _logging.getLogger(__name__).warning(
+                "INSECURE DEFAULT_SUPER_ADMIN_PASSWORD: it is only %d characters%s. "
+                "The super admin can view and settle every student's order, payment "
+                "and phone number, so set a unique 16+ character value before go-live.",
+                len(admin_pw),
+                " and is a well-known placeholder" if admin_pw.lower() in _PLACEHOLDER_PASSWORDS else "",
             )
 
         return self

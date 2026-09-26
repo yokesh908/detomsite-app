@@ -50,8 +50,8 @@ def _ist_date(value) -> str:
 # ─── Admin credentials (hardcoded or from env) ───
 # These are used for initial admin login. Once logged in, admin gets a JWT.
 # NOTE: no hardcoded fallback — an empty/dev default would silently weaken the
-# admin gate. The prod config validator already refuses to boot without
-# DEFAULT_SUPER_ADMIN_PASSWORD; dev setups must set it explicitly.
+# admin gate, and a weak or placeholder value is flagged loudly at startup by
+# the config validator; dev setups must set it explicitly.
 ADMIN_USERNAME = settings.DEFAULT_SUPER_ADMIN_EMAIL.split("@")[0] if settings.DEFAULT_SUPER_ADMIN_EMAIL else "admin"
 ADMIN_PASSWORD = settings.DEFAULT_SUPER_ADMIN_PASSWORD
 
