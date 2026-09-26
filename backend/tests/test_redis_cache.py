@@ -232,7 +232,28 @@ async def test_breaker_stops_calling_a_dead_redis(fake_redis, monkeypatch):
     assert redis_cache.status()["breaker_open"] is False
 
 
-# ─── RESP transport (REDIS_URL + optional redis package) ──────────────────
+# ─── RESP transport (REDIS_URL + the redis client) ─────────────────────────
+
+
+def test_real_redis_client_builds_from_a_rediss_url(monkeypatch):
+    """The shipped ``redis`` package must turn a Render Key Value / Redis Cloud
+    URL into a usable client, or the raw transport silently never engages.
+    ``from_url`` is lazy, so this asserts wiring without opening a socket."""
+    pytest.importorskip("redis", reason="redis client not installed")
+    monkeypatch.setattr(redis_cache, "_resp", None)
+    monkeypatch.setattr(redis_cache, "_resp_unavailable", False)
+    monkeypatch.setattr(redis_cache.settings, "KV_REST_API_URL", "")
+    monkeypatch.setattr(redis_cache.settings, "KV_REST_API_TOKEN", "")
+    monkeypatch.setattr(redis_cache.settings, "UPSTASH_REDIS_REST_URL", "")
+    monkeypatch.setattr(redis_cache.settings, "UPSTASH_REDIS_REST_TOKEN", "")
+    monkeypatch.setattr(redis_cache.settings, "REDIS_URL", "rediss://default:pw@cache.example.com:6379")
+
+    client = redis_cache._resp_client()
+    assert client is not None
+    assert redis_cache.transport() == "resp"
+    assert redis_cache.enabled() is True
+    # decode_responses keeps the cached JSON a str, so json.loads works later.
+    assert client.get_encoder().decode is not None
 
 
 async def test_resp_transport_uses_scan_not_flushdb(monkeypatch):
