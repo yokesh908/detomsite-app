@@ -1109,7 +1109,6 @@ function PaymentPage() {
   const [ps, setPs] = useState<PaymentSettings | null>(null); const [shop, setShop] = useState<Shop | null>(null)
   const [method, setMethod] = useState<'qr' | 'cod'>('qr')
   const [loc, setLoc] = useState('VIT-AP Hostel A Block'); const [slot, setSlot] = useState('Evening'); const [phone, setPhone] = useState('')
-  const [utr, setUtr] = useState('')
   const [loading, setLoading] = useState(false); const [err, setErr] = useState('')
   const user = JSON.parse(localStorage.getItem('user_data') || '{}')
   const items = getCart(); const bill = billBreakdown(items)
@@ -1174,13 +1173,9 @@ function PaymentPage() {
     if (!payOn) { setErr('This shop is not accepting any payments right now — the vendor has turned off UPI and Cash on Delivery. Please try again later.'); return }
     if (method === 'qr' && !upiAvailable) { setErr(upiOn ? 'This shop has not set up UPI payments yet — ask the vendor to add their UPI ID' : 'This shop has turned off UPI payments — choose Cash on Delivery instead'); return }
     if (method === 'cod' && !codAvailable) { setErr('This shop has turned off Cash on Delivery — please pay via UPI instead'); return }
-    /* UTR-first: UPI orders carry the UTR from checkout itself — the student
-       pays, pastes the UTR once, and the order is placed with proof attached.
-       No second ask, so they never "think twice". */
-    const cleanUtr = utr.trim().toUpperCase().replace(/[^A-Z0-9]/g, '')
-    if (method === 'qr') {
-      if (cleanUtr.length < 12) { setErr('Please pay in your UPI app first, then paste the 12-digit UTR from the success screen.'); return }
-    }
+    /* No UTR paste at checkout anymore: the student pays straight from the
+       QR or the "Scan for better option" button (opens the UPI app with the
+       amount pre-filled), and the admin verifies the recorded payment. */
     setLoading(true)
     try {
       /* Group items by shop so each shop gets its own sub-order */
@@ -1205,12 +1200,11 @@ function PaymentPage() {
           total: shopTotal,
         })
         lastOrder = order.data
-        /* Record payment for each sub-order — UPI carries the checkout UTR
-           (same UTR reused across this ONE multi-shop basket is fine because
-           the backend stores one payment per order; duplicates across
-           DIFFERENT orders are still rejected with 409). */
+        /* Record payment for each sub-order — no UTR anymore: the row carries
+           the server-priced amount and the admin verifies it in Admin
+           Center → Payments. */
         try {
-          await api.post('/local/payments', { order_id: order.data.id, amount: shopTotal, method: method === 'cod' ? 'COD' : 'Manual UTR', utr_number: method === 'cod' ? '' : cleanUtr })
+          await api.post('/local/payments', { order_id: order.data.id, amount: shopTotal, method: method === 'cod' ? 'COD' : 'Manual UTR', utr_number: '' })
         } catch (payErr: any) {
           const detail = String(payErr?.response?.data?.detail || '')
           /* 409 = this exact UTR already belongs to another order — the shop
@@ -1348,16 +1342,19 @@ function PaymentPage() {
                       {qrUri && <QRCodeSVG value={qrUri} size={160} level="M" bgColor="#ffffff" fgColor="#065F46" className="h-auto w-full max-w-[170px] shrink-0" />}
                       <p className="flex items-center gap-1.5 text-center text-xs font-bold text-primary sm:max-w-[240px] sm:text-left">{IconH.phone({ className: 'h-3.5 w-3.5 shrink-0' })}Scan with your UPI app — amount ₹{bill.total} pre-filled. Pay ONCE.</p>
                     </div>
-                    {/* UTR FIRST — asked BEFORE the order is placed so the student
-                        never "thinks twice". The order + payment are created in
-                        one tap below; no second ask on the result page. */}
+                    {/* NO UTR INPUT — replaced by the "Scan for better option"
+                        button: scanning has its downside, so the direct-pay
+                        button stays and opens the UPI app with the amount
+                        pre-filled. Nothing is pasted; the admin verifies the
+                        recorded payment. */}
                     <div className="mt-3 rounded-card border-2 border-gold/40 bg-amber-50/70 p-3">
-                      <label className="block text-xs font-black text-gold-dark">Step 1 — Pay, then paste UTR here (required)</label>
-                      <p className="mt-0.5 text-[11px] leading-relaxed text-gold-dark">Pay in your UPI app first, then paste the <b>12-digit UTR / UPI ref</b> from the success screen below. The order is placed only with a valid UTR.</p>
-                      <input value={utr} onChange={e => { setUtr(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 22)) }} placeholder="UTR (e.g. 412345678901)" autoCapitalize="characters" inputMode="text"
-                        className="mt-2 w-full rounded-btn border-2 border-gold-light bg-white px-3 py-2.5 text-sm font-bold tracking-widest text-gold-dark outline-none focus:border-gold" />
+                      <a href={qrUri} className="flex w-full items-center justify-center gap-2 rounded-btn bg-primary px-4 py-3 text-sm font-bold text-white transition-colors hover:bg-primary-dark">
+                        <svg className="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 7V5a2 2 0 0 1 2-2h2" /><path d="M17 3h2a2 2 0 0 1 2 2v2" /><path d="M21 17v2a2 2 0 0 1-2 2h-2" /><path d="M7 21H5a2 2 0 0 1-2-2v-2" /><path d="M7 12h10" /></svg>
+                        Scan for better option
+                      </a>
+                      <p className="mt-2 text-[11px] leading-relaxed text-gold-dark">Opens GPay / PhonePe / Paytm with ₹{bill.total} pre-filled — pay directly if scanning the QR is inconvenient. <b>No money is deducted until you confirm in your UPI app.</b></p>
                     </div>
-                    <p className="mt-3 flex items-start gap-1.5 text-[11px] leading-relaxed text-gold-dark">{IconH.alert({ className: 'h-3.5 w-3.5 mt-0.5 shrink-0' })}<span><b>Step 2:</b> tap "Place Order" below — your UTR goes with the order, no second ask. <b>No money is deducted until you confirm in your UPI app.</b> If the app shows <b>"THIS PAYMENT MAY FAIL AS PER UPI RISK POLICY"</b> it means the VPA name check failed — STOP, verify the receiver name above matches your UPI app, or pay the same VPA via <b>mobile number</b> instead of QR. If it shows <b>"exceeded bank limit"</b>, that is your bank refusing (no money debited) — try later or choose <b>Cash on Delivery</b>.</span></p>
+                    <p className="mt-3 flex items-start gap-1.5 text-[11px] leading-relaxed text-gold-dark">{IconH.alert({ className: 'h-3.5 w-3.5 mt-0.5 shrink-0' })}<span><b>Step 2:</b> tap "Place Order" below — your order is placed instantly and the admin verifies the payment. <b>No money is deducted until you confirm in your UPI app.</b> If the app shows <b>"THIS PAYMENT MAY FAIL AS PER UPI RISK POLICY"</b> it means the VPA name check failed — STOP, verify the receiver name above matches your UPI app, or pay the same VPA via <b>mobile number</b> instead of QR. If it shows <b>"exceeded bank limit"</b>, that is your bank refusing (no money debited) — try later or choose <b>Cash on Delivery</b>.</span></p>
                   </div>
                 ) : (
                   <p className="flex items-start gap-2 rounded-btn border-2 border-gold-light/60 bg-amber-50 px-4 py-3 text-sm text-gold-dark">
@@ -1378,7 +1375,7 @@ function PaymentPage() {
           <div className="h-fit rounded-btn bg-white p-5 shadow-sm border lg:sticky lg:top-6">
             <h2 className="mb-4 text-lg font-bold">Summary</h2>
             <div className="space-y-2 text-sm"><div className="flex justify-between"><span>Subtotal</span><span className="font-semibold">₹{bill.subtotal}</span></div><div className="flex justify-between border-t pt-3 text-lg font-bold">Total<span>₹{bill.total}</span></div></div>
-            <button type="submit" disabled={loading || !payOn || (method === 'qr' && (!upiAvailable || utr.trim().length < 12)) || (shopLoaded && shop !== null && !orderable)} className="mt-5 w-full rounded-btn bg-primary px-5 py-3 text-sm font-bold text-white hover:bg-primary-dark disabled:opacity-40">{loading ? 'Placing order...' : method === 'cod' ? `Place Order · Pay ₹${bill.total} on Delivery` : (utr.trim().length < 12 ? `Enter UTR above to place order` : `Place Order with UTR · ₹${bill.total}`)}</button>
+            <button type="submit" disabled={loading || !payOn || (method === 'qr' && !upiAvailable) || (shopLoaded && shop !== null && !orderable)} className="mt-5 w-full rounded-btn bg-primary px-5 py-3 text-sm font-bold text-white hover:bg-primary-dark disabled:opacity-40">{loading ? 'Placing order...' : method === 'cod' ? `Place Order · Pay ₹${bill.total} on Delivery` : `Place Order · ₹${bill.total}`}</button>
           </div>
         </form>
       )}
@@ -1386,28 +1383,22 @@ function PaymentPage() {
   )
 }
 
-/* Order Result — NO second QR and NO second UTR ask here. The student already
-   paid + pasted the UTR once at checkout (so they never "think twice").
-   This page only shows status; a narrow "didn't save?" recovery remains for
-   the old bug where checkout's payment row failed. */
+/* Order Result — NO second QR and NO UTR ask here. The student pays from the
+   checkout QR / "Scan for better option" button; this page only shows status
+   and keeps a direct pay button open while the payment is pending. */
 function OrderResultPage() {
   const { orderId } = useParams()
   const [order, setOrder] = useState<Order | null>(null); const [shop, setShop] = useState<Shop | null>(null)
   const [cancelling, setCancelling] = useState(false); const [cancelErr, setCancelErr] = useState('')
-  const [utr, setUtr] = useState(''); const [utrSaving, setUtrSaving] = useState(false); const [utrMsg, setUtrMsg] = useState(''); const [utrErr, setUtrErr] = useState('')
-  const [needRecovery, setNeedRecovery] = useState(false)
-  const saveUtr = async () => {
-    if (!orderId || !utr.trim()) return
-    setUtrSaving(true); setUtrMsg(''); setUtrErr('')
-    try {
-      const res = await api.post('/local/payments/utr', { order_id: orderId, utr_number: utr.trim().toUpperCase() })
-      setUtrMsg(res.data?.message || 'UTR saved — your order will auto-confirm once the bank SMS matches it.')
-      if (res.data?.order?.status === 'Confirmed') {
-        const s = await api.get<Order>(`/local/orders/${orderId}`).catch(() => null); if (s?.data) setOrder(s.data)
-      }
-    } catch (err: any) { setUtrErr(apiError(err, 'Could not save the UTR — please try again')) }
-    finally { setUtrSaving(false) }
-  }
+  /* Payment settings power the "Scan for better option" pay button: the
+     shop's own UPI first, the admin's global UPI as fallback — the same
+     rule checkout uses. */
+  const [ps, setPs] = useState<PaymentSettings | null>(null)
+  useEffect(() => { api.get<PaymentSettings>('/local/payment-settings').then(r => setPs(r.data)).catch(() => {}) }, [])
+  const payUpi = shop?.upi_id?.trim() || (ps?.manual_enabled ? ps.upi_id?.trim() || '' : '')
+  const payUri = payUpi && order
+    ? buildUpiUri(payUpi, (shop?.upi_id?.trim() ? (shop?.shopkeeper_name || ps?.receiver_name) : ps?.receiver_name) || 'DETOMSITE', Number(order.total), `Detomsite ${order.total}`)
+    : ''
   /* Cancellation follows the delivery window: orders placed inside a window
      (morning → 12:30 PM, afternoon → 6:00 PM) are auto-accepted, and the
      student can cancel until that window closes. */
@@ -1429,10 +1420,6 @@ function OrderResultPage() {
     const load = () => { if (document.visibilityState === 'visible') api.get<Order>(`/local/orders/${orderId}`).then(async r => {
       setOrder(r.data);
       const s = await api.get<Shop>(`/local/shops/${r.data.shop_id}`).catch(() => null); setShop(s?.data || null);
-      // Recovery affordance defaults to hidden: checkout already saved the
-      // UTR. It flips on only via the manual "payment didn't save?" link
-      // below, so normal orders never see a second UTR ask.
-      void needRecovery;
     }).catch(() => {}) }
     load(); const t = setInterval(load, 5000); return () => clearInterval(t)
   }, [orderId])
@@ -1479,27 +1466,14 @@ function OrderResultPage() {
         {(order.status === 'Pending Payment' || order.status === 'Pending Verification') && order.payment_method !== 'COD' && (
             <div className="mt-6 rounded-btn border-2 border-emerald-200 bg-emerald-50/60 p-4 text-left text-sm text-primary">
               <div className="flex items-start gap-2">
-                {IconH.check({ className: 'h-4 w-4 mt-0.5 shrink-0' })}<span><b>UTR received.</b> Your payment proof was attached at checkout — no need to pay again or paste anything here. The shop confirms once the bank SMS matches. <b>Do NOT scan any other QR.</b></span>
+                {IconH.check({ className: 'h-4 w-4 mt-0.5 shrink-0' })}<span><b>Payment pending.</b> Complete the ₹{order.total} payment in your UPI app — the admin verifies it and confirms your order. <b>Do NOT scan any other QR.</b></span>
               </div>
-              {!needRecovery ? (
-                <button onClick={() => setNeedRecovery(true)} className="mt-3 text-xs font-bold text-primary underline">Payment didn't save? Paste UTR again</button>
-              ) : (
-              <div className="mt-4 rounded-card border-2 border-dashed border-gold/40 bg-white p-4">
-                <p className="text-sm font-bold text-gold-dark">Recovery — paste UTR (only if checkout failed to save)</p>
-                <p className="mt-0.5 text-[11px] leading-relaxed text-gold-dark">Normally you never see this — your UTR was already saved. Use it only if the shop says no payment proof arrived.</p>
-                <input
-                  value={utr} onChange={e => { setUtr(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 22)); setUtrMsg(''); setUtrErr('') }}
-                  placeholder="Enter UTR here (12-digit)" autoCapitalize="characters"
-                  className="mt-2 w-full rounded-btn border-2 border-gold-light px-3 py-2 text-xs font-semibold tracking-wide text-gold-dark outline-none focus:border-gold"
-                />
-                <button onClick={() => { void saveUtr(); setNeedRecovery(false) }} disabled={!utr.trim() || utrSaving}
-                  className="mt-2 w-full rounded-btn bg-gold-dark px-4 py-2 text-xs font-bold text-white transition-colors hover:bg-gold disabled:cursor-not-allowed disabled:opacity-40">
-                  {utrSaving ? 'Saving…' : (utrMsg.includes('confirmed') ? 'UTR Matched ✓' : 'Submit UTR')}
-                </button>
-                {utrMsg && <p className="mt-1.5 text-[11px] font-semibold text-emerald-700">{utrMsg}</p>}
-                {utrErr && <p className="mt-1.5 text-[11px] font-semibold text-red-600">{utrErr}</p>}
-              </div>
-              )}
+              {payUri ? (
+                <a href={payUri} className="mt-3 flex w-full items-center justify-center gap-2 rounded-btn bg-primary px-4 py-3 text-sm font-bold text-white transition-colors hover:bg-primary-dark">
+                  <svg className="h-4 w-4 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 7V5a2 2 0 0 1 2-2h2" /><path d="M17 3h2a2 2 0 0 1 2 2v2" /><path d="M21 17v2a2 2 0 0 1-2 2h-2" /><path d="M7 21H5a2 2 0 0 1-2-2v-2" /><path d="M7 12h10" /></svg>
+                  Scan for better option · Pay ₹{order.total}
+                </a>
+              ) : null}
             </div>
         )}
         {/* Order pickup — show token number for counter pickup */}

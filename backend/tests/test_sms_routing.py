@@ -37,7 +37,9 @@ def matching(monkeypatch):
 
 
 async def test_saved_utr_selects_older_order_not_newest_amount(matching):
-    result = await local.sms_match(local.LocalSmsMatch(phone="9876543210", utr="123456789012", amount=80), "test-key")
+    # Direct (non-HTTP) call: request=None skips the per-IP failure throttle
+    # (which only exists to slow brute-force over the network).
+    result = await local.sms_match(local.LocalSmsMatch(phone="9876543210", utr="123456789012", amount=80), None, x_agent_key="test-key")
     assert result["order_id"] == "older"
     assert local._notify_shop_via_whatsapp.await_args.args[0]["id"] == "older"
 
@@ -52,7 +54,7 @@ async def test_uncertain_proof_never_changes_order_or_sends(matching, case):
     if case == "already_paid": payments[0]["status"] = "Success"
     if case == "cod": orders[0]["payment_method"] = "COD"
     with pytest.raises(HTTPException):
-        await local.sms_match(local.LocalSmsMatch(phone="9876543210", utr="123456789012", amount=80), "test-key")
+        await local.sms_match(local.LocalSmsMatch(phone="9876543210", utr="123456789012", amount=80), None, x_agent_key="test-key")
     assert not writes
     local._notify_shop_via_whatsapp.assert_not_awaited()
 

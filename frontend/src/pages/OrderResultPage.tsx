@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import api from '../services/api'
-import { LocalParentOrder } from '../types/localApi'
+import { LocalParentOrder, LocalPaymentSettings } from '../types/localApi'
 import { usePolling } from '../hooks/usePolling'
 import { same } from '../utils/same'
 
@@ -86,10 +86,6 @@ export function OrderResultPage() {
   const [loading, setLoading] = useState(true)
   const [paymentPending, setPaymentPending] = useState(false)
   const [pendingDetail, setPendingDetail] = useState('')
-  const [retryUtr, setRetryUtr] = useState('')
-  const [retryBusy, setRetryBusy] = useState(false)
-  const [retryMsg, setRetryMsg] = useState('')
-  const [retryErr, setRetryErr] = useState('')
 
   useEffect(() => {
     const flag = sessionStorage.getItem('payment_pending')
@@ -109,34 +105,22 @@ export function OrderResultPage() {
   // auto-accepted; background tabs pause and refresh instantly on switch-back.
   usePolling(load, 5000, [orderId])
 
-  /* Recovery path for the old "record didn't save" bug: the UTR is asked ONCE
-     at checkout (order page shows no QR and no open UTR box). This stays
-     hidden behind a "didn't save?" link so normal orders never see a second
-     ask. */
-  const [showRecovery, setShowRecovery] = useState(false)
-  const submitRetryUtr = async () => {
-    if (!orderId || !retryUtr.trim()) return
-    setRetryBusy(true); setRetryMsg(''); setRetryErr('')
-    try {
-      const res = await api.post<{ message?: string }>('/local/payments/utr', {
-        order_id: orderId, utr_number: retryUtr.trim().toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 22),
-      })
-      setRetryMsg(res.data?.message || 'UTR saved — the admin will verify your payment shortly.')
-      setPaymentPending(false)
-      setRetryUtr('')
-      setShowRecovery(false)
-      load()
-    } catch (err: any) {
-      setRetryErr(err?.response?.data?.detail || 'Could not save the UTR — please try again')
-    } finally {
-      setRetryBusy(false)
-    }
-  }
+  /* The UTR paste/recovery box was removed with the UTR verification method.
+     The payment settings below power the "Scan for better option" pay button
+     (the platform UPI used at checkout) while the payment is pending. */
+  const [ps, setPs] = useState<LocalPaymentSettings | null>(null)
+  useEffect(() => {
+    api.get<LocalPaymentSettings>('/local/payment-settings').then(r => setPs(r.data)).catch(() => {})
+  }, [])
 
-  const needsUtr = order
+  const awaitingPayment = order
     && String(order.payment_method || '').toUpperCase() !== 'COD'
     && String(order.payment_status || '').toUpperCase() !== 'PAID'
     && order.status !== 'Cancelled'
+  const payUpi = ps?.manual_enabled ? ps.upi_id?.trim() || '' : ''
+  const payUri = awaitingPayment && payUpi && order
+    ? `upi://pay?pa=${encodeURIComponent(payUpi)}&pn=${encodeURIComponent((ps?.receiver_name || 'DETOMSITE').trim())}&am=${(Math.round(Number(order.total) * 100) / 100).toFixed(2)}&cu=INR&tn=${encodeURIComponent(`Detomsite ${order.total}`)}`
+    : ''
 
   const parentStyle = order ? statusStyles[order.status] || statusStyles.Pending : statusStyles.Pending
 
@@ -151,7 +135,7 @@ export function OrderResultPage() {
               <div className="mb-5 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-left text-sm text-amber-700">
                 <p className="font-bold">⚠️ Your order was placed, but the payment record didn't save.</p>
                 {pendingDetail && <p className="mt-1 text-xs">{pendingDetail}</p>}
-                <p className="mt-1">No problem — just paste your UTR in the box below and it will save now.</p>
+                <p className="mt-1">No problem — your order is safe. If you already paid in your UPI app, send the UTR shown there to the shop so the admin can record it; otherwise complete the payment with the button below.</p>
               </div>
             )}
             <p className="text-xs font-bold uppercase tracking-wider text-gray-500">Order Result</p>
@@ -190,31 +174,17 @@ export function OrderResultPage() {
               <p className="text-gray-500">Payment: {order.payment_method} · {order.payment_status}</p>
             </div>
 
-            {needsUtr && (
+            {awaitingPayment && (
               <div className="mt-4 rounded-card border border-emerald-200 bg-emerald-50/60 p-4 text-left">
-                <p className="text-sm font-bold text-primary">✓ UTR already attached at checkout — no need to pay again.</p>
-                <p className="mt-0.5 text-[11px] leading-relaxed text-primary">Your order carries the payment proof. The admin verifies it and your order is confirmed. Do NOT scan any other QR.</p>
-                {!showRecovery ? (
-                  <button onClick={() => setShowRecovery(true)} className="mt-2 text-xs font-bold text-primary underline">Payment didn't save? Paste UTR again</button>
-                ) : (
-                <>
-                <input
-                  value={retryUtr}
-                  onChange={e => { setRetryUtr(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 22)); setRetryMsg(''); setRetryErr('') }}
-                  placeholder="UTR (12-digit, only if checkout failed)"
-                  autoCapitalize="characters"
-                  className="mt-2 w-full rounded-btn border-2 border-gold-light px-3 py-2 text-xs font-semibold tracking-wide text-gold-dark outline-none focus:border-gold"
-                />
-                <button
-                  onClick={() => void submitRetryUtr()}
-                  disabled={!retryUtr.trim() || retryBusy}
-                  className="mt-2 w-full rounded-btn bg-gold-dark px-4 py-2 text-xs font-bold text-white transition-colors hover:bg-gold disabled:cursor-not-allowed disabled:opacity-40">
-                  {retryBusy ? 'Saving…' : 'Submit UTR'}
-                </button>
-                </>
-                )}
-                {retryMsg && <p className="mt-1.5 text-[11px] font-semibold text-emerald-700">{retryMsg}</p>}
-                {retryErr && <p className="mt-1.5 text-[11px] font-semibold text-red-600">{retryErr}</p>}
+                <p className="text-sm font-bold text-primary">Payment pending — complete it in your UPI app.</p>
+                <p className="mt-0.5 text-[11px] leading-relaxed text-primary">Pay ₹{order.total} once — the admin verifies the payment and confirms your order. Do NOT scan any other QR.</p>
+                {payUri ? (
+                  <a href={payUri}
+                    className="mt-3 flex w-full items-center justify-center gap-2 rounded-btn bg-primary px-4 py-2.5 text-sm font-bold text-white transition-all hover:bg-primary-dark">
+                    <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 7V5a2 2 0 0 1 2-2h2" /><path d="M17 3h2a2 2 0 0 1 2 2v2" /><path d="M21 17v2a2 2 0 0 1-2 2h-2" /><path d="M7 21H5a2 2 0 0 1-2-2v-2" /><path d="M7 12h10" /></svg>
+                    Scan for better option · Pay ₹{order.total}
+                  </a>
+                ) : null}
               </div>
             )}
 

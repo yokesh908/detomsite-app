@@ -10,6 +10,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from app.core.config import settings
+from app.core.status_values import PaymentStatus, SharePaymentStatus
 from app.core.rate_limit import allow as rate_allow, reset as rate_reset, client_ip as rate_ip
 from app.core.store import store as db
 from app.core.security import hash_password, verify_password, create_access_token, create_refresh_token, decode_token
@@ -830,10 +831,28 @@ async def share_status(admin: dict = Depends(verify_admin)):
     }
 
 
+class SharePaymentStatusUpdate(BaseModel):
+    """Body of PATCH /shares/{payment_id}.
+
+    PENTEST FIX (finding 12): raw ``dict`` body whose ``status`` was written
+    straight to the ₹10-per-order vendor ledger — an arbitrary value there
+    silently breaks the "has the admin collected this month's share?" rollup
+    (which counts only ``Completed``), and the unbounded string was a free
+    DB-write primitive on an admin-authenticated path.
+    """
+    status: SharePaymentStatus = "Completed"
+
+
+class PaymentVerifyRequest(BaseModel):
+    """Body of PATCH /payments/{payment_id}/verify — see the note on
+    ``SharePaymentStatusUpdate`` for why this is not a bare ``dict``."""
+    status: PaymentStatus = "Success"
+
+
 @router.patch("/shares/{payment_id}")
-async def update_share_payment(payment_id: str, data: dict, admin: dict = Depends(verify_admin)):
+async def update_share_payment(payment_id: str, data: SharePaymentStatusUpdate, admin: dict = Depends(verify_admin)):
     """Mark a vendor share payment as received (Completed) or Rejected."""
-    status = data.get("status", "Completed")
+    status = data.status
     payment = await _db(db.update_share_payment_status, payment_id, status)
     if not payment:
         raise HTTPException(status_code=404, detail="Share payment not found")
@@ -841,14 +860,14 @@ async def update_share_payment(payment_id: str, data: dict, admin: dict = Depend
 
 
 @router.patch("/payments/{payment_id}/verify")
-async def verify_payment(payment_id: str, data: dict, admin: dict = Depends(verify_admin)):
+async def verify_payment(payment_id: str, data: PaymentVerifyRequest, admin: dict = Depends(verify_admin)):
     """Verify or reject a manual payment.
 
     When approved, the payment is provably received, so the shopkeeper's
     WhatsApp notification is auto-generated exactly as with the bank-SMS/UTR
     path — the money has been verified either way.
     """
-    status = data.get("status", "Success")
+    status = data.status
     payment = await _db(db.get_payment_by_id, payment_id)
     if not payment:
         # Multi-shop parent order — its payment proof is on the parent_orders row.

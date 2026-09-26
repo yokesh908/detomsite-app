@@ -9,6 +9,7 @@ import logging
 import traceback
 
 from app.core.config import settings
+from app.core.status_values import ShopStatus, VendorOrderStatus
 from app.core.rate_limit import allow as rate_allow, reset as rate_reset, client_ip as rate_ip
 from app.core.store import store as db
 from app.core.security import hash_password, verify_password, create_access_token, create_refresh_token, decode_token
@@ -55,13 +56,31 @@ class AuthResponse(BaseModel):
 
 class ShopStatusUpdate(BaseModel):
     present: bool | None = None
-    status: str | None = None
-    opening_time: str | None = None
-    closing_time: str | None = None
-    upi_id: str | None = None
+    # PENTEST FIX (finding 12): the shop status drives every portal's badge and
+    # the student-facing "open?" filter, so it can't be a free-form string.
+    status: ShopStatus | None = None
+    opening_time: str | None = Field(default=None, max_length=10)
+    closing_time: str | None = Field(default=None, max_length=10)
+    upi_id: str | None = Field(default=None, max_length=100)
     upi_enabled: bool | None = None
     cod_enabled: bool | None = None
-    category: str | None = None
+    category: str | None = Field(default=None, max_length=50)
+
+
+class VendorOrderStatusUpdate(BaseModel):
+    """Body of PATCH /vendor/orders/{id}/status.
+
+    PENTEST FIX (finding 12): this endpoint previously took a raw ``dict``, so
+    any authenticated shopkeeper could persist an arbitrary, arbitrarily large
+    string into the order state machine — an unknown value drops the order out
+    of every pipeline view (the shop can no longer see or action it) and is an
+    unbounded DB-write primitive. ``status`` was never optional in practice, so
+    the required field + Literal keeps the old 400 contract as a 422 while
+    closing both holes. The vocabulary is the shop pipeline only: shopkeepers
+    move orders through prep states, never into payment states.
+    """
+    status: VendorOrderStatus
+    notes: str | None = Field(default=None, max_length=500)
 
 
 class AdminDuesPayment(BaseModel):
@@ -543,12 +562,10 @@ def vendor_history(
 
 
 @router.patch("/orders/{order_id}/status")
-def update_order_status(order_id: str, data: dict, current_vendor: dict = Depends(get_current_vendor)):
+def update_order_status(order_id: str, data: VendorOrderStatusUpdate, current_vendor: dict = Depends(get_current_vendor)):
     """Update order status (accept, prepare, complete, cancel). Works for single
     orders AND multi-shop sub-orders."""
-    new_status = data.get("status")
-    if not new_status:
-        raise HTTPException(status_code=400, detail="Status is required")
+    new_status = data.status
 
     order = db.get_order(order_id)
     is_sub = False

@@ -20,7 +20,6 @@ export function PaymentPage() {
   const session = getLocalSession()
   const [ps, setPs] = useState<LocalPaymentSettings | null>(null)
   const [method, setMethod] = useState<'manual' | 'cod'>('manual')
-  const [utr, setUtr] = useState('')
   const [slot, setSlot] = useState<'Afternoon' | 'Night'>('Afternoon')
   const [loc, setLoc] = useState('VIT-AP Hostel A Block')
   const [phone, setPhone] = useState(session?.phone || '')
@@ -40,7 +39,7 @@ export function PaymentPage() {
   }, [])
 
   /* Payment settings load async — if UPI isn't configured on the server the
-     "UPI (UTR)" tab disappears, so stop the form from silently keeping a
+     "UPI" tab disappears, so stop the form from silently keeping a
      'manual' selection the shop can't accept. */
   useEffect(() => {
     if (ps && !manualReady && method === 'manual') setMethod('cod')
@@ -71,8 +70,8 @@ export function PaymentPage() {
 
     if (method === 'manual') {
       if (!manualReady) { setError('Manual payment not configured'); return }
-      const clean = utr.trim().toUpperCase().replace(/[^A-Z0-9]/g, '')
-      if (clean.length < 12) { setError('Pay in your UPI app first, then paste the 12-digit UTR from the success screen.'); return }
+      /* No UTR paste anymore: the student pays from the QR / "Scan for
+         better option" button and the admin verifies the payment. */
     }
 
     setLoading(true)
@@ -88,11 +87,11 @@ export function PaymentPage() {
         payment_method: method === 'cod' ? 'COD' : 'UTR',
       })
 
-      // Step 2: submit the UTR payment record (the UTR is the ONLY proof —
-      // screenshots were removed). Verification is done by the admin/backend
-      // (the frontend never decides payment success). If the save fails the
-      // ORDER already exists — never re-submit it (that created duplicate
-      // orders); flag it so the result page offers a UTR retry.
+      // Step 2: record the payment (no UTR anymore — the row carries the
+      // server-priced amount and the ADMIN verifies it; the frontend never
+      // decides payment success). If the save fails the ORDER already exists
+      // — never re-submit it (that created duplicate orders); flag it so the
+      // result page can tell the student.
       let paymentPending = false
       if (method === 'manual') {
         try {
@@ -100,7 +99,7 @@ export function PaymentPage() {
             order_id: order.data.id,
             amount: total,
             method: 'Manual UTR',
-            utr_number: utr.trim().toUpperCase(),
+            utr_number: '',
           })
         } catch (err: any) {
           paymentPending = true
@@ -121,7 +120,7 @@ export function PaymentPage() {
 
   const canPay = method === 'cod'
     ? true
-    : manualReady && utr.trim().replace(/[^A-Za-z0-9]/g, '').length >= 12
+    : manualReady
 
   return (
     <div className="min-h-screen bg-white">
@@ -197,7 +196,7 @@ export function PaymentPage() {
                         {upiQrCode && (
                           <div className="mt-4 flex flex-col items-center rounded-btn border border-primary-light/60 bg-white p-4 text-center">
                             <img src={upiQrCode} alt={`Scan ONCE to pay ₹${total}`} className="h-52 w-52" />
-                            <p className="mt-2 text-sm font-bold text-primary-dark">Scan ONCE to pay ₹{total} — then paste UTR below (no second scan)</p>
+                            <p className="mt-2 text-sm font-bold text-primary-dark">Scan ONCE to pay ₹{total} (no second scan)</p>
                             <p className="mt-1 text-xs text-gray-500">This is the ONLY QR — the order-result page shows no second QR. Pay once.</p>
                           </div>
                         )}
@@ -207,21 +206,26 @@ export function PaymentPage() {
                           <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.1 4.2 2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1 1 .4 2 .7 2.9a2 2 0 0 1-.4 2.1L8.1 10a16 16 0 0 0 6 6l1.3-1.3a2 2 0 0 1 2.1-.4c.9.3 1.9.6 2.9.7a2 2 0 0 1 1.6 2Z" /></svg>
                           Pay via UPI App (GPay / PhonePe / Paytm)
                         </a>
-                        <p className="mt-2 text-xs text-primary">Pay FIRST in your UPI app, then paste the 12-digit UTR below — order is placed with proof attached (no second ask).</p>
+                        <p className="mt-2 text-xs text-primary">Pay FIRST in your UPI app (QR above or the "Scan for better option" button) — then tap "Place Order". The admin verifies the payment; nothing to paste.</p>
                         <p className="mt-1 text-[11px] text-amber-700">If the app warns "THIS PAYMENT MAY FAIL AS PER UPI RISK POLICY": STOP — the VPA name check failed. Pay the same VPA via mobile number instead, or verify receiver name. Do NOT retry blindly.</p>
                       </div>
                     ) : <p className="mt-2 text-sm text-gray-400">Admin hasn't configured payment yet</p>}
                   </div>
                   <div className="grid gap-3 md:grid-cols-2">
-                    <input value={utr} onChange={e => setUtr(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 22))}
-                      className="rounded-btn border-2 border-gray-200 px-4 py-2.5 text-sm font-bold tracking-widest text-gray-900 placeholder-gray-400 outline-none focus:border-primary focus:shadow-emerald-sm" placeholder="UTR (12-digit, required before order)" required={method === 'manual'} />
+                    {upiUrl ? (
+                      <a href={upiUrl}
+                        className="flex items-center justify-center gap-2 rounded-btn bg-primary px-4 py-2.5 text-sm font-bold text-white shadow-gold transition-all hover:bg-primary-dark">
+                        <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 7V5a2 2 0 0 1 2-2h2" /><path d="M17 3h2a2 2 0 0 1 2 2v2" /><path d="M21 17v2a2 2 0 0 1-2 2h-2" /><path d="M7 21H5a2 2 0 0 1-2-2v-2" /><path d="M7 12h10" /></svg>
+                        Scan for better option
+                      </a>
+                    ) : null}
                     <select value={slot} onChange={e => setSlot(e.target.value as 'Afternoon' | 'Night')}
                       className="rounded-btn border-2 border-gray-200 px-4 py-2.5 text-sm text-gray-900 outline-none focus:border-primary">
                       <option value="Afternoon">Afternoon slot · deliver 1:00 – 1:30 PM</option>
                       <option value="Night">Night slot · deliver 7:30 – 8:00 PM</option>
                     </select>
                   </div>
-                  <p className="text-xs text-gray-500">The <b>UTR is asked BEFORE the order is placed</b> so you never think twice — you'll find it in your UPI app's payment-success screen (UPI ref / txn ID). No screenshot upload. No second QR/UTR ask after.</p>
+                  <p className="text-xs text-gray-500">Pay in your UPI app first (scan the QR, or use <b>Scan for better option</b> to open the app directly), then tap <b>Place Order</b>. Nothing to paste — the admin verifies the payment. No screenshot upload. No second QR after.</p>
                 </div>
               )}
 
@@ -251,7 +255,7 @@ export function PaymentPage() {
               </div>
               <button type="submit" disabled={loading || !canPay}
                 className="mt-5 w-full rounded-btn bg-primary px-5 py-3 text-sm font-bold text-white shadow-gold transition-all hover:bg-primary-dark disabled:opacity-40">
-                {loading ? 'Placing order...' : method === 'cod' ? `Place COD Order · ₹${total}` : (utr.trim().replace(/[^A-Za-z0-9]/g, '').length >= 12 ? `Place Order with UTR · ₹${total}` : `Enter UTR above to place order`)}
+                {loading ? 'Placing order...' : method === 'cod' ? `Place COD Order · ₹${total}` : `Place Order · ₹${total}`}
               </button>
               {!manualReady && method === 'manual' && (
                 <p className="mt-3 text-center text-xs font-medium text-gray-400">UPI not configured — use COD instead.</p>

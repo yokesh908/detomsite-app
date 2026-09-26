@@ -23,8 +23,18 @@ from app.core.order_slots import (
 from app.core.security import hash_password, verify_password, create_access_token, create_refresh_token, decode_token
 from app.services import push_service
 from app.services import sms_service
-from typing import Optional
+from typing import Literal, Optional
 import logging
+
+from app.core.status_values import (
+    ComplaintStatus,
+    MenuChangeStatus,
+    OrderStatus,
+    PaymentStatus,
+    RefundStatus,
+    ShopApprovalStatus,
+    ShopStatus,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +44,14 @@ router = APIRouter()
 # The cart UI caps itself well below this; the server-side bound exists so a
 # hand-crafted request can't inflate a bill/stock row to an absurd value.
 MAX_LINE_QUANTITY = 99
+
+# Order states in which a payment record / UTR reference may still be attached.
+# "Pending" is the multi-shop parent's initial state (parent_orders.status),
+# "Pending Payment" the single-shop UPI/Razorpay state, and "Pending Acceptance"
+# the COD state — everything else (Confirmed, Delivered, Cancelled, ...) is past
+# the point where a new payment proof means anything. Admins may bypass this
+# (the admin tools annotate any order).
+_AWAITING_PAYMENT_STATUSES = ("Pending", "Pending Payment", "Pending Acceptance")
 
 # Payment verification is UTR-ONLY: the student pastes the UPI transaction
 # reference (a string stored in the database) and the shop's bank credit SMS
@@ -144,44 +162,50 @@ async def database_status():
 
 class LocalSessionCreate(BaseModel):
     email: EmailStr
-    name: str
-    role: str
+    name: str = Field(..., max_length=100)
+    role: str = Field(..., max_length=20)
 
 
 class LocalShopUpdate(BaseModel):
-    name: str | None = None
-    category: str | None = None
-    description: str | None = None
-    opening_time: str | None = None
-    closing_time: str | None = None
+    # PENTEST FIX (finding 15): every string bounded; status/approval_status
+    # constrained to their real vocabularies so an admin/shopkeeper PATCH can't
+    # park garbage in the fields every portal filters on.
+    name: str | None = Field(default=None, max_length=100)
+    category: str | None = Field(default=None, max_length=50)
+    description: str | None = Field(default=None, max_length=1000)
+    opening_time: str | None = Field(default=None, max_length=20)
+    closing_time: str | None = Field(default=None, max_length=20)
     present: bool | None = None
-    status: str | None = None
-    approval_status: str | None = None
-    shopkeeper_email: str | None = None
-    shopkeeper_name: str | None = None
-    phone: str | None = None
-    whatsapp_number: str | None = None
-    upi_id: str | None = None
+    status: ShopStatus | None = None
+    approval_status: ShopApprovalStatus | None = None
+    shopkeeper_email: str | None = Field(default=None, max_length=200)
+    shopkeeper_name: str | None = Field(default=None, max_length=100)
+    phone: str | None = Field(default=None, max_length=30)
+    whatsapp_number: str | None = Field(default=None, max_length=30)
+    upi_id: str | None = Field(default=None, max_length=100)
 
 
 class LocalShopCreate(BaseModel):
-    name: str
-    category: str
-    description: str = ""
+    # PENTEST FIX (finding 15): bounded so a crafted admin request can't store
+    # unbounded blobs that every student's shop list then downloads.
+    name: str = Field(..., max_length=100)
+    category: str = Field(..., max_length=50)
+    description: str = Field(default="", max_length=1000)
     shopkeeper_email: EmailStr
-    shopkeeper_name: str
-    phone: str
-    opening_time: str = "09:00 AM"
-    closing_time: str = "09:00 PM"
-    upi_id: str = ""
+    shopkeeper_name: str = Field(..., max_length=100)
+    phone: str = Field(..., max_length=30)
+    opening_time: str = Field(default="09:00 AM", max_length=20)
+    closing_time: str = Field(default="09:00 PM", max_length=20)
+    upi_id: str = Field(default="", max_length=100)
 
 
 class LocalProductCreate(BaseModel):
-    shop_id: str
-    name: str
-    description: str = ""
+    # PENTEST FIX (finding 15): bounded free-text fields.
+    shop_id: str = Field(..., max_length=100)
+    name: str = Field(..., max_length=100)
+    description: str = Field(default="", max_length=1000)
     price: int
-    category: str
+    category: str = Field(..., max_length=50)
     inventory: int = 0
     prep_time: int = 10
     available: bool = True
@@ -189,20 +213,20 @@ class LocalProductCreate(BaseModel):
     # is_combo is true the category is forced to "Combo" and combo_items holds
     # the item list text (one per line or comma-separated).
     is_combo: bool = False
-    combo_items: str = ""
+    combo_items: str = Field(default="", max_length=500)
 
 
 class LocalProductUpdate(BaseModel):
-    name: str | None = None
-    description: str | None = None
+    name: str | None = Field(default=None, max_length=100)
+    description: str | None = Field(default=None, max_length=1000)
     price: int | None = None
     pending_price: int | None = None
-    category: str | None = None
+    category: str | None = Field(default=None, max_length=50)
     inventory: int | None = None
     prep_time: int | None = None
     available: bool | None = None
     is_combo: bool | None = None
-    combo_items: str | None = None
+    combo_items: str | None = Field(default=None, max_length=500)
 
 
 def _require_vitap_location(value: str) -> str:
@@ -221,11 +245,14 @@ def _require_vitap_location(value: str) -> str:
 
 
 class LocalOrderStatusUpdate(BaseModel):
-    status: str
+    # PENTEST FIX (finding 12): was a free-form `status: str` — any string
+    # (including megabyte payloads) was written straight to the orders table.
+    status: OrderStatus
 
 
 class LocalOrderItem(BaseModel):
-    product_id: str
+    # PENTEST FIX (finding 15): the product id is server-minted — bounded.
+    product_id: str = Field(..., max_length=100)
     # The cart UI lets a student pick a quantity per line; older clients omit it
     # (default 1). Declaring it here matters: Pydantic silently DROPS unknown
     # fields, so without this the server billed every line as a single unit no
@@ -234,12 +261,13 @@ class LocalOrderItem(BaseModel):
 
 
 class LocalOrderCreate(BaseModel):
-    shop_id: str
+    # PENTEST FIX (finding 15): identity/delivery strings bounded.
+    shop_id: str = Field(..., max_length=100)
     items: list[LocalOrderItem]
-    student_name: str = "Student"
-    student_phone: str = ""
-    delivery_location: str
-    delivery_slot: str
+    student_name: str = Field(default="Student", max_length=100)
+    student_phone: str = Field(default="", max_length=30)
+    delivery_location: str = Field(..., max_length=300)
+    delivery_slot: str = Field(..., max_length=50)
     pending_payment: bool = False
     payment_method: str = "UPI"  # 'UPI' | 'COD' | 'Razorpay'
 
@@ -257,12 +285,14 @@ class LocalOrderCreate(BaseModel):
 
 class LocalMultiShopOrder(BaseModel):
     """Multi-shop checkout payload: one list of shops, each with items."""
+    # PENTEST FIX (finding 15): free-form shop list — identity strings bounded
+    # (per-line quantity is validated in the handler below).
     shops: list[dict]
-    student_name: str = "Student"
-    student_phone: str = ""
-    student_email: str = ""
-    delivery_location: str
-    delivery_slot: str = ""
+    student_name: str = Field(default="Student", max_length=100)
+    student_phone: str = Field(default="", max_length=30)
+    student_email: str = Field(default="", max_length=200)
+    delivery_location: str = Field(..., max_length=300)
+    delivery_slot: str = Field(default="", max_length=50)
     payment_method: str = "UTR"  # 'UTR' | 'COD'
 
     @field_validator("delivery_location")
@@ -281,34 +311,40 @@ class LocalMultiShopOrder(BaseModel):
 
 
 class LocalSubOrderStatusUpdate(BaseModel):
-    status: str
-    notes: str = ""
+    # PENTEST FIX (finding 12/15): closed vocabulary + bounded notes.
+    status: OrderStatus
+    notes: str = Field(default="", max_length=2000)
 
 
 class LocalComplaintCreate(BaseModel):
-    parent_order_id: str
-    student_name: str = ""
-    student_phone: str = ""
-    shop_id: str = ""
-    shop_name: str = ""
-    subject: str
-    message: str
-    proof_url: str = ""
+    # PENTEST FIX: every field is length-bounded — an unbounded subject/message
+    # is a memory + DB-bloat write primitive on an authenticated-but-open route.
+    parent_order_id: str = Field(..., max_length=100)
+    student_name: str = Field(default="", max_length=100)
+    student_phone: str = Field(default="", max_length=30)
+    shop_id: str = Field(default="", max_length=100)
+    shop_name: str = Field(default="", max_length=200)
+    subject: str = Field(..., max_length=300)
+    message: str = Field(..., max_length=5000)
+    proof_url: str = Field(default="", max_length=500)
 
 
 class LocalRefundCreate(BaseModel):
-    parent_order_id: str
-    sub_order_id: str = ""
-    student_name: str = ""
-    shop_name: str = ""
+    # PENTEST FIX (finding 15): bounded — admin tooling still fits comfortably.
+    parent_order_id: str = Field(..., max_length=100)
+    sub_order_id: str = Field(default="", max_length=100)
+    student_name: str = Field(default="", max_length=100)
+    shop_name: str = Field(default="", max_length=200)
     original_amount: int = 0
     refund_amount: int = 0
-    refund_type: str = "Full"
+    refund_type: str = Field(default="Full", max_length=50)
 
 
 class LocalAnnouncementCreate(BaseModel):
-    shop_id: str
-    message: str
+    # PENTEST FIX (finding 15): the message is broadcast to every student —
+    # bounded so one admin paste can't blow up every student's app payload.
+    shop_id: str = Field(..., max_length=100)
+    message: str = Field(..., max_length=1000)
 
 
 class LocalAnnouncementToggle(BaseModel):
@@ -323,34 +359,41 @@ class LocalStudentNoticeUpdate(BaseModel):
 
 
 class LocalMenuChangeCreate(BaseModel):
-    shop_id: str
-    product_id: str = ""
-    change_type: str
-    old_value: str = ""
-    new_value: str = ""
+    # PENTEST FIX (finding 15): bounded free-text fields.
+    shop_id: str = Field(..., max_length=100)
+    product_id: str = Field(default="", max_length=100)
+    change_type: str = Field(..., max_length=100)
+    old_value: str = Field(default="", max_length=500)
+    new_value: str = Field(default="", max_length=500)
 
 
 class LocalComplaintStatusUpdate(BaseModel):
-    status: str
-    admin_notes: str = ""
+    # PENTEST FIX (finding 12): closed vocabulary + bounded notes.
+    status: ComplaintStatus
+    admin_notes: str = Field(default="", max_length=2000)
 
 
 class LocalRefundUpdate(BaseModel):
-    status: str
-    refund_utr: str = ""
-    admin_notes: str = ""
+    # PENTEST FIX (finding 12): closed vocabulary + bounded UTR/notes.
+    status: RefundStatus
+    refund_utr: str = Field(default="", max_length=40)
+    admin_notes: str = Field(default="", max_length=2000)
 
 
 class LocalMenuChangeApprove(BaseModel):
-    status: str
-    admin_notes: str = ""
+    # PENTEST FIX (finding 12): closed vocabulary + bounded notes.
+    status: MenuChangeStatus
+    admin_notes: str = Field(default="", max_length=2000)
 
 
 class LocalPaymentCreate(BaseModel):
-    order_id: str
+    # PENTEST FIX: order ids are server-minted ("oYYYYMMDD-N" / "pYYYYMMDD-N")
+    # and UTRs are short alphanumeric references — both are bounded so a hand-
+    # crafted request can't push megabyte strings into queries and rows.
+    order_id: str = Field(..., max_length=100)
     amount: int = Field(..., ge=1, le=1_000_000)
     method: str
-    utr_number: str | None = None
+    utr_number: str | None = Field(default=None, max_length=40)
 
     @field_validator("method")
     @classmethod
@@ -363,24 +406,30 @@ class LocalPaymentCreate(BaseModel):
 
 
 class LocalPaymentStatusUpdate(BaseModel):
-    status: str
+    # PENTEST FIX (finding 12): was a free-form `status: str` — any string was
+    # written to the payments table the settlement views read.
+    status: PaymentStatus
 
 
 class LocalPaymentSettings(BaseModel):
+    # PENTEST FIX (finding 15): bounded — these strings are rendered on every
+    # checkout page.
     manual_enabled: bool | None = None
-    upi_id: str | None = None
-    receiver_name: str | None = None
-    instructions: str | None = None
+    upi_id: str | None = Field(default=None, max_length=100)
+    receiver_name: str | None = Field(default=None, max_length=100)
+    instructions: str | None = Field(default=None, max_length=1000)
     razorpay_enabled: bool | None = None
 
 
 class LocalTicketCreate(BaseModel):
-    name: str
+    # PENTEST FIX (finding 15): bounded so a support ticket can't be an
+    # unbounded authenticated write primitive.
+    name: str = Field(..., max_length=100)
     email: EmailStr
-    phone_number: str
-    category: str
-    title: str
-    description: str
+    phone_number: str = Field(..., max_length=30)
+    category: str = Field(..., max_length=50)
+    title: str = Field(..., max_length=200)
+    description: str = Field(..., max_length=3000)
 
 
 class LocalFeedbackCreate(BaseModel):
@@ -412,8 +461,10 @@ class LocalAuthRegister(BaseModel):
 
 
 class LocalAuthLogin(BaseModel):
-    username: str
-    password: str
+    # PENTEST FIX (finding 15): bounded to match the register schema — an
+    # unbounded password body is free work for the bcrypt path.
+    username: str = Field(..., max_length=100)
+    password: str = Field(..., max_length=128)
 
 
 class LocalPhoneOnboarding(BaseModel):
@@ -502,7 +553,7 @@ def _same_student(user: dict, order: dict) -> bool:
     return bool(owner) and owner == str(user.get("id") or "")
 
 
-def _require_agent_key(x_agent_key: Optional[str]) -> None:
+def _require_agent_key(x_agent_key: Optional[str], request: Optional[Request] = None) -> None:
     """Gate the bank-SMS endpoints on the Android agent's shared key.
 
     ``/sms/match`` and ``/sms/incoming`` can both move an order to **Confirmed**
@@ -511,6 +562,14 @@ def _require_agent_key(x_agent_key: Optional[str]) -> None:
     without the key one anonymous request carrying a plausible UTR + amount was
     enough to settle a pending UPI order. DEBUG deployments stay permissive so
     local flows and tests can drive the endpoints by hand.
+
+    PENTEST FIX: the comparison is constant-time (``secrets.compare_digest``)
+    so the shared secret can't be probed byte-by-byte, and FAILED guesses are
+    throttled per client IP (20 per 15 minutes) — an attacker can no longer
+    brute-force the key at network speed. Only mismatches consume that budget,
+    so the real agent (which holds the correct key) is never throttled, and the
+    correct key still works even after somebody else's failed guesses from the
+    same IP.
     """
     configured = (settings.SMS_FORWARD_KEY or "").strip()
     if not configured:
@@ -520,7 +579,14 @@ def _require_agent_key(x_agent_key: Optional[str]) -> None:
             status_code=503,
             detail="Bank-SMS ingest is not configured on this server (SMS_FORWARD_KEY is unset).",
         )
-    if (x_agent_key or "") != configured:
+    if not secrets.compare_digest((x_agent_key or "").encode("utf-8"), configured.encode("utf-8")):
+        if request is not None and not rate_allow(
+            "agent_key_fail", rate_ip(request), max_attempts=20, window_sec=900
+        ):
+            raise HTTPException(
+                status_code=429,
+                detail="Too many invalid agent key attempts — please wait a few minutes and try again.",
+            )
         raise HTTPException(status_code=401, detail="Invalid agent key")
 
 
@@ -792,7 +858,12 @@ async def summary(_user: dict = Depends(get_current_local_user)):
 
 
 @router.post("/sessions")
-async def create_session(data: LocalSessionCreate, _user: dict = Depends(get_current_local_user)):
+async def create_session(data: LocalSessionCreate, request: Request, _user: dict = Depends(get_current_local_user)):
+    # PENTEST FIX: every call upserts a row keyed by the client-supplied email —
+    # bound it per student+IP so an authenticated caller can't grow the sessions
+    # table without limit. 15 per 5 minutes covers every real role-switch.
+    if not rate_allow("session", f"{_user.get('id')}:{rate_ip(request)}", max_attempts=15, window_sec=300):
+        raise HTTPException(status_code=429, detail="Too many session updates — please wait a few minutes and try again.")
     return await _db(persist_user_profile, data.email, data.name, data.role)
 
 
@@ -1053,9 +1124,10 @@ async def _notify_order_via_sms(order: dict) -> None:
     A real gateway replaces the ``log_sms`` calls in ``send_sms_async``; the
     rest of the flow (webhook → Confirmed) is gateway-independent.
 
-    WhatsApp for UPI orders is NOT fired here — it fires only after the
-    payment amount is verified (see ``_confirm_order_via_utr``). COD orders
-    have nothing to verify, so their WhatsApp notification goes out now.
+    WhatsApp for UPI orders is NOT fired here — it flips to "paid ✓" only
+    once the payment is proven (the ``paid=True`` call on the bank-SMS match
+    path below). COD orders have nothing to verify, so their WhatsApp
+    notification goes out now.
     """
     try:
         if not order or not order.get("id"):
@@ -1195,8 +1267,10 @@ async def _log_sms_inbound(order_id: str, phone: str, text: str, status: str) ->
 class LocalIncomingSms(BaseModel):
     """An SMS received on a phone — normally from the shopkeeper/admin replying
     ``YES <token>`` or ``NO <token>`` to confirm/reject an order."""
-    phone: str = ""
-    text: str = ""
+    # PENTEST FIX: bounded — an SMS is a short message; unbounded text is a
+    # memory/DB-bloat write primitive (even behind the agent key).
+    phone: str = Field(default="", max_length=30)
+    text: str = Field(default="", max_length=2000)
 
 
 def _extract_utr(text: str) -> str:
@@ -1235,44 +1309,28 @@ async def _bank_sms_seen(utr: str) -> bool:
     return bool(await _db(db.bank_sms_seen, utr))
 
 
-async def _confirm_order_via_utr(utr: str, phone: str = "", raw_text: str = "", bank_sms_arrived: bool = False) -> dict | None:
-    """Legacy caller compatibility: a UTR-only historical log is not proof.
-
-    Historical SMS logs omit the amount/account context. Do not use them to
-    approve a student's claim; only a fresh, scoped proof can auto-confirm.
-    """
-    if not bank_sms_arrived or _extract_utr(raw_text) != utr:
-        return None
-    amount = _extract_amount(raw_text)
-    if amount is None:
-        return None
-    try:
-        # In-process call: bypass the HTTP agent gate (which requires the shared
-        # key) and reuse the shared matching core directly.
-        result = await _sms_match_core(LocalSmsMatch(phone=phone, utr=utr, amount=amount))
-        return await _get_order(result["order_id"])
-    except HTTPException:
-        return None
+# NOTE: the UTR verification method — the bank-SMS credit check + same-amount
+# matching that lived in ``_confirm_order_via_utr`` — was removed from the
+# portal payment flow. Payments recorded here are settled manually by the
+# admin (Admin Center → Payments); only the agent-gated ``/sms/match`` route
+# below can still auto-confirm, and it is covered by its own tests.
 
 
 class LocalPaymentUtr(BaseModel):
-    order_id: str
+    order_id: str = Field(..., max_length=100)
     utr_number: str = Field(..., min_length=6, max_length=40)
 
 
 @router.post("/payments/utr")
 async def submit_payment_utr(data: LocalPaymentUtr, request: Request, current_user: dict = Depends(get_current_local_user)):
-    """The student pastes the UPI transaction UTR after paying.
+    """Optional: the student may paste the UPI transaction UTR after paying.
 
-    It is stored against the order's payment record. When the shopkeeper's
-    bank credit SMS (with the same UTR) arrives via ``/sms/incoming`` the two
-    sides match and the order is auto-confirmed. If the bank SMS arrived first,
-    an admin must review it; historical UTR-only logs cannot prove the amount.
-
-    UTR is the ONLY proof the platform accepts now (the screenshot upload
-    system was removed). If the checkout failed to create the payment row
-    (the old "record didn't save" bug), this endpoint creates it on the spot
-    from the SERVER-side order total — a UTR paste always saves.
+    The UTR verification method (bank-SMS credit check + same-amount
+    matching) was removed: this endpoint only STORES the reference against
+    the order's payment record so the admin can review it in Admin Center →
+    Payments. If the checkout failed to create the payment row (the old
+    "record didn't save" bug), this endpoint creates it on the spot from the
+    SERVER-side order total — a UTR paste always saves.
     """
     # PENTEST FIX: bound UTR submissions per student+IP — every call writes to
     # (or probes) the payment record, so it must not be an unthrottled write
@@ -1294,6 +1352,13 @@ async def submit_payment_utr(data: LocalPaymentUtr, request: Request, current_us
     # checkout pays one bill whose payment row lives on the parent, so the old
     # orders-only lookup made every parent UTR save 404 ("Order not found").
     order, is_parent = await _resolve_owned_order(data.order_id, current_user)
+
+    # PENTEST FIX: a reference is only meaningful while the order still awaits
+    # payment — pasting a UTR onto a cancelled / delivered / settled order just
+    # pollutes the admin's verify queue with proof for food never owed. Admins
+    # (the tools manager) may still annotate any order.
+    if current_user.get("role") != "admin" and str(order.get("status") or "") not in _AWAITING_PAYMENT_STATUSES:
+        raise HTTPException(status_code=409, detail="This order is no longer awaiting payment — nothing left to verify.")
 
     server_total = int(round(float(order.get("total") or 0)))
 
@@ -1320,28 +1385,18 @@ async def submit_payment_utr(data: LocalPaymentUtr, request: Request, current_us
     if not payment:
         raise HTTPException(status_code=400, detail="Could not save the UTR for this order — please try again.")
 
-    # Multi-shop parents have no single bank-SMS hook yet — their UTR is
-    # verified by the admin in the Admin Center. Single orders auto-match.
-    if is_parent:
-        return {
-            "message": "UTR saved — the admin will verify your payment shortly.",
-            "payment": payment,
-            "order": None,
-        }
-
-    # Bank SMS may have arrived before the student typed the UTR.
-    confirmed = await _confirm_order_via_utr(utr)
-    if confirmed:
-        return {"message": "UTR matched the bank SMS — your order is confirmed!", "payment": payment, "order": confirmed}
+    # UTR verification (bank-SMS credit check + same-amount matching) was
+    # removed from the portal flow: a saved UTR is only a reference for the
+    # admin to review in Admin Center → Payments.
     return {
-        "message": "UTR saved — waiting for a matching bank proof. If the SMS already arrived, ask the admin to review the payment.",
+        "message": "UTR saved — the admin will verify your payment shortly.",
         "payment": payment,
         "order": None,
     }
 
 
 @router.post("/sms/incoming")
-async def sms_incoming(data: LocalIncomingSms, x_agent_key: Optional[str] = Header(None)):
+async def sms_incoming(data: LocalIncomingSms, request: Request, x_agent_key: Optional[str] = Header(None)):
     """Receive an inbound SMS reply and act on it.
 
     Two flows are supported:
@@ -1362,7 +1417,7 @@ async def sms_incoming(data: LocalIncomingSms, x_agent_key: Optional[str] = Head
     # Agent auth: fail closed (see ``_require_agent_key``). With no key
     # configured the endpoint refuses to run instead of letting any anonymous
     # caller inject "YES <token>" / a fake bank UTR and confirm an order.
-    _require_agent_key(x_agent_key)
+    _require_agent_key(x_agent_key, request)
 
     report = {"received": True, "phone": phone, "text": text, "order": None}
 
@@ -1464,13 +1519,13 @@ class LocalSmsMatch(BaseModel):
     SMS on the shopkeeper's phone, pulls out the UTR and credited amount locally,
     and sends only these two fields plus the receiving phone number.
     """
-    phone: str = ""
+    phone: str = Field(default="", max_length=30)
     utr: str = Field(..., min_length=8, max_length=30, pattern=r"^[A-Za-z0-9]+$")
     amount: float = Field(..., gt=0, allow_inf_nan=False)
 
 
 @router.post("/sms/match")
-async def sms_match(data: LocalSmsMatch, x_agent_key: Optional[str] = Header(None)):
+async def sms_match(data: LocalSmsMatch, request: Request, x_agent_key: Optional[str] = Header(None)):
     """Privacy-first auto-confirm: the shop's Android agent extracts the UTR
     and amount **on-device** and sends only the minimal proof here — the raw
     bank SMS text never leaves the phone.
@@ -1482,18 +1537,16 @@ async def sms_match(data: LocalSmsMatch, x_agent_key: Optional[str] = Header(Non
     # Agent auth: fail closed. Only the Android agent (which holds the shared
     # key) may submit bank SMS — an unset key must NOT mean "everyone is the
     # agent", because this endpoint can mark an order paid.
-    _require_agent_key(x_agent_key)
+    _require_agent_key(x_agent_key, request)
     return await _sms_match_core(data)
 
 
 async def _sms_match_core(data: LocalSmsMatch) -> dict:
     """Shared matching logic behind ``/sms/match``.
 
-    Split out of the route so the in-process UTR confirmation path
-    (``_confirm_order_via_utr``) can reuse it WITHOUT re-entering the HTTP agent
-    gate: that gate fails closed when no ``SMS_FORWARD_KEY`` is configured, and
-    the internal path must keep working (it already requires a freshly arrived
-    bank SMS carrying the same UTR).
+    Only the agent-authenticated route calls this now — the portal-side UTR
+    confirmation path (``_confirm_order_via_utr``, with its SMS + same-amount
+    verification) was removed from the student payment flow.
     """
     utr = (data.utr or "").strip().upper()
     if not utr:
@@ -1580,7 +1633,7 @@ async def _sms_match_core(data: LocalSmsMatch) -> dict:
 
 
 @router.get("/whatsapp/pending")
-async def whatsapp_pending_agent(x_agent_key: Optional[str] = Header(None)):
+async def whatsapp_pending_agent(request: Request, x_agent_key: Optional[str] = Header(None)):
     """Pending WhatsApp notifications for the on-phone auto-send bot (same
     ``X-Agent-Key`` as the SMS agent).
 
@@ -1592,7 +1645,7 @@ async def whatsapp_pending_agent(x_agent_key: Optional[str] = Header(None)):
     """
     # Agent auth: fail closed — this feed carries customer phone numbers and
     # order messages, so an anonymous caller must never be able to read it.
-    _require_agent_key(x_agent_key)
+    _require_agent_key(x_agent_key, request)
 
     logs = await _db(db.list_whatsapp_logs, 100)
     pending = []
@@ -1614,9 +1667,9 @@ async def whatsapp_pending_agent(x_agent_key: Optional[str] = Header(None)):
 
 
 @router.post("/whatsapp/{whatsapp_id}/mark-sent")
-async def whatsapp_mark_sent_agent(whatsapp_id: str, x_agent_key: Optional[str] = Header(None)):
+async def whatsapp_mark_sent_agent(whatsapp_id: str, request: Request, x_agent_key: Optional[str] = Header(None)):
     """Mark a WhatsApp notification as sent once the phone bot delivered it."""
-    _require_agent_key(x_agent_key)
+    _require_agent_key(x_agent_key, request)
     doc = await _db(db.mark_whatsapp_sent, whatsapp_id)
     if not doc:
         raise HTTPException(status_code=404, detail="WhatsApp notification not found")
@@ -1636,7 +1689,24 @@ async def payments(_admin: dict = Depends(_require_admin)):
 
 
 @router.post("/payments")
-async def add_payment(data: LocalPaymentCreate, current_user: dict = Depends(get_current_local_user)):
+async def add_payment(data: LocalPaymentCreate, request: Request, current_user: dict = Depends(get_current_local_user)):
+    # PENTEST FIX: bound payment submissions per student+IP — every call writes
+    # a row AND rings the admin's phone (push at the bottom of this handler), so
+    # an unthrottled loop is both a DB-spam and an admin push-flood primitive.
+    # 20 per 5 minutes is far beyond any real checkout (one call per shop).
+    if not rate_allow("payment", f"{current_user.get('id')}:{rate_ip(request)}", max_attempts=20, window_sec=300):
+        raise HTTPException(status_code=429, detail="Too many payment submissions — please wait a few minutes and try again.")
+
+    # PENTEST FIX: same UTR hygiene as /payments/utr — a UTR is an alphanumeric
+    # reference (UPI UTRs are 12 digits); reject junk BEFORE touching the order
+    # so symbol-laden input never reaches a query or a stored row.
+    utr_claim = (data.utr_number or "").strip().upper()
+    if utr_claim and (not utr_claim.isalnum() or not 6 <= len(utr_claim) <= 40):
+        raise HTTPException(
+            status_code=422,
+            detail="That doesn't look like a UTR — it is usually a 12-digit number with no spaces or symbols.",
+        )
+
     # Resolve the target across single orders AND multi-shop parent orders — a
     # multi order's id lives in `parent_orders`, not `orders`, so the old
     # orders-only lookup made every UPI/UTR payment for the student's multi
@@ -1684,10 +1754,22 @@ async def add_payment(data: LocalPaymentCreate, current_user: dict = Depends(get
                 raise HTTPException(status_code=400, detail="This shop has turned off UPI payments.")
         # Razorpay method is validated in the create-razorpay-order endpoint
 
+    # PENTEST FIX: a payment proof only makes sense while the order is still
+    # awaiting payment — attaching rows to a cancelled / delivered / already
+    # settled order only pollutes the admin's verify queue with proof for food
+    # that is never owed.
+    if current_user.get("role") != "admin" and str(order.get("status") or "") not in _AWAITING_PAYMENT_STATUSES:
+        raise HTTPException(status_code=409, detail="This order is no longer awaiting payment — no new payment can be recorded against it.")
+
+    # PENTEST FIX: an order that already settled must not collect a second
+    # payment row (double-counting in the admin's verify/settlement views).
+    settled = await _db(db.get_payment_by_order_id, data.order_id)
+    if settled and str(settled.get("status") or "") == "Success":
+        raise HTTPException(status_code=409, detail="This order has already been paid.")
+
     # One UTR = one payment (unique index on payments.utr_number in both DBs).
     # A re-used reference must fail with a FRIENDLY 409 at checkout too — never
     # the raw 500 students saw as "it didn't save".
-    utr_claim = (data.utr_number or "").strip().upper()
     if utr_claim:
         existing = await _db(db.get_payment_by_utr, utr_claim)
         if existing and str(existing.get("order_id") or "") != str(data.order_id):
@@ -1715,20 +1797,10 @@ async def add_payment(data: LocalPaymentCreate, current_user: dict = Depends(get
     if not payment:
         raise HTTPException(status_code=400, detail="Unable to create payment")
 
-    # UTR-first: the student's UTR is asked at checkout. The order is only
-    # accepted once the bank credit SMS carrying this UTR arrives (security
-    # anchor inside _confirm_order_via_utr) — if the SMS already landed before
-    # the student paid, it is accepted right now.
-    matched = None
-    utr = (data.utr_number or "").strip().upper()
-    # Multi-shop parents have no single bank-SMS hook yet — their UTR proof is
-    # verified by the admin in the Admin Center instead.
-    if not is_parent and data.method == "Manual UTR" and utr:
-        matched = await _confirm_order_via_utr(utr, raw_text=f"UTR:{utr} Paid")
-    if matched:
-        return {**payment, "order": matched, "matched": {"utr": utr}}
-    # A manual payment that did not auto-match the bank SMS needs the admin to
-    # verify the proof — ring the admin's phone (web push, best-effort).
+    # The UTR verification method (bank-SMS credit check + same-amount
+    # matching inside _confirm_order_via_utr) was removed: a recorded payment
+    # is settled by the admin. Ring the admin's phone (web push, best-effort)
+    # so they review it in Admin Center → Payments.
     if str(data.method or "").upper() != "COD":
         _push_admin(
             "New payment to verify",
@@ -1744,16 +1816,30 @@ async def add_payment(data: LocalPaymentCreate, current_user: dict = Depends(get
 
 
 class LocalRazorpayOrderCreate(BaseModel):
-    amount: int  # in paise (₹1 = 100 paise)
-    currency: str = "INR"
-    order_id: str  # Local order ID to associate payment with
+    amount: int = Field(..., ge=1, le=100_000_000)  # in paise (₹1 = 100 paise)
+    currency: str = Field(default="INR", max_length=8)
+    order_id: str = Field(..., max_length=100)  # Local order ID to associate payment with
+
+    @field_validator("currency")
+    @classmethod
+    def _validate_currency(cls, value: str) -> str:
+        # PENTEST FIX: the gateway amount is bound to the ₹ order total, so the
+        # currency must be the same unit that binding assumes. The platform
+        # settles in INR only — normalise case and REFUSE anything else rather
+        # than forwarding a caller-declared currency to the gateway.
+        norm = (value or "").strip().upper()
+        if norm != "INR":
+            raise ValueError("Only INR payments are supported")
+        return norm
 
 
 class LocalRazorpayVerify(BaseModel):
-    razorpay_order_id: str
-    razorpay_payment_id: str
-    razorpay_signature: str
-    order_id: str  # Local order ID
+    # PENTEST FIX: every gateway field is bounded — these are fixed-width
+    # references from Razorpay, never arbitrary-length strings.
+    razorpay_order_id: str = Field(..., max_length=64)
+    razorpay_payment_id: str = Field(..., max_length=64)
+    razorpay_signature: str = Field(..., max_length=256)
+    order_id: str = Field(..., max_length=100)  # Local order ID
 
 
 @router.post("/payments/create-razorpay-order")
@@ -2072,10 +2158,17 @@ def _resolve_feedback_user(authorization: Optional[str]):
 
 
 @router.post("/feedback")
-async def add_feedback(data: LocalFeedbackCreate, authorization: Optional[str] = Header(None)):
+async def add_feedback(data: LocalFeedbackCreate, request: Request, authorization: Optional[str] = Header(None)):
     """Submit a bug report / improvement contribution while testing the site.
     Lands on the admin Feedback page (and in the admin notification bell).
     Identity is taken from the JWT when available, else from the client session."""
+    # PENTEST FIX: this route is deliberately reachable WITHOUT a token (guest
+    # reports) and every submission rings the admin's phone — so it must be
+    # throttled per IP, otherwise an anonymous caller could flood the admin's
+    # push channel and fill the feedback table. 20 per 10 minutes is well
+    # beyond any human (or CI) reporting pattern.
+    if not rate_allow("feedback", rate_ip(request), max_attempts=20, window_sec=600):
+        raise HTTPException(status_code=429, detail="Too many feedback submissions — please wait a few minutes and try again.")
     values = data.model_dump()
     user = await _db(_resolve_feedback_user, authorization)
     if user:
@@ -2367,9 +2460,11 @@ async def patch_refund(refund_id: str, data: LocalRefundUpdate, _admin: dict = D
 
 
 class LocalRefundUpdate(BaseModel):
-    status: str
-    refund_utr: str = ""
-    admin_notes: str = ""
+    # PENTEST FIX (finding 12): closed vocabulary + bounded UTR/notes. (This
+    # second definition must stay in lockstep with the primary one above.)
+    status: RefundStatus
+    refund_utr: str = Field(default="", max_length=40)
+    admin_notes: str = Field(default="", max_length=2000)
 
 
 # ─── Settlements (admin, 9:00 PM daily) ───
@@ -2423,8 +2518,10 @@ async def patch_menu_change_request(req_id: str, data: LocalMenuChangeApprove, _
 
 
 class LocalMenuChangeApprove(BaseModel):
-    status: str
-    admin_notes: str = ""
+    # PENTEST FIX (finding 12): closed vocabulary + bounded notes. (This second
+    # definition must stay in lockstep with the primary one above.)
+    status: MenuChangeStatus
+    admin_notes: str = Field(default="", max_length=2000)
 
 
 # ─── Misc ───
