@@ -229,19 +229,36 @@ class LocalProductUpdate(BaseModel):
     combo_items: str | None = Field(default=None, max_length=500)
 
 
-def _require_vitap_location(value: str) -> str:
-    """Delivery is VIT-AP campus only — reject anything outside it.
+# Delivery is a single fixed drop point: the VIT-AP main gate. Kept in one
+# constant because the UI, the order validators and the tests must all agree —
+# a second location is a door the campus does not actually hand food over at.
+VITAP_MAIN_GATE = "VIT-AP Main Gate"
 
-    The GPS "use my location" button and off-campus presets were removed from
-    the UI, but a hand-crafted request could still send "Guntur" etc. This is
-    the server-side guard: every order/payments path normalises through here.
+
+def _require_vitap_location(value: str) -> str:
+    """Delivery is the VIT-AP main gate only — normalise everything to it.
+
+    The GPS "use my location" button and free-text/off-campus inputs were
+    removed from the UI, but a hand-crafted request could still send "Guntur"
+    or any other address. This is the server-side guard every order/payment path
+    goes through: whatever the client sent is replaced by the one allowed drop
+    point, so the stored order can never name a place the shop won't deliver
+    to (and can never be used to smuggle free text into an order row).
     """
-    loc = (value or "").strip()
-    if not loc:
+    if value is None or not str(value).strip():
         raise ValueError("delivery_location is required")
-    if not re.search(r"vit[\s-]*ap", loc, re.I):
-        raise ValueError("Delivery is VIT-AP campus only — please choose a VIT-AP location.")
-    return loc
+    # Accept a spelled-out variant from an older client, but store the canonical
+    # spelling so group-by-location in the portals stays consistent.
+    loc = VITAP_MAIN_GATE
+    incoming = str(value).strip()
+    if re.search(r"vit[\s-]*ap", incoming, re.I) and re.search(r"main[\s-]*gate", incoming, re.I):
+        return loc
+    # Anything that is not the VIT-AP main gate (other VIT-AP blocks, "Guntur",
+    # free text) is rejected loudly rather than silently redirected, so a stale
+    # client shows a real error instead of an order that quietly moved pickup.
+    if re.search(r"vit[\s-]*ap", incoming, re.I):
+        raise ValueError(f"Delivery is {VITAP_MAIN_GATE} only — please choose the main gate.")
+    raise ValueError("Delivery is VIT-AP main gate only — please choose the main gate.")
 
 
 class LocalOrderStatusUpdate(BaseModel):
@@ -1399,15 +1416,18 @@ async def submit_payment_utr(data: LocalPaymentUtr, request: Request, current_us
 async def sms_incoming(data: LocalIncomingSms, request: Request, x_agent_key: Optional[str] = Header(None)):
     """Receive an inbound SMS reply and act on it.
 
-    Two flows are supported:
+    Two flows are supported, and they settle DIFFERENT things on purpose:
 
-    1. **Payment auto-confirm (bank SMS):** when the SMS contains a UTR that
-       matches a student-entered UTR on a pending payment, the order is marked
-       **Confirmed** automatically — the money is provably in the shop's bank.
-    2. **Manual confirm/reject (plain phone):** ``YES <token>`` /
-       ``NO <token>`` (case-insensitive) sets the order to **Confirmed** or
-       **Cancelled**. Tokens are printed in the order SMS, so the shopkeeper
-       can confirm from their plain phone — no app taps needed.
+    1. **Payment settle (bank SMS):** when the SMS contains a UTR that matches a
+       student-entered UTR on a pending payment, the order is marked
+       **Completed** automatically — the money is provably in the shop's bank
+       and the student has paid, so there is nothing left to prepare.
+    2. **Shop acceptance (plain phone):** ``YES <token>`` / ``NO <token>``
+       (case-insensitive) sets the order to **Confirmed** or **Cancelled**.
+       Tokens are printed in the order SMS, so the shopkeeper can accept from
+       their plain phone. This is an *acceptance*, not a payment: a shopkeeper
+       accepting an unpaid order must not mark it paid, which is why it stays
+       ``Confirmed`` and why a "Pending Payment" order is refused here.
     """
     text = (data.text or "").strip()
     phone = (data.phone or "").strip()
@@ -1532,7 +1552,8 @@ async def sms_match(data: LocalSmsMatch, request: Request, x_agent_key: Optional
 
     Requires one saved UTR claim at the shop identified by ``phone``, with
     both order and payment amounts equal to ``amount``. Marks it
-    **Confirmed**, and fires the shopkeeper's WhatsApp notification.
+    **Completed** (paid and settled), and fires the shopkeeper's WhatsApp
+    notification.
     """
     # Agent auth: fail closed. Only the Android agent (which holds the shared
     # key) may submit bank SMS — an unset key must NOT mean "everyone is the
@@ -1578,33 +1599,43 @@ async def _sms_match_core(data: LocalSmsMatch) -> dict:
 
         await _db(db.update_payment_status, payment["id"], "Success")
 
-        await _db(db.update_order_status, order["id"], "Confirmed")
+        # The order is settled the moment the bank evidence matches, so it goes
+        # straight to Completed — the student has paid and the platform has
+        # confirmed it, so there is no prep/ready state left to walk through.
+        await _db(db.update_order_status, order["id"], "Completed")
 
-        await _log_sms_inbound(order["id"], data.phone, f"UTR:{utr} Amt:{int(order.get('total', 0))}", "Auto-Confirmed")
+        await _log_sms_inbound(
+            order["id"],
+            data.phone,
+            f"UTR:{utr} Amt:{int(order.get('total', 0))} -> Completed (bank SMS match)",
+            "Auto-Confirmed",
+        )
 
-        # Student + admin notifications.
+        # Student + admin notifications. The order is COMPLETED (paid + settled),
+        # so the notification says so — a student told "Confirmed" on a finished
+        # order has no idea whether to wait or collect.
         try:
             await _db(
                 db.create_notification,
-                title="Auto-confirmed via bank UTR",
-                message=f"UTR {utr} — ₹{order.get('total')} credit confirmed. Token #{order.get('token')}.",
+                title="Payment verified — order confirmed",
+                message=f"UTR {utr} — ₹{order.get('total')} credit confirmed. Order #{order.get('token')} is complete.",
                 order_id=order["id"],
-                status="Confirmed",
+                status="Completed",
                 target_role="student",
             )
             await _db(
                 db.create_notification,
-                title="Auto-confirmed via bank UTR",
-                message=f"UTR {utr} — ₹{order.get('total')} credit confirmed. Token #{order.get('token')}.",
+                title="Payment verified — order confirmed",
+                message=f"UTR {utr} — ₹{order.get('total')} credit confirmed. Order #{order.get('token')} is complete.",
                 order_id=order["id"],
-                status="Confirmed",
+                status="Completed",
                 target_role="admin",
             )
         except Exception as e:
             logger.warning(f"sms/match notification error: {e}")
         _push_admin(
-            "Order auto-confirmed via bank UTR",
-            f"UTR {utr} — ₹{order.get('total')} credit confirmed. Token #{order.get('token')}.",
+            "Order paid & confirmed via bank UTR",
+            f"UTR {utr} — ₹{order.get('total')} credit confirmed. Token #{order.get('token')} completed.",
             tag="order-confirm",
         )
 
@@ -1622,7 +1653,7 @@ async def _sms_match_core(data: LocalSmsMatch) -> dict:
             "amount": int(amount),
             "shop": shop.get("id"),
             "order_id": order["id"],
-            "order_status": "Confirmed",
+            "order_status": "Completed",
         }
 
     except HTTPException:

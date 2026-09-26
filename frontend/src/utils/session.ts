@@ -16,6 +16,45 @@ export interface LocalSession {
 
 const SESSION_KEY = 'detomsite-session'
 
+/* Remembered checkout details.
+   These are the student's own phone number and the campus' single delivery
+   point — re-typing a 10-digit mobile on every visit is the single most
+   annoying part of ordering, and it is what made people leave orders unpaid
+   halfway. They live OUTSIDE the session key on purpose: clearLocalSession()
+   logs the student out (and empties the cart), but the next person at the same
+   kiosk should not have to re-enter a phone number to pay. Nothing sensitive
+   beyond a phone number and a fixed gate, and it never leaves localStorage. */
+const DEVICE_KEY = 'detomsite-checkout-profile'
+
+export interface CheckoutProfile {
+  phone?: string
+  location?: string
+}
+
+export function getCheckoutProfile(): CheckoutProfile {
+  try {
+    const raw = localStorage.getItem(DEVICE_KEY)
+    if (!raw) return {}
+    const parsed = JSON.parse(raw) as CheckoutProfile
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+export function rememberCheckout(patch: CheckoutProfile) {
+  try {
+    const next = { ...getCheckoutProfile(), ...patch }
+    // Only keep a plausible mobile / a non-empty location, so a bad value is
+    // never persisted and then echoed back into an order.
+    if (next.phone && !/^\+?[0-9]{10,15}$/.test(next.phone.replace(/\s/g, ''))) delete next.phone
+    if (next.location && next.location.length > 300) delete next.location
+    localStorage.setItem(DEVICE_KEY, JSON.stringify(next))
+  } catch {
+    /* private mode / quota — remembering is a nicety, never a blocker */
+  }
+}
+
 export function getLocalSession(): LocalSession | null {
   try {
     const rawSession = localStorage.getItem(SESSION_KEY)

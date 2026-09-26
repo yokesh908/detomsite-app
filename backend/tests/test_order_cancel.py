@@ -82,7 +82,7 @@ async def _place_order(client, shop_id, product_id, student_name, method="COD", 
         "items": [{"product_id": product_id, "quantity": 2}],
         "student_name": student_name,
         "student_phone": "+919876543210",
-        "delivery_location": "VIT-AP Hostel A Block 101",
+        "delivery_location": "VIT-AP Main Gate",
         "delivery_slot": "Evening",
         "payment_method": method,
     }, headers=headers)

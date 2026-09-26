@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, FormEvent } from 'react'
 import { BrowserRouter as Router, Routes, Route, Link, useNavigate } from 'react-router-dom'
+import ScanOrderPage from './ScanOrderPage'
 import api from './services/api'
 import { QRCodeSVG } from 'qrcode.react'
 
@@ -490,6 +491,7 @@ export default function App() {
         <Route path="/login" element={<Login />} />
         <Route path="/forgot-password" element={<ForgotPassword />} />
         <Route path="/mobile/*" element={<VendorMobileApp />} />
+        <Route path="/scan" element={<ScanOrderPage />} />
         <Route path="/*" element={<PortalHome />} />
       </Routes>
     </Router>
@@ -950,6 +952,9 @@ function VendorMobileApp() {
     catch { setErr('Failed to update order') }
   }
 
+  /* Payment is settled by the ADMIN now (verified against the bank SMS/UTR),
+     so the vendor does not confirm their own payment — see the backend note on
+     /payment-received. This button just explains where to go. */
   const confirmPayment = async (orderId: string) => {
     try { await api.post(`/vendor/orders/${orderId}/payment-received`); setMsg('Payment received — order completed! 🎉'); loadDashboard() }
     catch (err: any) { setErr(apiError(err, 'Failed to confirm payment')) }

@@ -15,7 +15,7 @@ async def test_order_is_bound_to_account_not_contact_details(client, monkeypatch
     response = await client.post("/api/v1/local/orders", headers={"Authorization": f"Bearer {token}"}, json={
         "shop_id": shop["id"], "items": [{"product_id": product["id"], "quantity": 1}],
         "student_name": "Different contact", "student_phone": "+919000000002",
-        "delivery_location": "VIT-AP Test location", "delivery_slot": "Evening", "payment_method": "UPI",
+        "delivery_location": "VIT-AP Main Gate", "delivery_slot": "Evening", "payment_method": "UPI",
     })
     assert response.status_code == 200
     order = response.json()
@@ -55,7 +55,7 @@ async def test_multi_shop_order_persists_owner_and_denies_other_account(client, 
         "shops": [{"shop_id": shop["id"], "items": [{"product_id": product["id"], "quantity": 1}]}],
         "student_name": "Same Name", "student_phone": "+919876543210",
         "student_id": str(other["id"]), "owner_user_id": str(other["id"]),
-        "delivery_location": "VIT-AP Test location", "payment_method": "UTR",
+        "delivery_location": "VIT-AP Main Gate", "payment_method": "UTR",
     })
     assert response.status_code == 200, response.text
     order_id = response.json()["id"]
@@ -100,7 +100,7 @@ async def test_two_tokens_keep_order_identity_separate(client, monkeypatch):
         response = await client.post("/api/v1/local/orders/multi", headers=headers, json={
             "shops": [{"shop_id": shop["id"], "items": [{"product_id": product["id"], "quantity": 1}]}],
             "student_name": name, "student_phone": phone,
-            "delivery_location": "VIT-AP Test location", "payment_method": "UTR",
+            "delivery_location": "VIT-AP Main Gate", "payment_method": "UTR",
         })
         assert response.status_code == 200, response.text
         order = response.json()

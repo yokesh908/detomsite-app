@@ -600,10 +600,23 @@ def update_order_status(order_id: str, data: VendorOrderStatusUpdate, current_ve
 
 @router.post("/orders/{order_id}/payment-received")
 def confirm_payment_received(order_id: str, current_vendor: dict = Depends(get_current_vendor)):
-    """Vendor confirms they received the UPI payment for an order.
+    """DEPRECATED for payment settlement — admin/bot only.
 
-    The money lands directly in the shop's UPI account, so the vendor is the
-    one who can instantly confirm it — no admin verification needed.
+    This used to let a shopkeeper mark their OWN order paid ("the money landed
+    in my UPI account, so I'll confirm it"). That is a payment-confirmation hole:
+    a vendor who wanted free food simply called this on a pending order and the
+    payment flipped to Success with the order Completed, with no bank evidence
+    at all — the vendor is the party being paid, so they are not a trustworthy
+    witness to their own payment.
+
+    Settlement now happens only through the platform:
+      * the admin's SMS/WhatsApp bot matching a saved UTR against a bank credit
+        SMS (``/sms/match``, agent-key gated), or
+      * an admin pressing Verify in the admin portal.
+
+    The route is kept (not deleted) so the shopkeeper app keeps a clear message
+    instead of a bare 404, and so a deployment that still calls it fails loudly
+    rather than silently marking orders paid.
     """
     order = db.get_order(order_id)
     if not order:
@@ -613,37 +626,13 @@ def confirm_payment_received(order_id: str, current_vendor: dict = Depends(get_c
     if not my_shop or order["shop_id"] != my_shop["id"]:
         raise HTTPException(status_code=403, detail="You don't own this order")
 
-    if order["status"] != "Pending Payment":
-        raise HTTPException(status_code=400, detail="Order is not awaiting payment confirmation")
-
-    payment = db.get_payment_by_order_id(order_id)
-    if not payment:
-        raise HTTPException(status_code=404, detail="Payment record not found")
-
-    updated = db.update_payment_status(payment["id"], "Success")
-    if not updated:
-        raise HTTPException(status_code=400, detail="Could not confirm payment")
-    # Payment received → the order is completed in one step (no prep/ready/done).
-    order_after = db.update_order_status(order_id, "Completed")
-    # Payment verified → auto-fire the shopkeeper's own WhatsApp notification
-    # reminder (confirmation SMS → admin's number → shop) so the shop has an
-    # auditable trail. Runs fire-and-forget on a daemon thread; never blocks
-    # the confirm response (this is a sync endpoint in a thread-pool worker,
-    # so there is no event loop to schedule a coroutine on).
-    try:
-        import threading
-        threading.Thread(
-            target=_notify_shop_whatsapp_verified,
-            args=(order_after or order,),
-            daemon=True,
-        ).start()
-    except Exception as e:
-        logger.warning(f"WhatsApp notify after payment-confirm error: {e}")
-    return {
-        "message": "Payment received — order completed!",
-        "payment": updated,
-        "order": order_after or db.get_order(order_id),
-    }
+    raise HTTPException(
+        status_code=403,
+        detail=(
+            "Only the admin can confirm a payment now — it is verified against the "
+            "bank SMS/UTR, not by the shop. Ask the admin to verify it in the admin page."
+        ),
+    )
 
 
 def _notify_shop_whatsapp_verified(order: dict | None) -> None:

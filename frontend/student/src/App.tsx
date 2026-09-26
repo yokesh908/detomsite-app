@@ -187,12 +187,14 @@ function buildUpiUri(pa: string, pn: string, am: number, tn: string) {
   const note = String(tn || '').trim().slice(0, 40)
   return `upi://pay?pa=${encodeURIComponent(payee)}&pn=${encodeURIComponent(name)}&am=${upiAmount(am).toFixed(2)}&cu=INR&tn=${encodeURIComponent(note)}`
 }
-/* Delivery is VIT-AP campus ONLY. Off-campus presets (Inavolu / Amaravati /
-   Guntur) were removed — students pick a VIT-AP spot. Free text is still
-   allowed for room numbers, but it must stay inside VIT-AP. */
-const QUICK_LOCATIONS = ['VIT-AP Hostel A Block', 'VIT-AP Hostel B Block', 'VIT-AP Academic Block', 'VIT-AP Food Court', 'VIT-AP Library']
+/* Delivery is the VIT-AP MAIN GATE only — a single fixed drop point, enforced
+   server-side as well. The old presets (Hostel A/B, Academic Block, Food Court,
+   Library) and free text are gone: one place means one place, so a student
+   cannot quietly pick a spot the shop does not deliver to. */
+const MAIN_GATE = 'VIT-AP Main Gate'
+const QUICK_LOCATIONS = [MAIN_GATE]
 function isVitApLocation(v: string) {
-  return /vit[\s-]*ap/i.test(v || '')
+  return /vit[\s-]*ap/i.test(v || '') && /main[\s-]*gate/i.test(v || '')
 }
 
   /* Indian mobile input — the user types their 10-digit number; the value is
@@ -1108,7 +1110,13 @@ function PaymentPage() {
   const navigate = useNavigate()
   const [ps, setPs] = useState<PaymentSettings | null>(null); const [shop, setShop] = useState<Shop | null>(null)
   const [method, setMethod] = useState<'qr' | 'cod'>('qr')
-  const [loc, setLoc] = useState('VIT-AP Hostel A Block'); const [slot, setSlot] = useState('Evening'); const [phone, setPhone] = useState('')
+  /* Remembered checkout details: the phone number and the (single) delivery gate
+     are restored from localStorage so a student who logs out and comes back does
+     not have to retype their number — the "get out and come back" problem. */
+  const [loc, setLoc] = useState(MAIN_GATE); const [slot, setSlot] = useState('Evening')
+  const [phone, setPhone] = useState(() => {
+    try { return String(JSON.parse(localStorage.getItem('detomsite_checkout') || '{}').phone || '') } catch { return '' }
+  })
   const [loading, setLoading] = useState(false); const [err, setErr] = useState('')
   const user = JSON.parse(localStorage.getItem('user_data') || '{}')
   const items = getCart(); const bill = billBreakdown(items)
@@ -1168,7 +1176,10 @@ function PaymentPage() {
   const submit = async (e: FormEvent) => {
     e.preventDefault(); setErr(''); if (!items.length) { setErr('Cart empty'); return }
     if (!isValidMobile(phone)) { setErr('Please enter a valid 10-digit mobile number'); return }
-    if (!isVitApLocation(loc)) { setErr('Delivery is VIT-AP campus only — please pick a VIT-AP location.'); return }
+    if (!isVitApLocation(loc)) { setErr('Delivery is VIT-AP main gate only.'); return }
+    /* Persist the number + gate BEFORE the network calls, so a failed order or
+       a dropped connection never costs the student their retyping it. */
+    try { localStorage.setItem('detomsite_checkout', JSON.stringify({ phone: String(phone).replace(/\s/g, ''), location: loc })) } catch {}
     if (shopLoaded && shop && !isShopOrderable(shop)) { setErr('This shop is currently closed — the vendor hasn\'t started accepting orders right now. Please try again later.'); return }
     if (!payOn) { setErr('This shop is not accepting any payments right now — the vendor has turned off UPI and Cash on Delivery. Please try again later.'); return }
     if (method === 'qr' && !upiAvailable) { setErr(upiOn ? 'This shop has not set up UPI payments yet — ask the vendor to add their UPI ID' : 'This shop has turned off UPI payments — choose Cash on Delivery instead'); return }

@@ -48,7 +48,7 @@ async def _student_with_order(client, monkeypatch, *, quantity=1, method="UPI", 
         "items": [{"product_id": product["id"], "quantity": quantity}],
         "student_name": "Sec Student",
         "student_phone": "+919000000123",
-        "delivery_location": "VIT-AP Test location",
+        "delivery_location": "VIT-AP Main Gate",
         "delivery_slot": "Evening",
         "payment_method": method,
     })
@@ -73,7 +73,7 @@ class TestQuantityIsBilled:
         res = await client.post("/api/v1/local/orders", headers={"Authorization": f"Bearer {token}"}, json={
             "shop_id": shop["id"],
             "items": [{"product_id": product["id"], "quantity": 100000}],
-            "delivery_location": "VIT-AP Test location", "delivery_slot": "Evening", "payment_method": "UPI",
+            "delivery_location": "VIT-AP Main Gate", "delivery_slot": "Evening", "payment_method": "UPI",
         })
         assert res.status_code == 422
 
@@ -87,7 +87,7 @@ class TestQuantityIsBilled:
         res = await client.post("/api/v1/local/orders/multi", headers={"Authorization": f"Bearer {token}"}, json={
             "shops": [{"shop_id": shop["id"], "items": [{"product_id": product["id"], "quantity": 0}]}],
             "student_name": "Multi Qty", "student_phone": "+919000000124",
-            "delivery_location": "VIT-AP Test location", "payment_method": "UTR",
+            "delivery_location": "VIT-AP Main Gate", "payment_method": "UTR",
         })
         assert res.status_code == 400
 
@@ -113,7 +113,7 @@ class TestRazorpayBypass:
         shop, product = _approved_shop_with_product(f"{_u('badm_v')}@example.com", "Bad Method Vendor")
         res = await client.post("/api/v1/local/orders", headers={"Authorization": f"Bearer {token}"}, json={
             "shop_id": shop["id"], "items": [{"product_id": product["id"], "quantity": 1}],
-            "delivery_location": "VIT-AP Test location", "delivery_slot": "Evening",
+            "delivery_location": "VIT-AP Main Gate", "delivery_slot": "Evening",
             "payment_method": "FREE_FOR_ME",
         })
         assert res.status_code == 422

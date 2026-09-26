@@ -4,16 +4,19 @@ import QRCode from 'qrcode'
 import api from '../services/api'
 import { LocalPaymentSettings, LocalParentOrder } from '../types/localApi'
 import { clearCart, getCartByShop, toPaymentGroup } from '../utils/cart'
-import { getLocalSession } from '../utils/session'
+import { getCheckoutProfile, getLocalSession, rememberCheckout } from '../utils/session'
 import { PhoneInput, isValidMobile } from '../components/PhoneInput'
 
 const UPI_LIMIT = 100000
 
 function upiAmount(am: number) { const n = Number(am); return Number.isFinite(n) ? Math.round(n * 100) / 100 : 0 }
 
-/* VIT-AP campus only — off-campus delivery areas removed. */
-const VITAP_LOCS = ['VIT-AP Hostel A Block', 'VIT-AP Hostel B Block', 'VIT-AP Academic Block', 'VIT-AP Food Court', 'VIT-AP Library']
-function isVitAp(v: string) { return /vit[\s-]*ap/i.test(v || '') }
+/* Delivery is a single fixed drop point: the VIT-AP main gate (enforced
+   server-side too). Kept as a list of one so the <select> shape stays intact
+   if a second gate is ever allowed. */
+const VITAP_LOCS = ['VIT-AP Main Gate']
+const DEFAULT_LOC = 'VIT-AP Main Gate'
+function isVitAp(v: string) { return /vit[\s-]*ap/i.test(v || '') && /main[\s-]*gate/i.test(v || '') }
 
 export function PaymentPage() {
   const navigate = useNavigate()
@@ -21,8 +24,18 @@ export function PaymentPage() {
   const [ps, setPs] = useState<LocalPaymentSettings | null>(null)
   const [method, setMethod] = useState<'manual' | 'cod'>('manual')
   const [slot, setSlot] = useState<'Afternoon' | 'Night'>('Afternoon')
-  const [loc, setLoc] = useState('VIT-AP Hostel A Block')
-  const [phone, setPhone] = useState(session?.phone || '')
+  /* Phone + location are restored from the remembered checkout profile so a
+     returning student does not retype their number after logging out and back
+     in — the "we get out and come back" case. The session wins when it has a
+     value, and the profile fills the gap. */
+  const [remembered] = useState(() => getCheckoutProfile())
+  const [loc, setLoc] = useState(() => {
+    const fromSession = session?.default_delivery_location || ''
+    if (fromSession && isVitAp(fromSession)) return DEFAULT_LOC
+    if (remembered.location && isVitAp(remembered.location)) return DEFAULT_LOC
+    return DEFAULT_LOC
+  })
+  const [phone, setPhone] = useState(() => session?.phone || remembered.phone || '')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const groups = getCartByShop()
@@ -66,7 +79,12 @@ export function PaymentPage() {
     setError('')
     if (!groups.length) { setError('Cart empty'); return }
     if (!isValidMobile(phone)) { setError('Please enter a valid 10-digit mobile number'); return }
-    if (!isVitAp(loc)) { setError('Delivery is VIT-AP campus only — please pick a VIT-AP location.'); return }
+    if (!isVitAp(loc)) { setError('Delivery is VIT-AP main gate only.'); return }
+
+    /* Remember the number + gate BEFORE the network calls: if the order or the
+       payment POST fails, the student still must not have to retype their
+       number on the retry (this was the "get out and come back" complaint). */
+    rememberCheckout({ phone: phone.replace(/\s/g, ''), location: loc })
 
     if (method === 'manual') {
       if (!manualReady) { setError('Manual payment not configured'); return }
