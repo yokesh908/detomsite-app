@@ -69,6 +69,13 @@ for d in items:
     name = d.get('name', '')
     if name.endswith('.vercel.app'):
         continue
+    if name == 'detomsite.in':
+        target = d.get('redirect')
+        code = d.get('redirectStatusCode')
+        if target:
+            print(f'  apex redirect: {name} -> {target} ({code or \"default\"})')
+        else:
+            print(f'  apex redirect: NONE on {name} - it will serve the app directly')
     if d.get('verified'):
         continue
     pending += 1
@@ -149,13 +156,15 @@ if [[ "$DO_DNS" == true ]]; then
   echo
   echo "──────── DNS still needed on ${TARGET_PROJECT} ────────"
   print_dns_requirements
-  cat <<'TIP'
+  cat <<TIP
   Add those TXT records at your registrar, then also point www at Vercel:
       www.detomsite.in   CNAME   cname.vercel-dns-017.com
       detomsite.in       A       76.76.21.21
   Vercel verifies within a minute or two. Re-run this script afterwards; the
-  hashes should match. (The apex currently 308-redirects to www — that redirect
-  has to be re-created on the target project in the dashboard: Project →
-  Settings → Domains → detomsite.in → Redirect.)
+  hashes should match. (The apex 308-redirect to www is NOT currently set: the
+  detomsite.in domains were removed from ${TARGET_PROJECT} on request, so nothing
+  points there. If they are ever re-added, set the redirect in the same request
+  that adds the domain - a PATCH that sets only the status clears it - with
+  redirect=www.detomsite.in (no scheme) plus redirectStatusCode=308.)
 TIP
 fi
