@@ -39,6 +39,11 @@ supabase/
 !backend/supabase/
 !backend/supabase/migrations/
 !backend/supabase/migrations/*.sql
+# The Python package below shares the directory name but is application code —
+# without these negations git (and therefore Render) never sees it, and every
+# Supabase-backed endpoint 500s with "No module named 'app.core.supabase'".
+!backend/app/core/supabase/
+!backend/app/core/supabase/*.py
 
 # Local dev database / logs
 detomsite_local.db
